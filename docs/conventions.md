@@ -49,6 +49,17 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 6. 注释只解释「为什么」，不解释「是什么」；涉及规格的地方标注 spec 编号。
 7. 环境变量：数据库路径用 `MACRO_DB_PATH`（默认 `data/china_economy.db`），不硬编码绝对路径。
 
+## 运行模式约定
+
+| 模式 | 命令 | 响应时间 | 用途 |
+|------|------|----------|------|
+| 生产 | `npm run build && npm start` | ~0.2s | **日常使用（默认）** |
+| 开发 | `npm run dev` | ~2s | 改代码时 |
+
+- dev 模式（Turbopack）每次导航现场编译，页面响应慢是固有开销，非性能问题。
+- 生产模式改代码后必须重新 build；数据更新（`npm run fetch`）无需重新 build，页面为 `force-dynamic` 实时读库。
+- 端口统一 **3300**（`start` 脚本已内置）。
+
 ## Git 约定
 
 - 分支：`feat/<spec编号>-<slug>`，如 `feat/001-macro-dashboard`。
