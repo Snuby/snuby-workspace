@@ -1,0 +1,53 @@
+# Snuby 工作台
+
+本地 Web 工作台（Next.js）。采用 SDD（规格驱动开发）开发，规格文档见 [`docs/`](docs/README.md)。
+
+## 快速开始
+
+```bash
+npm install          # 安装依赖
+npm run fetch        # 抓取宏观数据写入 data/china_economy.db (需 python venv)
+npm run dev -- -p 3300   # 启动开发服务器 http://localhost:3300
+```
+
+生产模式: `npm run build && npm start`。
+
+> 端口约定: 默认使用 **3300**，避开本机其他工作台应用占用的 3000/3100。
+
+## 目录结构
+
+```
+snuby/
+├── docs/                  # SDD 文档 (流程/规范/规格)
+│   ├── README.md          # SDD 工作流
+│   ├── conventions.md     # 编码与架构规范 (含术语表、数据口径)
+│   └── specs/001-workbench-mvp/
+├── scripts/
+│   └── fetch_data.py      # Python 数据管道 (akshare -> SQLite)
+├── data/                  # SQLite 数据库 (gitignore, 可由管道重建)
+└── src/
+    ├── domain/            # 领域类型与规则
+    ├── application/       # 用例编排
+    ├── infrastructure/    # SQLite 仓储
+    ├── components/        # UI 组件 (workbench / macro)
+    └── app/               # Next.js 路由 (页面 + API)
+```
+
+## 功能模块
+
+- **工作台首页** `/` — 模块卡片入口
+- **国家经济数据** `/macro` — 25 项中国宏观经济指标，按维度分组，近 36 期趋势图
+- **API** `GET /api/macro/indicators` — 指标数据 JSON（契约见 spec 001 design.md）
+- **设置** `/settings` — 数据管道信息
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `MACRO_DB_PATH` | `<项目根>/data/china_economy.db` | SQLite 数据库路径 |
+
+## 数据管道
+
+`scripts/fetch_data.py` 通过 akshare 抓取 25 项指标（国家统计局/央行/海关总署/东财口径），幂等写入 SQLite。单指标失败不影响其他。数据口径备忘见 `docs/conventions.md`。
+
+Python 环境: `/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python`（akshare 已安装）。

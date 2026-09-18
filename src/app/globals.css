@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* 设计 token — Snuby 工作台 (浅色) */
+@theme {
+  --color-ink: #2c2c2a;
+  --color-ink-muted: #5f5e5a;
+  --color-ink-faint: #888780;
+  --color-surface: #ffffff;
+  --color-page: #f6f5f0;
+  --color-line: rgba(0, 0, 0, 0.08);
+  --color-accent: #185fa5;
+  --color-accent-soft: #e6f1fb;
+  --color-accent-deep: #0c447c;
+}
+
+body {
+  @apply bg-page text-ink antialiased;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
