@@ -45,9 +45,12 @@ snuby/
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `MACRO_DB_PATH` | `<项目根>/data/china_economy.db` | SQLite 数据库路径 |
+| `FETCH_PYTHON_BIN` | 本地 venv python（含 akshare） | 抓取子进程使用的 Python 解释器 |
 
 ## 数据管道
 
 `scripts/fetch_data.py` 通过 akshare 抓取 25 项指标（国家统计局/央行/海关总署/东财口径），幂等写入 SQLite。单指标失败不影响其他。数据口径备忘见 `docs/conventions.md`。
+
+数据更新为**手动触发**: `/macro` 页「更新数据」按钮 → `POST /api/macro/fetch`（运行中重复请求返回 409）→ 轮询 `GET /api/macro/fetch/status` 显示逐指标进度（spec 003）。定时任务已于 spec 003 取消。
 
 Python 环境: `/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python`（akshare 已安装）。

@@ -38,6 +38,8 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 | 指标分组 | `IndicatorGroup` | 侧边栏/页面中的维度分组（总量增长、货币金融等） |
 | 数据观察 | Data Observation | 工作台一级菜单，聚合各类数据模块 |
 | 国家经济数据 | Macro Data | `数据观察` 下的模块，展示中国宏观经济指标 |
+| 抓取任务 | `FetchJobState` | 一次数据抓取的运行态（idle/running/done/error），存 Node 进程内存（spec 003） |
+| 更新数据 | Fetch Button | `/macro` 页手动触发抓取的按钮，运行中禁用防重复 |
 
 ## 代码风格
 

@@ -3,11 +3,11 @@
 import Topbar from "@/components/workbench/topbar";
 
 const ITEMS: Array<[string, string]> = [
-  ["数据更新频率", "每周一 09:00 自动抓取"],
+  ["数据更新方式", "手动触发（国家经济数据页「更新数据」按钮）"],
   ["数据存储", "SQLite（data/china_economy.db）"],
   ["数据来源", "国家统计局 · 中国人民银行 · 海关总署 · akshare"],
-  ["规格文档", "docs/specs/001-workbench-mvp"],
-  ["版本", "v0.1"],
+  ["规格文档", "docs/specs"],
+  ["版本", "v0.2"],
 ];
 
 export default function SettingsPage() {

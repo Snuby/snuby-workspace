@@ -2,6 +2,7 @@
 
 import Topbar from "@/components/workbench/topbar";
 import IndicatorCard from "@/components/macro/indicator-card";
+import FetchButton from "@/components/macro/fetch-button";
 import { getMacroDashboard } from "@/application/macro-service";
 import { MacroDataError } from "@/infrastructure/sqlite-macro-repository";
 
@@ -40,9 +41,12 @@ export default async function MacroPage() {
       <Topbar title="国家经济数据" crumb="数据观察" />
       <div className="flex-1 overflow-auto">
         <div className="mx-auto max-w-[1240px] px-6 py-7">
-          <div className="mb-6 text-[13px] text-ink-faint">
-            数据来源: 国家统计局 · 中国人民银行 · 海关总署 · 国家外汇管理局 | 数据更新:{" "}
-            {formatUpdatedAt(dashboard.updatedAt)} | 共 {total} 项指标
+          <div className="mb-6 flex items-end justify-between gap-4">
+            <div className="text-[13px] text-ink-faint">
+              数据来源: 国家统计局 · 中国人民银行 · 海关总署 · 国家外汇管理局 |
+              数据更新: {formatUpdatedAt(dashboard.updatedAt)} | 共 {total} 项指标
+            </div>
+            <FetchButton />
           </div>
 
           {dashboard.sections.map(({ group, indicators }) =>
@@ -63,7 +67,7 @@ export default async function MacroPage() {
           <footer className="mt-8 text-[12px] leading-relaxed text-ink-faint">
             说明: 同比看趋势、环比看拐点；M1-M2 剪刀差反映资金活化；PMI 50 为荣枯线；
             LPR 与 M2/社融反映政策取向，出口与贸易差额反映外需。数据由
-            scripts/fetch_data.py 定时抓取入库 (SQLite)，页面每次加载实时读取。
+            scripts/fetch_data.py 抓取入库 (SQLite)，点击右上角「更新数据」手动触发，页面实时读库。
           </footer>
         </div>
       </div>

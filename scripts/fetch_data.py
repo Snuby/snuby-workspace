@@ -5,6 +5,7 @@
 存储:   SQLite (<项目根>/data/china_economy.db -> series / meta 表)
 用法:   npm run fetch 或 直接 python3 scripts/fetch_data.py
 """
+import json
 import sqlite3
 import sys
 import traceback
@@ -271,19 +272,32 @@ def main():
          extract_house_price),
     ]
 
-    ok, fail = 0, 0
-    for key, name, unit, freq, dim, fn in tasks:
+    # Spec: 003-manual-fetch — 每个指标完成后输出机器可读进度行 (@@PROGRESS JSON)
+    ok = fail = empty = 0
+    failures = []
+    total = len(tasks)
+    for i, (key, name, unit, freq, dim, fn) in enumerate(tasks, 1):
         print(f"[{key}] {name}")
+        status = "ok"
         try:
             if put(conn, key, name, unit, freq, dim, fn()):
                 ok += 1
             else:
-                fail += 1
+                status = "empty"
+                empty += 1
         except Exception:
-            print(f"  [FAIL]\n{traceback.format_exc(limit=1)}")
+            status = "fail"
+            failures.append({"key": key, "name": name})
             fail += 1
+            print(f"  [FAIL]\n{traceback.format_exc(limit=1)}")
+        print("@@PROGRESS " + json.dumps(
+            {"done": i, "total": total, "key": key, "name": name, "status": status},
+            ensure_ascii=False), flush=True)
 
     print(f"\n完成: 成功 {ok}, 失败 {fail}")
+    print("@@DONE " + json.dumps(
+        {"ok": ok, "empty": empty, "fail": fail, "failures": failures},
+        ensure_ascii=False), flush=True)
     conn.close()
     return 0 if ok >= 5 else 1
 
