@@ -38,3 +38,4 @@ draft → reviewed → implementing → done
 | 编号 | 名称 | 状态 |
 |------|------|------|
 | 001 | workbench-mvp（工作台外壳 + 国家经济数据） | done |
+| 002 | macro-alerts（跟踪提醒） | draft |
