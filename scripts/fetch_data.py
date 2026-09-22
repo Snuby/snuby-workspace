@@ -188,9 +188,30 @@ def extract_unemployment():
 
 
 def extract_gdzctz():
-    df = ak.macro_china_gdzctz()
-    return [(str(r["月份"]).replace("年", "-").replace("月份", "").replace("月", ""),
-             clean(r.get("同比增长"))) for _, r in df.iterrows()]
+    """固定资产投资累计同比, 由东财「自年初累计」发布金额跨年推算。
+
+    2026-09-22 口径修正 (数据核验第三轮): 原直接取东财「同比增长」列, 实测该列
+    既不等于当月同比 (与金额列自算差最大 28pct) 也不等于累计同比 (平均差 7.2pct),
+    系累计值差分推算的噪声数据, 且与官方可比口径增速严重偏离
+    (2026-08: 东财列 −13.51% vs 国家统计局官方累计同比 −7.2%)。
+    官方 data.stats.gov.cn 本环境不可达 (403), 故改按发布金额推算累计同比:
+    金额与官方完全一致 (2026 年 1-8 月 293,092 亿元), 增速与官方存在
+    「可比口径」调整产生的系统性差异 (约 2~3pct), 已在指标描述中注明。
+    注意: 官方 1-2 月合并发布, 故每年 1 月无数据、2 月起有值。
+    """
+    df = ak.macro_china_gdzctz().sort_values("月份").reset_index(drop=True)
+    acc = {}
+    for _, r in df.iterrows():
+        y, m = str(r["月份"])[:4], str(r["月份"])[5:7]
+        v = clean(r.get("自年初累计"))
+        if v is not None:
+            acc[(y, m)] = v
+    out = []
+    for (y, m), v in sorted(acc.items()):
+        prev = acc.get((str(int(y) - 1), m))
+        if prev:
+            out.append((f"{y}-{m}", round((v / prev - 1) * 100, 2)))
+    return out
 
 
 def extract_house_price():
@@ -320,6 +341,17 @@ def extract_real_estate():
 
 # ---------- 主流程 ----------
 
+def migrate(conn):
+    """一次性口径迁移 (幂等)"""
+    # 2026-09-22: fdi_yoy (东财当月同比, 差分噪声数据) → fai_yoy (累计同比推算), 旧序列口径废弃
+    row = conn.execute("SELECT 1 FROM meta WHERE indicator='fdi_yoy'").fetchone()
+    if row:
+        conn.execute("DELETE FROM series WHERE indicator='fdi_yoy'")
+        conn.execute("DELETE FROM meta WHERE indicator='fdi_yoy'")
+        conn.commit()
+        print("  [MIGRATE] fdi_yoy → fai_yoy (口径修正: 东财当月同比噪声大, 改按金额推算累计同比), 旧序列已清除")
+
+
 def main():
     conn = sqlite3.connect(DB)
     conn.execute("""
@@ -332,6 +364,7 @@ def main():
             indicator TEXT PRIMARY KEY, name TEXT, unit TEXT, freq TEXT, dim TEXT,
             updated_at TEXT)
     """)
+    migrate(conn)
 
     tasks = [
         ("gdp_yoy", "GDP 同比增速", "%", "季度", "growth",
@@ -360,7 +393,7 @@ def main():
          extract_consumer_confidence),
         ("retail_yoy", "社会消费品零售总额同比", "%", "月度", "consumption",
          extract_retail),
-        ("fdi_yoy", "固定资产投资同比", "%", "月度", "consumption",
+        ("fai_yoy", "固定资产投资累计同比", "%", "月度", "consumption",
          extract_gdzctz),
         ("m1_yoy", "M1 同比", "%", "月度", "money",
          lambda: extract_money_supply()[0]),

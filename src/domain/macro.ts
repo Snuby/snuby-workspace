@@ -55,7 +55,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   boom_index: "企业景气指数（季度），>100 为景气区间",
   consumer_confidence: "消费者信心指数（月度），>100 偏乐观",
   retail_yoy: "社会消费品零售总额当月同比，消费端",
-  fdi_yoy: "固定资产投资当月同比，投资端",
+  fai_yoy: "固定资产投资累计同比（1-2月合并，按发布金额推算，与官方可比口径增速存在约 2~3pct 系统性差异；东财当月同比列经核验为差分噪声，2026-09 修正），投资端",
   m1_yoy: "狭义货币 M1 同比，资金活化程度与企业信心",
   m2_yoy: "广义货币 M2 同比，整体流动性",
   shrzgm: "社会融资规模增量（亿元），实体经济融资总量",

@@ -67,7 +67,7 @@ describe("describeIndicator", () => {
     const keys = [
       "gdp_yoy", "gdp_secondary", "gdp_tertiary", "fiscal_revenue_yoy", "ind_yoy",
       "cpi_yoy", "ppi_yoy", "pmi_mfg", "pmi_non_mfg", "unemployment", "boom_index",
-      "consumer_confidence", "retail_yoy", "fdi_yoy", "m1_yoy", "m2_yoy", "shrzgm",
+      "consumer_confidence", "retail_yoy", "fai_yoy", "m1_yoy", "m2_yoy", "shrzgm",
       "new_loans", "lpr_1y", "lpr_5y", "export_yoy", "import_yoy", "trade_balance",
       "fx_reserves", "real_estate_index", "house_price_yoy",
       "lpi_index", "pax_load_factor", "freight_rail_yoy", "freight_highway_yoy",
