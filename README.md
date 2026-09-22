@@ -19,7 +19,7 @@ npm test             # 测试套件 (97 例: domain 单测 + application 集成�
 ## 目录结构
 
 ```
-snuby/
+snuby-workspace/
 ├── docs/                  # SDD 文档 (流程/规范/规格)
 │   ├── README.md          # SDD 工作流
 │   ├── conventions.md     # 编码与架构规范 (含术语表、数据口径)

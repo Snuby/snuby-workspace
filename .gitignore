@@ -13,6 +13,9 @@ next-env.d.ts
 .DS_Store
 *.pem
 
+# workbuddy 本地工作数据 (记忆/日志等, 不入库)
+/.workbuddy/
+
 # debug
 npm-debug.log*
 
