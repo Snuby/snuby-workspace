@@ -5,8 +5,9 @@ import TrendChart from "@/components/macro/trend-chart";
 
 function formatValue(value: number, unit: string): string {
   const abs = Math.abs(value);
-  const num = abs >= 10000 ? value.toLocaleString("zh-CN") : String(value);
-  return `${num}${unit}`;
+  if (abs >= 10000) return `${value.toLocaleString("zh-CN")}${unit}`;
+  // 源数据可能带长尾小数 (如 4.67675378%), 收敛到 2 位并去掉尾零 (spec 008 验证时发现)
+  return `${String(Number(value.toFixed(2)))}${unit}`;
 }
 
 export default function IndicatorCard({ indicator }: { indicator: IndicatorView }) {
