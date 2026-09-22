@@ -5,9 +5,9 @@ import Topbar from "@/components/workbench/topbar";
 const ITEMS: Array<[string, string]> = [
   ["数据更新方式", "手动触发（宏观「更新数据」/ 行情「更新行情」按钮）"],
   ["数据存储", "SQLite（data/china_economy.db 宏观 · data/market.db 行情）"],
-  ["数据来源", "国家统计局 · 中国人民银行 · 海关总署 · akshare · Binance · 新浪财经 · 东方财富"],
+  ["数据来源", "国家统计局 · 中国人民银行 · 海关总署 · akshare · Binance · 新浪财经 · 东方财富 · 中指研究院"],
   ["规格文档", "docs/specs"],
-  ["版本", "v0.3"],
+  ["版本", "v0.4"],
 ];
 
 export default function SettingsPage() {
