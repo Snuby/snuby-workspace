@@ -22,3 +22,7 @@ npm-debug.log*
 # data (本地数据库不入库, 由 scripts/fetch_data.py 重建)
 /data/*.db
 /data/*.db-journal
+
+# python
+__pycache__/
+*.pyc
