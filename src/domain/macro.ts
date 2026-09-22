@@ -10,7 +10,8 @@ export type IndicatorGroupId =
   | "money"
   | "confidence"
   | "realestate"
-  | "risk";
+  | "risk"
+  | "industry";
 
 export type Indicator = {
   key: string;
@@ -33,6 +34,7 @@ export const INDICATOR_GROUPS: readonly IndicatorGroup[] = [
   { id: "confidence", label: "信心先行" },
   { id: "realestate", label: "房地产" },
   { id: "risk", label: "汇率与外储" },
+  { id: "industry", label: "行业景气与高频" },
 ] as const;
 
 /** 指标趋势图展示的期数窗口 */
@@ -66,6 +68,16 @@ export const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   fx_reserves: "官方外汇储备（亿美元），对外支付能力与汇率稳定器",
   real_estate_index: "房地产开发景气指数（国房景气指数），100 为景气分界",
   house_price_yoy: "70 城新建商品住宅价格指数同比均值，房价涨跌",
+  lpi_index: "中国物流业景气指数（月度），>50 为扩张",
+  pax_load_factor: "民航客座率（月度），出行与商务活动强度",
+  freight_rail_yoy: "铁路货运量同比（月度），大宗商品运输景气",
+  freight_highway_yoy: "公路货运量同比（月度），内贸物流活跃度",
+  elec_yoy: "全社会用电量同比（月度），经济活动实物量指标",
+  elec_secondary_yoy: "第二产业用电量同比（月度），工业开工强度",
+  elec_tertiary_yoy: "第三产业用电量同比（月度），服务业活跃度",
+  commodity_price_index: "大宗商品价格指数（日频取月末），上游原材料价格",
+  agri_price_index: "农产品批发价格指数（日频取月末），食品通胀先行",
+  construction_index: "建材指数（日频取月末），地产与基建链景气",
 };
 
 export function describeIndicator(key: string): string {

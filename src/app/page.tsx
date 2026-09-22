@@ -3,6 +3,7 @@
 import Link from "next/link";
 import Topbar from "@/components/workbench/topbar";
 import { getAlertsDigest, type AlertSummary, type AlertView } from "@/application/alert-service";
+import { getIndustryDashboard } from "@/application/macro-service";
 
 export const dynamic = "force-dynamic";
 
@@ -66,6 +67,18 @@ export default async function HomePage() {
     digest = null; // DB 缺失时卡片降级提示, 不影响首页
   }
 
+  let industry: { count: number; latestMonth: string | null } | null = null;
+  try {
+    const dashboard = await getIndustryDashboard();
+    const items = dashboard.sections.flatMap((s) => s.indicators);
+    industry = {
+      count: items.length,
+      latestMonth: items.map((i) => i.latest?.date ?? "").filter(Boolean).sort().pop() ?? null,
+    };
+  } catch {
+    industry = null;
+  }
+
   return (
     <>
       <Topbar title="工作台" />
@@ -96,21 +109,31 @@ export default async function HomePage() {
               </span>
             </Link>
 
-            <div className="rounded-xl border border-line bg-surface p-5 opacity-60">
+            <Link
+              href="/industry"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
               <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-[#E1F5EE]">
                 <svg viewBox="0 0 24 24" fill="none" stroke="#0F6E56" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                  <rect x="3" y="4" width="18" height="16" rx="2" />
-                  <path d="M3 10h18" />
+                  <path d="M3 21h18" />
+                  <path d="M4 21V9l5 3V9l5 3V7l6 4v10" />
                 </svg>
               </div>
               <div className="mb-1.5 text-[14.5px] font-semibold">行业观察</div>
-              <p className="text-[12.5px] leading-relaxed text-ink-muted">
-                行业景气度与细分赛道数据（规划中）。
-              </p>
-              <span className="mt-3 inline-block rounded-md bg-black/5 px-2 py-0.5 text-[11px] text-ink-faint">
-                敬请期待
+              {industry ? (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  {industry.count} 项行业与高频指标：用电量、货运量、客座率、物流景气、大宗商品与建材价格
+                  {industry.latestMonth ? `，最新期 ${industry.latestMonth}` : ""}。
+                </p>
+              ) : (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  数据不可用，请先在「国家经济数据」页更新数据。
+                </p>
+              )}
+              <span className="mt-3 inline-block rounded-md bg-[#E1F5EE] px-2 py-0.5 text-[11px] text-[#0F6E56]">
+                进入模块
               </span>
-            </div>
+            </Link>
 
             <AlertsCard summary={digest?.summary ?? null} topItems={digest?.topItems ?? []} />
           </div>

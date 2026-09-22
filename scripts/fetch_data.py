@@ -70,6 +70,24 @@ def quarter_to_date(s):
     return f"{y}-{m}" if m else None
 
 
+def ym_to_date(s):
+    """'2026.8' / '2003.12' -> 'YYYY-MM' (统计局/新浪口径, 月份补零)"""
+    s = str(s).strip()
+    if "." not in s:
+        return month_to_date(s)
+    y, m = s.split(".", 1)
+    return f"{y}-{int(m):02d}"
+
+
+def month_end_sample(rows):
+    """日频序列月度化: 每月取最后一个观测值 (spec 005 决策 1)"""
+    by_month = {}
+    for d, v in rows:
+        if d and v is not None:
+            by_month[d[:7]] = (d, v)  # 源按日期升序, 后者覆盖前者
+    return [(d, v) for d, v in by_month.values()]
+
+
 def extract_report(func_name):
     """东方财富报告式接口: 商品/日期/今值/预测值/前值"""
     df = getattr(ak, func_name)()
@@ -235,6 +253,48 @@ def extract_consumer_confidence():
     return sorted(rows, key=lambda t: t[0])
 
 
+# Spec: 005-industry-watch — 行业与高频实物量指标
+
+def extract_lpi():
+    """物流景气指数 (月度)"""
+    df = ak.macro_china_lpi_index()
+    rows = [(str(r["日期"])[:10], clean(r.get("最新值"))) for _, r in df.iterrows()]
+    return sorted([(d[:7], v) for d, v in rows if v is not None], key=lambda t: t[0])
+
+
+def extract_pax_load_factor():
+    """民航客座率 (月度, %)"""
+    df = ak.macro_china_passenger_load_factor()
+    rows = [(ym_to_date(r["统计时间"]), clean(r.get("客座率"))) for _, r in df.iterrows()]
+    return sorted([r for r in rows if r[1] is not None], key=lambda t: t[0])
+
+
+def extract_freight(mode):
+    """货运量同比 (月度, 按运输方式: 铁路/公路)"""
+    df = ak.macro_china_society_traffic_volume()
+    rows = [(ym_to_date(r["统计时间"]), clean(r.get("货运量同比增长")))
+            for _, r in df.iterrows() if str(r.get("统计对象")).strip() == mode]
+    return sorted([r for r in rows if r[1] is not None], key=lambda t: t[0])
+
+
+def extract_electricity():
+    """用电量同比 (月度): (全社会, 第二产业, 第三产业)"""
+    df = ak.macro_china_society_electricity()
+
+    def pick(col):
+        rows = [(ym_to_date(r["统计时间"]), clean(r.get(col))) for _, r in df.iterrows()]
+        return sorted([r for r in rows if r[1] is not None], key=lambda t: t[0])
+
+    return pick("全社会用电量同比"), pick("第二产业用电量同比"), pick("第三产业用电量同比")
+
+
+def extract_daily_month_end(func_name):
+    """日频价格/景气指数 -> 月末采样 (spec 005 决策 1)"""
+    df = getattr(ak, func_name)()
+    rows = [(str(r["日期"])[:10], clean(r.get("最新值"))) for _, r in df.iterrows()]
+    return sorted(month_end_sample(rows), key=lambda t: t[0])
+
+
 def extract_retail():
     df = ak.macro_china_consumer_goods_retail()
     return [(str(r["月份"]).replace("年", "-").replace("月份", "").replace("月", ""),
@@ -319,6 +379,26 @@ def main():
          extract_real_estate),
         ("house_price_yoy", "70城新房价格指数同比(均值)", "%", "月度", "realestate",
          extract_house_price),
+        ("lpi_index", "物流景气指数", "", "月度", "industry",
+         extract_lpi),
+        ("pax_load_factor", "民航客座率", "%", "月度", "industry",
+         extract_pax_load_factor),
+        ("freight_rail_yoy", "铁路货运量同比", "%", "月度", "industry",
+         lambda: extract_freight("铁路")),
+        ("freight_highway_yoy", "公路货运量同比", "%", "月度", "industry",
+         lambda: extract_freight("公路")),
+        ("elec_yoy", "全社会用电量同比", "%", "月度", "industry",
+         lambda: extract_electricity()[0]),
+        ("elec_secondary_yoy", "第二产业用电量同比", "%", "月度", "industry",
+         lambda: extract_electricity()[1]),
+        ("elec_tertiary_yoy", "第三产业用电量同比", "%", "月度", "industry",
+         lambda: extract_electricity()[2]),
+        ("commodity_price_index", "大宗商品价格指数", "", "月度", "industry",
+         lambda: extract_daily_month_end("macro_china_commodity_price_index")),
+        ("agri_price_index", "农产品批发价格指数", "", "月度", "industry",
+         lambda: extract_daily_month_end("macro_china_agricultural_product")),
+        ("construction_index", "建材指数", "", "月度", "industry",
+         lambda: extract_daily_month_end("macro_china_construction_index")),
     ]
 
     # Spec: 003-manual-fetch — 每个指标完成后输出机器可读进度行 (@@PROGRESS JSON)

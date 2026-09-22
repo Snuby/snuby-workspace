@@ -57,3 +57,16 @@ export async function getMacroDashboard(): Promise<MacroDashboard> {
 
   return { updatedAt, groups: INDICATOR_GROUPS.slice(), sections, staleCount };
 }
+
+/** 行业观察看板 (spec 005): 仅取 industry 分组的指标视图 */
+export async function getIndustryDashboard(): Promise<MacroDashboard> {
+  const dashboard = await getMacroDashboard();
+  const sections = dashboard.sections.filter((s) => s.group.id === "industry");
+  const indicators = sections.flatMap((s) => s.indicators);
+  return {
+    updatedAt: dashboard.updatedAt,
+    groups: sections.map((s) => s.group),
+    sections,
+    staleCount: indicators.filter((i) => i.lag !== null).length,
+  };
+}

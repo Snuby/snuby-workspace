@@ -37,6 +37,7 @@ snuby/
 
 - **工作台首页** `/` — 模块卡片入口（含跟踪提醒摘要）
 - **国家经济数据** `/macro` — 26 项中国宏观经济指标，按维度分组，近 36 期趋势图，手动更新按钮（滞后项有标注）
+- **行业观察** `/industry` — 10 项行业与高频指标（用电量/货运量/客座率/物流景气/大宗商品与建材价格），日频月末采样（spec 005）
 - **跟踪提醒** `/alerts` — 8 条预置规则实时评估，触发中/正常/无数据分组展示（spec 002）
 - **API** `GET /api/macro/indicators` — 指标数据 JSON（契约见 spec 001 design.md）
 - **API** `GET /api/macro/alerts` — 告警评估结果 JSON（契约见 spec 002 design.md）
@@ -51,7 +52,7 @@ snuby/
 
 ## 数据管道
 
-`scripts/fetch_data.py` 通过 akshare 抓取 26 项指标（国家统计局/央行/海关总署/东财口径），幂等写入 SQLite。单指标失败不影响其他。数据口径备忘见 `docs/conventions.md`。
+`scripts/fetch_data.py` 通过 akshare 抓取 36 项指标（26 宏观 + 10 行业）（国家统计局/央行/海关总署/东财口径），幂等写入 SQLite。单指标失败不影响其他。数据口径备忘见 `docs/conventions.md`。
 
 数据源优先使用国家统计局官方接口；确认无免费替代源的指标（社融增量/企业景气/国房景气）在界面标注滞后月数（spec 004）。
 
