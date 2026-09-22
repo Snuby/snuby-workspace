@@ -1,10 +1,12 @@
 // Spec: 001-workbench-mvp — 工作台首页 (US-1 AC3); 卡片摘要见 spec 002 US-3
-// Spec: 008-macro-hierarchy — 三个数据模块收敛到「宏观经济」, 卡片改为入口 + 计数与实际口径对齐 (US-3 AC3)
+// Spec: 008-macro-hierarchy — 三个数据模块收敛到「宏观经济」, 卡片计数由用例层实际范围推导 (US-3 AC3)
+// Spec: 009-market-quotes — 新增「资产行情」卡片
 
 import Link from "next/link";
 import Topbar from "@/components/workbench/topbar";
 import { getAlertsDigest, type AlertSummary, type AlertView } from "@/application/alert-service";
 import { getIndustryDashboard, getNationalDashboard } from "@/application/macro-service";
+import { getMarketOverview } from "@/application/market-service";
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +75,7 @@ export default async function HomePage() {
     digest = null; // DB 缺失时卡片降级提示, 不影响首页
   }
 
-  // 两张数据卡片的计数由用例层实际范围推导, 不硬编码 (spec 008 US-3 AC3)
+  // 数据卡片的计数由用例层实际范围推导, 不硬编码 (spec 008 US-3 AC3)
   let national: { count: number; staleCount: number } | null = null;
   try {
     const dashboard = await getNationalDashboard();
@@ -97,6 +99,23 @@ export default async function HomePage() {
     industry = null;
   }
 
+  let market: { count: number; latestDate: string | null; staleCount: number } | null = null;
+  try {
+    const overview = await getMarketOverview();
+    market = {
+      count: overview.assets.length,
+      latestDate:
+        overview.assets
+          .map((a) => a.lastDate ?? "")
+          .filter(Boolean)
+          .sort()
+          .pop() ?? null,
+      staleCount: overview.assets.filter((a) => a.stale).length,
+    };
+  } catch {
+    market = null;
+  }
+
   return (
     <>
       <Topbar title="工作台" />
@@ -104,7 +123,9 @@ export default async function HomePage() {
         <div className="mx-auto max-w-4xl px-8 py-10">
           <h1 className="text-[21px] font-semibold">下午好，苏伟杰</h1>
           <p className="mt-1.5 mb-7 text-[13px] text-ink-faint">
-            左侧「宏观经济」下有三个子模块（国家经济数据 / 行业观察 / 跟踪提醒），也可以从下方卡片直接进入。
+            左侧两个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
+            跟踪提醒）与 <b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比），
+            也可以从下方卡片直接进入。
           </p>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
             <Link
@@ -175,6 +196,43 @@ export default async function HomePage() {
             </Link>
 
             <AlertsCard summary={digest?.summary ?? null} topItems={digest?.topItems ?? []} />
+
+            <Link
+              href="/market"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#EEEDFE]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#534AB7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M6 3v3" />
+                    <path d="M6 18v3" />
+                    <rect x="4" y="6" width="4" height="12" rx="1" />
+                    <path d="M17 2v5" />
+                    <path d="M17 17v5" />
+                    <rect x="15" y="7" width="4" height="10" rx="1" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  资产行情
+                </span>
+              </div>
+              <div className="mb-1.5 text-[14.5px] font-semibold">综合对比</div>
+              {market ? (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  黄金、白银、加密货币、美股、中国香港股与 A 股指数、京沪房价共{" "}
+                  <b className="font-medium text-ink">{market.count}</b> 项资产，支持日/周/月/年 K 线，
+                  并归一化到同一基准比较相对走势。
+                  {market.latestDate ? `数据最新 ${market.latestDate}。` : ""}
+                </p>
+              ) : (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  数据不可用，请点击「更新行情」抓取。
+                </p>
+              )}
+              <span className="mt-3 inline-block rounded-md bg-[#EEEDFE] px-2 py-0.5 text-[11px] text-[#534AB7]">
+                进入模块
+              </span>
+            </Link>
           </div>
         </div>
       </div>

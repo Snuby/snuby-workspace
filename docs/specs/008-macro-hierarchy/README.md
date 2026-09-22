@@ -31,3 +31,7 @@
 - `src/application/macro-service.ts` — 新增 `getNationalDashboard()`
 - 三个子页迁入路由组并移除各自重复的 Topbar / 滚动容器
 - `src/application/macro-service.test.ts` — 新增分层断言
+
+## 变更记录
+
+- 2026-09-22（spec 009 引入）: `SectionTabs` 组件参数化 —— 新增可选 `tabs` prop（默认值保持本 spec 的宏观三页行为不变），供「资产行情」路由组复用同一二级菜单外壳；本 spec 范围内的行为无任何变化。

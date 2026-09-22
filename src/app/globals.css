@@ -11,6 +11,11 @@
   --color-accent: #185fa5;
   --color-accent-soft: #e6f1fb;
   --color-accent-deep: #0c447c;
+  /* 涨跌色 — 遵循中国习惯「红涨绿跌」(spec 009 决策 9), 与合并图的资产分类色语义分离 */
+  --color-up: #c0392b;
+  --color-down: #0f7b4f;
+  --color-up-soft: rgba(192, 57, 43, 0.1);
+  --color-down-soft: rgba(15, 123, 79, 0.1);
 }
 
 body {

@@ -33,14 +33,28 @@ const ICONS = {
       <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" />
     </svg>
   ),
+  market: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
+      <path d="M6 3v3" />
+      <path d="M6 18v3" />
+      <rect x="4" y="6" width="4" height="12" rx="1" />
+      <path d="M17 2v5" />
+      <path d="M17 17v5" />
+      <rect x="15" y="7" width="4" height="10" rx="1" />
+    </svg>
+  ),
 };
 
 /** 「宏观经济」一级菜单对应的全部子页路径 (即二级菜单项, 见 section-tabs.tsx) */
 const MACRO_PATHS: readonly string[] = ["/macro", "/industry", "/alerts"];
 
+/** 「资产行情」一级菜单对应的全部子页路径 (spec 009) */
+const MARKET_PATHS: readonly string[] = ["/market", "/metal", "/crypto", "/equity", "/realestate"];
+
 const NAV: NavLeaf[] = [
   { href: "/", label: "工作台", icon: ICONS.home },
   { href: "/macro", label: "宏观经济", icon: ICONS.chart, match: MACRO_PATHS },
+  { href: "/market", label: "资产行情", icon: ICONS.market, match: MARKET_PATHS },
   { href: "/settings", label: "设置", icon: ICONS.gear },
 ];
 

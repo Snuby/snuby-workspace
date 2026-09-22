@@ -8,7 +8,8 @@ export type FetchProgress = {
   total: number;
   key: string;
   name: string;
-  status: "ok" | "empty" | "fail";
+  /** skip: 源数据未变化, 幂等短路 (spec 009 增量策略) */
+  status: "ok" | "empty" | "fail" | "skip";
 };
 
 export type FetchSummary = {
@@ -16,6 +17,8 @@ export type FetchSummary = {
   empty: number;
   fail: number;
   failures: Array<{ key: string; name: string }>;
+  /** spec 009: 命中增量短路而未写入的资产数 */
+  skip?: number;
 };
 
 export type FetchRunnerHandlers = {
@@ -28,8 +31,12 @@ const PYTHON_BIN =
   process.env.FETCH_PYTHON_BIN ??
   "/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python";
 
-export function runFetchScript(projectRoot: string, handlers: FetchRunnerHandlers): void {
-  const child = spawn(PYTHON_BIN, ["-u", path.join("scripts", "fetch_data.py")], {
+export function runFetchScript(
+  projectRoot: string,
+  handlers: FetchRunnerHandlers,
+  scriptPath: string = path.join("scripts", "fetch_data.py"),
+): void {
+  const child = spawn(PYTHON_BIN, ["-u", scriptPath], {
     cwd: projectRoot,
   });
 

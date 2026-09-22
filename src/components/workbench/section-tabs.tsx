@@ -1,25 +1,33 @@
 "use client";
 
-// Spec: 008-macro-hierarchy — 「宏观经济」下的顶部二级菜单 (US-2)
-// 纯导航, 不发数据请求; 右侧 action 插槽由布局传入 (design 决策 3/4)
+// Spec: 008-macro-hierarchy — 顶部二级菜单 (US-2): 纯导航, 不发数据请求; 右侧 action 插槽由布局传入
+// Spec: 009-market-quotes — 参数化 tabs 以复用; 不传时保持 spec 008 的「宏观经济」默认行为
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-/** 二级菜单项: 路径互不为前缀, 故用精确相等判定选中 (design 决策 3) */
-const SECTION_TABS: ReadonlyArray<{ href: string; label: string }> = [
+export type SectionTab = { href: string; label: string };
+
+/** 「宏观经济」的二级菜单项 (缺省值, 见 spec 008 design 决策 3) */
+const MACRO_TABS: readonly SectionTab[] = [
   { href: "/macro", label: "国家经济数据" },
   { href: "/industry", label: "行业观察" },
   { href: "/alerts", label: "跟踪提醒" },
 ];
 
-export default function SectionTabs({ action }: { action?: React.ReactNode }) {
+export default function SectionTabs({
+  tabs = MACRO_TABS,
+  action,
+}: {
+  tabs?: readonly SectionTab[];
+  action?: React.ReactNode;
+}) {
   const pathname = usePathname();
 
   return (
     <div className="flex h-[46px] shrink-0 items-stretch justify-between gap-4 border-b border-line bg-surface px-6">
       <nav className="flex items-stretch gap-1">
-        {SECTION_TABS.map((tab) => {
+        {tabs.map((tab) => {
           const active = pathname === tab.href;
           return (
             <Link
@@ -28,9 +36,7 @@ export default function SectionTabs({ action }: { action?: React.ReactNode }) {
               aria-current={active ? "page" : undefined}
               className={[
                 "relative flex items-center px-2.5 text-[13.5px] transition-colors",
-                active
-                  ? "font-semibold text-accent-deep"
-                  : "text-ink-muted hover:text-ink",
+                active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
               ].join(" ")}
             >
               {tab.label}
