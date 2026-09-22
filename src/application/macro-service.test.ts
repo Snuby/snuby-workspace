@@ -1,4 +1,5 @@
 // Spec: 007-integration-tests — 用例层集成测试 (真实 SQLite fixture, 覆盖 repository → service 链路)
+// Spec: 008-macro-hierarchy — 追加可见范围分层断言 (US-3)
 
 import { strict as assert } from "node:assert";
 import { after, before, describe, it } from "node:test";
@@ -7,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { getMacroDashboard, getIndustryDashboard } from "./macro-service";
+import { getMacroDashboard, getNationalDashboard, getIndustryDashboard } from "./macro-service";
 import { getAlertsReport } from "./alert-service";
 
 const FIXTURE_DB = path.join(os.tmpdir(), `snuby-test-${process.pid}.db`);
@@ -67,6 +68,9 @@ const FIXTURES: Fixture[] = [
   // 行业指标, 50 期用于验证趋势窗口裁剪
   { key: "elec_yoy", name: "全社会用电量同比", unit: "%", freq: "月度", dim: "industry",
     rows: series(50, 3.0, 0.05, 1) },
+  // 行业指标 2: 数据源滞后 (月度滞后 5 个月 > 容忍度 3), 用于验证 staleCount 按可见范围统计 (spec 008 US-3 AC4)
+  { key: "freight_rail_yoy", name: "铁路货运量同比", unit: "%", freq: "月度", dim: "industry",
+    rows: series(4, 2.0, 0.1, 5) },
 ];
 
 function writeFixture(): void {
@@ -121,9 +125,9 @@ describe("getMacroDashboard — SQLite → 视图模型", () => {
     assert.equal(pmi?.latest?.date, monthOffset(1));
   });
 
-  it("staleCount 只统计超容忍度的指标 (gdp_yoy 季度滞后 6 个月)", async () => {
+  it("staleCount 只统计超容忍度的指标 (gdp_yoy 季度滞后 6 个月, freight_rail_yoy 月度滞后 5 个月)", async () => {
     const dashboard = await getMacroDashboard();
-    assert.equal(dashboard.staleCount, 1);
+    assert.equal(dashboard.staleCount, 2, "全量口径含行业指标");
     const gdp = dashboard.sections.flatMap((s) => s.indicators).find((i) => i.key === "gdp_yoy");
     assert.equal(gdp?.lag, 6);
     const cpi = dashboard.sections.flatMap((s) => s.indicators).find((i) => i.key === "cpi_yoy");
@@ -143,17 +147,67 @@ describe("getMacroDashboard — SQLite → 视图模型", () => {
   });
 });
 
+describe("getNationalDashboard — 可见范围收敛 (spec 008 US-3)", () => {
+  it("排除 industry 分组 —— 行业指标不再重复出现在国家经济数据页", async () => {
+    const dashboard = await getNationalDashboard();
+    assert.ok(dashboard.groups.length > 0);
+    assert.ok(
+      dashboard.groups.every((g) => g.id !== "industry"),
+      "groups 不应含 industry",
+    );
+    assert.ok(
+      dashboard.sections.every((s) => s.group.id !== "industry"),
+      "sections 不应含 industry 区段",
+    );
+  });
+
+  it("国家经济数据 + 行业观察 = 全量, 且两者指标无交集", async () => {
+    const [all, national, industry] = await Promise.all([
+      getMacroDashboard(),
+      getNationalDashboard(),
+      getIndustryDashboard(),
+    ]);
+    const keys = (d: typeof all) => d.sections.flatMap((s) => s.indicators).map((i) => i.key);
+    const allKeys = keys(all).sort();
+    const nationalKeys = keys(national);
+    const industryKeys = keys(industry);
+
+    assert.equal(nationalKeys.length + industryKeys.length, allKeys.length);
+    assert.deepEqual([...nationalKeys, ...industryKeys].sort(), allKeys);
+    const overlap = nationalKeys.filter((k) => industryKeys.includes(k));
+    assert.deepEqual(overlap, [], "同一指标不得两页重复渲染");
+  });
+
+  it("分组顺序仍按 INDICATOR_GROUPS 定义, 不因过滤而错乱", async () => {
+    const [all, national] = await Promise.all([getMacroDashboard(), getNationalDashboard()]);
+    const expected = all.groups.filter((g) => g.id !== "industry").map((g) => g.id);
+    assert.deepEqual(national.groups.map((g) => g.id), expected);
+    assert.equal(national.sections.length, national.groups.length);
+  });
+
+  it("staleCount 只计可见指标的滞后 (行业那项滞后不计入国家经济数据)", async () => {
+    const [all, national, industry] = await Promise.all([
+      getMacroDashboard(),
+      getNationalDashboard(),
+      getIndustryDashboard(),
+    ]);
+    assert.equal(all.staleCount, 2);
+    assert.equal(national.staleCount, 1, "仅 gdp_yoy 在可见范围内滞后");
+    assert.equal(industry.staleCount, 1, "仅 freight_rail_yoy 在行业范围内滞后");
+  });
+});
+
 describe("getIndustryDashboard — 分组过滤", () => {
   it("只返回 industry 分组", async () => {
     const dashboard = await getIndustryDashboard();
     assert.equal(dashboard.sections.length, 1);
     assert.equal(dashboard.sections[0].group.id, "industry");
-    assert.equal(dashboard.sections[0].indicators.length, 1);
+    assert.equal(dashboard.sections[0].indicators.length, 2);
   });
 
-  it("staleCount 按行业指标自身计算 (无滞后项)", async () => {
+  it("staleCount 按行业指标自身计算 (freight_rail_yoy 滞后 5 个月)", async () => {
     const dashboard = await getIndustryDashboard();
-    assert.equal(dashboard.staleCount, 0);
+    assert.equal(dashboard.staleCount, 1);
   });
 });
 

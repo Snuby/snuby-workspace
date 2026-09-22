@@ -47,3 +47,4 @@ draft → reviewed → implementing → done
 | 005 | industry-watch（行业观察） | done |
 | 006 | testing（领域层单测体系） | done |
 | 007 | integration-tests（用例层集成测试） | done |
+| 008 | macro-hierarchy（宏观经济层级收敛） | done |

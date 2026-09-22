@@ -11,7 +11,7 @@
 | 样式 | Tailwind CSS v4 | 不写自定义 CSS 文件（globals.css 仅放 token） |
 | 图表 | ECharts 5 | 按需引入 `echarts/core` + 用到的图表/组件 |
 | 数据 | SQLite | 物理文件 `data/china_economy.db`，Python 管道写入，Node `node:sqlite` 只读 |
-| 数据管道 | Python + akshare (`scripts/fetch_data.py`) | 定时任务每周一 09:00 执行 |
+| 数据管道 | Python + akshare (`scripts/fetch_data.py`) | **手动触发**（「宏观经济」头部按钮 / `npm run fetch`），无定时任务 |
 
 ## 分层架构（整洁架构）
 
@@ -35,13 +35,34 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 |------|------|------|
 | 指标 | `Indicator` | 一个可观测的宏观经济序列 |
 | 数据点 | `SeriesPoint` | `{ date, value }`，date 为 `YYYY-MM` / `YYYY-MM-DD` |
-| 指标分组 | `IndicatorGroup` | 侧边栏/页面中的维度分组（总量增长、货币金融等） |
-| 数据观察 | Data Observation | 工作台一级菜单，聚合各类数据模块 |
-| 国家经济数据 | Macro Data | `数据观察` 下的模块，展示中国宏观经济指标 |
+| 指标分组 | `IndicatorGroup` | 页面中的维度分组（总量增长、货币金融、行业景气与高频等） |
+| 宏观经济 | Macro Economy | **工作台一级菜单**，聚合下面三个子模块（spec 008） |
+| 二级菜单 | `SectionTabs` | 「宏观经济」下切换子模块的顶部导航条（`src/components/workbench/section-tabs.tsx`） |
+| 国家经济数据 | Macro Data | 「宏观经济」二级菜单项，`/macro`，8 个宏观分组共 26 项指标 |
+| 行业观察 | Industry Watch | 「宏观经济」二级菜单项，`/industry`，`industry` 分组 10 项指标 |
+| 跟踪提醒 | Alerts | 「宏观经济」二级菜单项，`/alerts`，规则评估结果（spec 002） |
 | 抓取任务 | `FetchJobState` | 一次数据抓取的运行态（idle/running/done/error），存 Node 进程内存（spec 003） |
-| 更新数据 | Fetch Button | `/macro` 页手动触发抓取的按钮，运行中禁用防重复 |
+| 更新数据 | Fetch Button | 「宏观经济」头部手动触发抓取的按钮，运行中禁用防重复（spec 003/008） |
 | 告警规则 | `AlertRule` | 对指标的阈值/异动判定配置（threshold / delta_drop / compare 三类，spec 002） |
 | 告警项 | `AlertItem` | 一条规则对最新数据的评估结果（triggered / normal / no_data） |
+
+## 信息架构（spec 008）
+
+```
+侧边栏（一级菜单）
+├── 工作台        /             首页：三张模块卡片 + 实时摘要
+├── 宏观经济      /macro        ← 一级入口，三个子模块共用同一外壳
+│     └─ 顶部二级菜单 (SectionTabs)
+│          ├── 国家经济数据  /macro     8 组 / 26 项
+│          ├── 行业观察      /industry  industry 组 / 10 项
+│          └── 跟踪提醒      /alerts    8 条规则评估
+└── 设置          /settings
+```
+
+- 层级用 **Next.js 路由组** `src/app/(macro)/` + 共享 `layout.tsx` 表达；URL 不带前缀（`/macro`、`/industry`、`/alerts`），见 spec 008 design 决策 1。
+- 三个子页**不各自渲染 Topbar 与滚动容器**，由 `(macro)/layout.tsx` 统一提供；页面只返回内容节点。
+- 一级菜单激活判定：`NavLeaf.match` 列出该菜单对应的全部路径（`["/macro", "/industry", "/alerts"]`），任一命中即高亮。
+- **一个指标只属于一个二级菜单**：`getNationalDashboard()` 与 `getIndustryDashboard()` 的指标集互不相交、并集等于全量（`getMacroDashboard()`）；新增分组时默认归入「国家经济数据」，除非显式排除。
 
 ## 代码风格
 

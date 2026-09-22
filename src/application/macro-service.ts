@@ -8,6 +8,7 @@ import {
   lagMonths,
   type Indicator,
   type IndicatorGroup,
+  type IndicatorGroupId,
 } from "@/domain/macro";
 import { loadIndicators } from "@/infrastructure/sqlite-macro-repository";
 
@@ -24,16 +25,31 @@ export type MacroDashboard = {
   groups: IndicatorGroup[];
   /** 按 INDICATOR_GROUPS 顺序分组的指标, 组内保持 meta 表顺序 */
   sections: Array<{ group: IndicatorGroup; indicators: IndicatorView[] }>;
-  /** 数据源滞后 (非发布节奏) 的指标数 — spec 004 */
+  /** 数据源滞后 (非发布节奏) 的指标数 — spec 004; 只统计本次可见范围内的指标 */
   staleCount: number;
 };
 
-export async function getMacroDashboard(): Promise<MacroDashboard> {
+/**
+ * 「国家经济数据」可见的分组 = 全部分组去掉 industry (spec 008 决策 5)。
+ * 从 INDICATOR_GROUPS 派生而非写死, 新增宏观分组时自动纳入。
+ */
+const MACRO_GROUP_IDS: readonly IndicatorGroupId[] = INDICATOR_GROUPS.map((g) => g.id).filter(
+  (id) => id !== "industry",
+);
+
+/**
+ * 按可见分组范围构建看板 (spec 008 决策 5)。
+ * groups 传入 null 表示全量; staleCount 只统计可见指标, 避免把不可见分组的滞后计入页面文案。
+ */
+async function buildDashboard(groups: readonly IndicatorGroupId[] | null): Promise<MacroDashboard> {
   const { indicators, updatedAt } = await loadIndicators();
+  const scope = groups ?? INDICATOR_GROUPS.map((g) => g.id);
+  const inScope = new Set<string>(scope);
   const byGroup = new Map<string, IndicatorView[]>();
   let staleCount = 0;
 
   for (const ind of indicators) {
+    if (!inScope.has(ind.group)) continue;
     const trend = ind.series.slice(-TREND_WINDOW);
     const latest = trend.length > 0 ? trend[trend.length - 1] : null;
     const stale = latest !== null && isStale(latest.date, ind.freq);
@@ -50,23 +66,28 @@ export async function getMacroDashboard(): Promise<MacroDashboard> {
     else byGroup.set(ind.group, [view]);
   }
 
-  const sections = INDICATOR_GROUPS.map((group) => ({
+  const sections = INDICATOR_GROUPS.filter((group) => inScope.has(group.id)).map((group) => ({
     group,
     indicators: byGroup.get(group.id) ?? [],
   }));
 
-  return { updatedAt, groups: INDICATOR_GROUPS.slice(), sections, staleCount };
+  return { updatedAt, groups: sections.map((s) => s.group), sections, staleCount };
 }
 
-/** 行业观察看板 (spec 005): 仅取 industry 分组的指标视图 */
+/**
+ * 全量看板 — 9 个分组 / 36 项。
+ * 保留全量语义供 `GET /api/macro/indicators` 使用 (spec 008 US-3 AC5): 数据接口契约不随页面分层变化。
+ */
+export async function getMacroDashboard(): Promise<MacroDashboard> {
+  return buildDashboard(null);
+}
+
+/** 国家经济数据 (spec 008): 8 个宏观分组 / 26 项, 排除 industry 分组 */
+export async function getNationalDashboard(): Promise<MacroDashboard> {
+  return buildDashboard(MACRO_GROUP_IDS);
+}
+
+/** 行业观察 (spec 005): 仅 industry 分组 / 10 项 */
 export async function getIndustryDashboard(): Promise<MacroDashboard> {
-  const dashboard = await getMacroDashboard();
-  const sections = dashboard.sections.filter((s) => s.group.id === "industry");
-  const indicators = sections.flatMap((s) => s.indicators);
-  return {
-    updatedAt: dashboard.updatedAt,
-    groups: sections.map((s) => s.group),
-    sections,
-    staleCount: indicators.filter((i) => i.lag !== null).length,
-  };
+  return buildDashboard(["industry"]);
 }

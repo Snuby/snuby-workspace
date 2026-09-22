@@ -1,9 +1,10 @@
 // Spec: 001-workbench-mvp — 工作台首页 (US-1 AC3); 卡片摘要见 spec 002 US-3
+// Spec: 008-macro-hierarchy — 三个数据模块收敛到「宏观经济」, 卡片改为入口 + 计数与实际口径对齐 (US-3 AC3)
 
 import Link from "next/link";
 import Topbar from "@/components/workbench/topbar";
 import { getAlertsDigest, type AlertSummary, type AlertView } from "@/application/alert-service";
-import { getIndustryDashboard } from "@/application/macro-service";
+import { getIndustryDashboard, getNationalDashboard } from "@/application/macro-service";
 
 export const dynamic = "force-dynamic";
 
@@ -14,16 +15,21 @@ function AlertsCard({ summary, topItems }: { summary: AlertSummary | null; topIt
       href="/alerts"
       className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
     >
-      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-[#FAEEDA]">
-        <svg viewBox="0 0 24 24" fill="none" stroke="#854F0B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-          <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
-          <path d="M13.7 21a2 2 0 0 1-3.4 0" />
-        </svg>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FAEEDA]">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#854F0B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+            <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+            <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+          </svg>
+        </div>
+        <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+          宏观经济
+        </span>
       </div>
       <div className="mb-1.5 text-[14.5px] font-semibold">跟踪提醒</div>
       {!hasData ? (
         <p className="text-[12.5px] leading-relaxed text-ink-muted">
-          数据不可用，请先在「国家经济数据」页更新数据。
+          数据不可用，请先更新数据。
         </p>
       ) : summary.triggered > 0 ? (
         <>
@@ -67,6 +73,18 @@ export default async function HomePage() {
     digest = null; // DB 缺失时卡片降级提示, 不影响首页
   }
 
+  // 两张数据卡片的计数由用例层实际范围推导, 不硬编码 (spec 008 US-3 AC3)
+  let national: { count: number; staleCount: number } | null = null;
+  try {
+    const dashboard = await getNationalDashboard();
+    national = {
+      count: dashboard.sections.reduce((n, s) => n + s.indicators.length, 0),
+      staleCount: dashboard.staleCount,
+    };
+  } catch {
+    national = null;
+  }
+
   let industry: { count: number; latestMonth: string | null } | null = null;
   try {
     const dashboard = await getIndustryDashboard();
@@ -86,24 +104,40 @@ export default async function HomePage() {
         <div className="mx-auto max-w-4xl px-8 py-10">
           <h1 className="text-[21px] font-semibold">下午好，苏伟杰</h1>
           <p className="mt-1.5 mb-7 text-[13px] text-ink-faint">
-            这里是 Snuby 工作台，从左侧菜单或下方卡片进入各模块。
+            左侧「宏观经济」下有三个子模块（国家经济数据 / 行业观察 / 跟踪提醒），也可以从下方卡片直接进入。
           </p>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
             <Link
               href="/macro"
               className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
             >
-              <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft">
-                <svg viewBox="0 0 24 24" fill="none" stroke="#185FA5" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                  <path d="M3 3v18h18" />
-                  <path d="M7 14l4-5 3 3 5-7" />
-                </svg>
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#185FA5" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M3 3v18h18" />
+                    <path d="M7 14l4-5 3 3 5-7" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  宏观经济
+                </span>
               </div>
               <div className="mb-1.5 text-[14.5px] font-semibold">国家经济数据</div>
-              <p className="text-[12.5px] leading-relaxed text-ink-muted">
-                中国宏观经济大盘：GDP、物价、PMI、货币社融、进出口、房地产等
-                26 项核心指标，手动更新、实时读库。
-              </p>
+              {national ? (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  中国宏观经济大盘：GDP、物价、PMI、货币社融、进出口、房地产等{" "}
+                  <b className="font-medium text-ink">{national.count}</b> 项核心指标，手动更新、实时读库。
+                  {national.staleCount > 0 ? (
+                    <span className="text-amber-600">
+                      其中 {national.staleCount} 项数据源滞后。
+                    </span>
+                  ) : null}
+                </p>
+              ) : (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  数据不可用，请点击「更新数据」抓取。
+                </p>
+              )}
               <span className="mt-3 inline-block rounded-md bg-accent-soft px-2 py-0.5 text-[11px] text-accent">
                 进入模块
               </span>
@@ -113,11 +147,16 @@ export default async function HomePage() {
               href="/industry"
               className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
             >
-              <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-[#E1F5EE]">
-                <svg viewBox="0 0 24 24" fill="none" stroke="#0F6E56" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                  <path d="M3 21h18" />
-                  <path d="M4 21V9l5 3V9l5 3V7l6 4v10" />
-                </svg>
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#E1F5EE]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#0F6E56" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M3 21h18" />
+                    <path d="M4 21V9l5 3V9l5 3V7l6 4v10" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  宏观经济
+                </span>
               </div>
               <div className="mb-1.5 text-[14.5px] font-semibold">行业观察</div>
               {industry ? (
@@ -127,7 +166,7 @@ export default async function HomePage() {
                 </p>
               ) : (
                 <p className="text-[12.5px] leading-relaxed text-ink-muted">
-                  数据不可用，请先在「国家经济数据」页更新数据。
+                  数据不可用，请先更新数据。
                 </p>
               )}
               <span className="mt-3 inline-block rounded-md bg-[#E1F5EE] px-2 py-0.5 text-[11px] text-[#0F6E56]">

@@ -1,14 +1,18 @@
 "use client";
 
-// Spec: 001-workbench-mvp — 左侧菜单 (US-1 AC1/AC2)
+// Spec: 001-workbench-mvp — 工作台外壳左侧菜单 (US-1 AC1/AC2)
+// Spec: 008-macro-hierarchy — 三个数据模块收敛为单一「宏观经济」一级菜单 (US-1)
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-type NavLeaf = { href: string; label: string; icon: React.ReactNode };
-type NavSection =
-  | { kind: "leaf"; item: NavLeaf }
-  | { kind: "group"; label: string; items: NavLeaf[] };
+type NavLeaf = {
+  href: string;
+  label: string;
+  icon: React.ReactNode;
+  /** 一对多激活判定 (spec 008 决策 6): 缺省时按路径精确相等 */
+  match?: readonly string[];
+};
 
 const ICONS = {
   home: (
@@ -23,18 +27,6 @@ const ICONS = {
       <path d="M7 14l4-5 3 3 5-7" />
     </svg>
   ),
-  bell: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
-      <path d="M13.7 21a2 2 0 0 1-3.4 0" />
-    </svg>
-  ),
-  factory: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="M3 21h18" />
-      <path d="M4 21V9l5 3V9l5 3V7l6 4v10" />
-    </svg>
-  ),
   gear: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
       <circle cx="12" cy="12" r="3" />
@@ -43,18 +35,13 @@ const ICONS = {
   ),
 };
 
-const NAV: NavSection[] = [
-  { kind: "leaf", item: { href: "/", label: "工作台", icon: ICONS.home } },
-  {
-    kind: "group",
-    label: "数据观察",
-    items: [
-      { href: "/macro", label: "国家经济数据", icon: ICONS.chart },
-      { href: "/industry", label: "行业观察", icon: ICONS.factory },
-      { href: "/alerts", label: "跟踪提醒", icon: ICONS.bell },
-    ],
-  },
-  { kind: "leaf", item: { href: "/settings", label: "设置", icon: ICONS.gear } },
+/** 「宏观经济」一级菜单对应的全部子页路径 (即二级菜单项, 见 section-tabs.tsx) */
+const MACRO_PATHS: readonly string[] = ["/macro", "/industry", "/alerts"];
+
+const NAV: NavLeaf[] = [
+  { href: "/", label: "工作台", icon: ICONS.home },
+  { href: "/macro", label: "宏观经济", icon: ICONS.chart, match: MACRO_PATHS },
+  { href: "/settings", label: "设置", icon: ICONS.gear },
 ];
 
 function itemClass(active: boolean): string {
@@ -78,35 +65,16 @@ export default function Sidebar() {
         <div className="text-[17px] font-semibold tracking-wide">Snuby</div>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-3">
-        {NAV.map((section, i) =>
-          section.kind === "leaf" ? (
-            <Link
-              key={section.item.href}
-              href={section.item.href}
-              className={itemClass(pathname === section.item.href)}
-            >
-              {section.item.icon}
-              {section.item.label}
+      <nav className="flex-1 overflow-y-auto px-3 pb-3 pt-1">
+        {NAV.map((item) => {
+          const active = item.match ? item.match.includes(pathname) : pathname === item.href;
+          return (
+            <Link key={item.href} href={item.href} className={itemClass(active)}>
+              {item.icon}
+              {item.label}
             </Link>
-          ) : (
-            <div key={section.label} className={i > 0 ? "mt-4" : "mt-2"}>
-              <div className="px-2.5 pb-1.5 text-[11px] tracking-widest text-ink-faint select-none">
-                {section.label}
-              </div>
-              {section.items.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={itemClass(pathname.startsWith(item.href))}
-                >
-                  {item.icon}
-                  {item.label}
-                </Link>
-              ))}
-            </div>
-          ),
-        )}
+          );
+        })}
       </nav>
 
       <div className="border-t border-line px-4 py-3.5 text-[11px] text-ink-faint">
