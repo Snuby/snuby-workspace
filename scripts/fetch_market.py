@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,16 +87,25 @@ def extract_us_index(symbol):
 
 
 def extract_hk_index():
-    """恒生指数 (东财)。注意: 源收盘列名为 latest, 须重命名为 close; 源无成交量"""
-    df = ak.stock_hk_index_daily_em(symbol="HSI")
-    rows = [candle(r["date"], r.get("open"), r.get("high"), r.get("low"), r.get("latest"), None)
-            for _, r in df.iterrows()]
-    return [r for r in rows if r]
+    """恒生指数。主源东财 (1990 年起, 收盘列名 latest 须重命名, 无成交量);
+    东财 push2 端点间歇性不可达 (2026-09-22 实测), 异常时降级新浪
+    (klc2 接口, 2013-08 起, 库内已有全历史时仅补增量, 不受影响)。"""
+    try:
+        df = ak.stock_hk_index_daily_em(symbol="HSI")
+        return [candle(r["date"], r.get("open"), r.get("high"), r.get("low"), r.get("latest"), None)
+                for _, r in df.iterrows()]
+    except Exception:
+        df = ak.stock_hk_index_daily_sina(symbol="HSI")
+        return [candle(r["date"], r.get("open"), r.get("high"), r.get("low"), r.get("close"), None)
+                for _, r in df.iterrows()]
 
 
 def extract_cn_index():
-    """上证指数 (东财)"""
-    df = ak.stock_zh_index_daily_em(symbol="sh000001")
+    """上证指数。主源东财, 异常时降级新浪 (sh000001, 字段结构相同)。"""
+    try:
+        df = ak.stock_zh_index_daily_em(symbol="sh000001")
+    except Exception:
+        df = ak.stock_zh_index_daily(symbol="sh000001")
     rows = [candle(r["date"], r.get("open"), r.get("high"), r.get("low"), r.get("close"), r.get("volume"))
             for _, r in df.iterrows()]
     return [r for r in rows if r]
@@ -228,6 +238,22 @@ def put_asset(conn, a, rows):
     return "ok"
 
 
+def fetch_with_retry(fn, symbol, retries=3):
+    """网络源经代理时通时断 (东财 push2 端点实测), 瞬时故障退避重试后再判失败。
+    提取器均为只读请求, 重试无副作用。"""
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            if attempt < retries:
+                wait = 2 * attempt
+                print(f"  [RETRY {attempt}/{retries - 1}] {type(e).__name__}, {wait}s 后重试")
+                time.sleep(wait)
+    raise last
+
+
 def main():
     DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB)
@@ -250,7 +276,7 @@ def main():
         print(f"[{a['symbol']}] {a['name']}")
         status = "ok"
         try:
-            status = put_asset(conn, a, a["fn"]())
+            status = put_asset(conn, a, fetch_with_retry(a["fn"], a["symbol"]))
             if status == "ok":
                 ok += 1
             elif status == "skip":
