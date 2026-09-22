@@ -1,7 +1,7 @@
 // Spec: 009-market-quotes — 资产卡 (最新价 / 涨跌 / 迷你走势 / 滞后标注 / 口径说明)
 // 纯展示组件; 精度由 asset.precision 驱动, 不做全局统一取整 (design 决策 11)
 
-import { formatPrice, formatPct } from "@/domain/market";
+import { REF_PRICE_LABEL, REF_PRICE_UNIT, formatPrice, formatPct } from "@/domain/market";
 import type { AssetStat } from "@/application/market-service";
 
 function Spark({ values, up }: { values: number[]; up: boolean }) {
@@ -82,6 +82,19 @@ export default function AssetCard({
         </span>
         <span>截至 {stat.latest?.date ?? "—"}</span>
       </div>
+
+      {/* 绝对价位锚点: 指数只表达相对变动, 这一行给出「值多少钱」 */}
+      {stat.refPrice !== null && stat.refPrice !== undefined ? (
+        <div className="mt-2 flex flex-wrap items-baseline gap-x-1.5 rounded-lg bg-black/[0.035] px-2.5 py-1.5">
+          <span className="text-[11px] text-ink-faint">{REF_PRICE_LABEL}</span>
+          <b className="text-[13.5px] font-semibold tracking-tight">
+            {formatPrice(stat.refPrice, 0)}
+          </b>
+          <span className="text-[11px] text-ink-faint">
+            {REF_PRICE_UNIT} · {stat.refPriceDate?.slice(0, 7) ?? "—"} · {stat.refPriceSource}
+          </span>
+        </div>
+      ) : null}
 
       {stat.note ? (
         <p className="mt-2 border-t border-line pt-2 text-[11px] leading-relaxed text-ink-faint">

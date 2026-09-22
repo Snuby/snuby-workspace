@@ -32,6 +32,13 @@ export type AssetMeta = {
   firstDate: string | null;
   lastDate: string | null;
   updatedAt: string;
+  /**
+   * 绝对价位锚点 (元/㎡) — 官方无城市级月度均价, 房产类资产用中指研究院
+   * 样本平均价格锚定最新绝对价位; 仅最新一期, 不构成时间序列。
+   */
+  refPrice: number | null;
+  refPriceDate: string | null;
+  refPriceSource: string | null;
 };
 
 // ---------- 常量表 ----------
@@ -98,6 +105,14 @@ export const MARKET_STALE_DAYS_MONTHLY = 60;
 
 /** 归一化基准值: 所有曲线起点恒为该值 (design 决策 3) */
 export const NORMALIZE_BASE = 100;
+
+/**
+ * 绝对价位锚点的展示口径 (2026-09-22 数据核验后引入)。
+ * 官方无城市级月度均价, 房产类资产用中指研究院「二手住宅样本平均价格」锚定绝对价位;
+ * 二手住宅口径同质可比性优于新建住宅 (后者受高端盘集中入市的结构效应主导)。
+ */
+export const REF_PRICE_LABEL = "二手住宅样本均价";
+export const REF_PRICE_UNIT = "元/㎡";
 
 /** 合并图分类色板 — 表达「资产身份」, 与涨跌色 (红涨绿跌) 语义分离 (design 决策 10) */
 export const ASSET_COLORS: Record<string, string> = {

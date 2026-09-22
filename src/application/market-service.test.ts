@@ -28,6 +28,10 @@ type AssetFixture = {
   hasOhlc: boolean;
   hasVolume: boolean;
   note: string | null;
+  /** 绝对价位锚点 (房产类资产才有) — 2026-09-22 口径修正后引入 */
+  refPrice?: number | null;
+  refPriceDate?: string | null;
+  refPriceSource?: string | null;
   rows: Array<{
     date: string;
     open: number | null;
@@ -81,7 +85,8 @@ const ASSET_FIXTURES: AssetFixture[] = [
   {
     symbol: "bj_house", name: "北京房价", category: "realestate", unit: "价格指数",
     baseFreq: "M", precision: 1, hasOhlc: false, hasVolume: false,
-    note: "70 城新建商品住宅价格指数, 非成交均价",
+    note: "70 城二手住宅价格指数, 非成交均价",
+    refPrice: 61038, refPriceDate: "2026-08-01", refPriceSource: "中指研究院",
     // 12 期月频, 最新一期约 100 天前 → 超出月度容忍 (60 天), 应判滞后
     rows: Array.from({ length: 12 }, (_, i) => ({
       date: dayOffset(100 + (11 - i) * 30),
@@ -102,7 +107,8 @@ before(() => {
       symbol TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL, unit TEXT NOT NULL,
       source TEXT NOT NULL, base_freq TEXT NOT NULL, precision INTEGER NOT NULL,
       has_ohlc INTEGER NOT NULL, has_volume INTEGER NOT NULL, note TEXT,
-      first_date TEXT, last_date TEXT, updated_at TEXT NOT NULL);
+      first_date TEXT, last_date TEXT, updated_at TEXT NOT NULL,
+      ref_price REAL, ref_price_date TEXT, ref_price_source TEXT);
     CREATE TABLE kline (
       symbol TEXT NOT NULL, date TEXT NOT NULL, open REAL, high REAL, low REAL,
       close REAL NOT NULL, volume REAL, PRIMARY KEY (symbol, date));
@@ -110,8 +116,9 @@ before(() => {
 
   const insertAsset = db.prepare(
     `INSERT INTO asset (symbol, name, category, unit, source, base_freq, precision,
-       has_ohlc, has_volume, note, first_date, last_date, updated_at)
-     VALUES (?, ?, ?, ?, 'fixture', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       has_ohlc, has_volume, note, first_date, last_date, updated_at,
+       ref_price, ref_price_date, ref_price_source)
+     VALUES (?, ?, ?, ?, 'fixture', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertKline = db.prepare(
     `INSERT INTO kline (symbol, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -123,6 +130,7 @@ before(() => {
       a.symbol, a.name, a.category, a.unit, a.baseFreq, a.precision,
       a.hasOhlc ? 1 : 0, a.hasVolume ? 1 : 0, a.note,
       sorted[0].date, sorted[sorted.length - 1].date, "2026-09-22T00:00:00",
+      a.refPrice ?? null, a.refPriceDate ?? null, a.refPriceSource ?? null,
     );
     for (const r of sorted) {
       insertKline.run(a.symbol, r.date, r.open, r.high, r.low, r.close, r.volume);
@@ -183,6 +191,16 @@ describe("getMarketOverview — 资产统计", () => {
     assert.equal(bySymbol.gold.hasVolume, false, "外盘期货源不含量, 不应渲染量副图");
     assert.equal(bySymbol.bj_house.hasOhlc, false, "房价无 OHLC, 应降级折线");
     assert.equal(bySymbol.bj_house.baseFreq, "M");
+  });
+
+  it("绝对价位锚点透传: 房产类带均价与来源, 其余资产为 null", async () => {
+    const overview = await getMarketOverview();
+    const bySymbol = Object.fromEntries(overview.assets.map((a) => [a.symbol, a]));
+    assert.equal(bySymbol.bj_house.refPrice, 61038);
+    assert.equal(bySymbol.bj_house.refPriceDate, "2026-08-01");
+    assert.equal(bySymbol.bj_house.refPriceSource, "中指研究院");
+    assert.equal(bySymbol.gold.refPrice, null, "非房产资产无锚点, 卡片不渲染该行");
+    assert.equal(bySymbol.btc.refPrice, null);
   });
 
   it("时效判定按各自口径: 日频资产新鲜, 滞后 100 天的月频资产标记滞后", async () => {

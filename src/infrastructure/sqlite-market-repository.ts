@@ -25,6 +25,9 @@ type AssetRow = {
   first_date: string | null;
   last_date: string | null;
   updated_at: string;
+  ref_price: number | null;
+  ref_price_date: string | null;
+  ref_price_source: string | null;
 };
 
 type KlineRow = {
@@ -87,6 +90,10 @@ export async function loadAssets(): Promise<{ assets: AssetMeta[]; updatedAt: st
       firstDate: r.first_date,
       lastDate: r.last_date,
       updatedAt: r.updated_at,
+      // 锚点列由 2026-09-22 迁移引入; 旧库或旧 fixture 缺列时降级为 null
+      refPrice: r.ref_price ?? null,
+      refPriceDate: r.ref_price_date ?? null,
+      refPriceSource: r.ref_price_source ?? null,
     }));
     const updatedAt = assets.reduce((max, a) => (a.updatedAt > max ? a.updatedAt : max), "");
     return { assets, updatedAt: updatedAt || new Date().toISOString() };
