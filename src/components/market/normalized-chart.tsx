@@ -24,7 +24,8 @@ type Params = {
 function buildOption({ dates, series, metas, bases }: Params): EChartsOption {
   const visible = metas.filter((m) => (series[m.symbol] ?? []).length > 0);
   const firstDate = dates[0];
-  const start = dates.length > 200 ? 55 : 0;
+  // dataZoom 默认展示全时间段 (2026-09-22 用户决策): 滑块仅用于手动缩放, 不预裁窗口
+  const start = 0;
 
   const datasets = visible.map((m) => {
     const color = ASSET_COLORS[m.symbol] ?? FALLBACK;

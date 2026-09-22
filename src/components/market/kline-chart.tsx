@@ -123,7 +123,8 @@ function buildOption({ candles, name, precision, hasOhlc, hasVolume }: Params): 
   }));
 
   const xAxisIndex = grids.map((_, i) => i);
-  const start = dates.length > 200 ? 55 : 0;
+  // dataZoom 默认展示全时间段 (2026-09-22 用户决策): 滑块仅用于手动缩放, 不预裁窗口
+  const start = 0;
 
   // ECharts 的联合类型对字面量推断过于苛刻, 此处经 unknown 中转后断言 (非 any)
   return {
