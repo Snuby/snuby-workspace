@@ -77,14 +77,57 @@ export default function FetchButton() {
   const summary = job?.status === "done" ? job.summary : null;
   const failItems = summary && summary.failures.length > 0 ? summary.failures : null;
 
+  // SectionTabs 是固定 46px 的导航条, action 必须保持单行高度;
+  // 摘要文案放按钮左侧, 失败明细收进 hover 提示 (纵向堆叠会溢出压到页面内容)
+  const summaryText = summary
+    ? [
+        `成功 ${summary.ok + summary.empty}/${summary.ok + summary.empty + summary.fail}`,
+        failItems
+          ? failItems.length <= 2
+            ? `失败: ${failItems.map((f) => f.name).join("、")}`
+            : `失败 ${failItems.length} 项`
+          : null,
+      ]
+        .filter((p): p is string => p !== null)
+        .join(" · ")
+    : null;
+  const summaryTip =
+    failItems && failItems.length > 2
+      ? `失败: ${failItems.map((f) => f.name).join("、")}`
+      : null;
+
   return (
-    <div className="flex flex-col items-end gap-1.5">
+    <div className="flex items-center gap-3">
+      {running && job ? (
+        <div className="h-1 w-16 overflow-hidden rounded-full bg-black/10">
+          <div
+            className="h-full rounded-full bg-accent transition-all duration-500"
+            style={{ width: `${Math.round((job.done / Math.max(job.total, 1)) * 100)}%` }}
+          />
+        </div>
+      ) : null}
+
+      {summaryText ? (
+        <div
+          className="min-w-0 max-w-[420px] truncate text-[11.5px] text-ink-faint"
+          title={summaryTip ?? undefined}
+        >
+          上次抓取: {summaryText}
+        </div>
+      ) : null}
+
+      {job?.status === "error" ? (
+        <div className="min-w-0 max-w-[280px] truncate text-[11.5px] text-red-600" title={job.error ?? ""}>
+          抓取进程异常: {job.error}
+        </div>
+      ) : null}
+
       <button
         type="button"
         onClick={handleClick}
         disabled={running || starting}
         className={[
-          "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+          "flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-medium transition-colors",
           running || starting
             ? "cursor-not-allowed bg-black/5 text-ink-faint"
             : "bg-accent text-white hover:opacity-90",
@@ -105,26 +148,6 @@ export default function FetchButton() {
           </>
         )}
       </button>
-
-      {running && job ? (
-        <div className="h-1 w-36 overflow-hidden rounded-full bg-black/10">
-          <div
-            className="h-full rounded-full bg-accent transition-all duration-500"
-            style={{ width: `${Math.round((job.done / Math.max(job.total, 1)) * 100)}%` }}
-          />
-        </div>
-      ) : null}
-
-      {summary ? (
-        <div className="text-[11.5px] text-ink-faint">
-          上次抓取: 成功 {summary.ok + summary.empty}/{summary.ok + summary.empty + summary.fail}
-          {failItems ? `，失败: ${failItems.map((f) => f.name).join("、")}` : ""}
-        </div>
-      ) : null}
-
-      {job?.status === "error" ? (
-        <div className="text-[11.5px] text-red-600">抓取进程异常: {job.error}</div>
-      ) : null}
     </div>
   );
 }

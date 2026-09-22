@@ -35,3 +35,7 @@
 2. **防重复双保险**: 内存 `status === "running"` 拦截 + 409。
 3. Python 解释器路径: env `FETCH_PYTHON_BIN`，默认 venv 路径（README 环境变量表记录）。
 4. 设置页「数据更新频率」文案同步改为「手动触发」。
+
+## 变更记录
+
+- 2026-09-22（spec 009 引入）: `FetchButton` 布局修复 —— 原纵向堆叠（按钮 + 摘要文案）在 46px 高的 `SectionTabs` 内溢出，摘要会压到页面内容；改为单行布局（摘要文案在按钮左侧、进度条内联、失败明细超 2 项收进 hover 提示）。与 spec 009 的 `MarketFetchButton` 同步修复。
