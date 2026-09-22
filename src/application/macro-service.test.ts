@@ -60,7 +60,7 @@ const FIXTURES: Fixture[] = [
   // 故意缺失: ppi_yoy 不在 fixture 中 -> ppi-negative 规则应为 no_data
   { key: "unemployment", name: "城镇调查失业率", unit: "%", freq: "月度", dim: "confidence",
     rows: series(4, 5.0, 0.0, 1) },
-  { key: "house_price_yoy", name: "70城新房价格指数同比(均值)", unit: "%", freq: "月度", dim: "realestate",
+  { key: "house_price_yoy", name: "70城二手住宅价格指数同比(均值)", unit: "%", freq: "月度", dim: "realestate",
     rows: series(4, 0.3, 0.0, 1) },
   // 触发 gdp-slowdown (danger) 且数据源滞后 (季度, 滞后 6 个月 -> 判定滞后)
   { key: "gdp_yoy", name: "GDP 同比增速", unit: "%", freq: "季度", dim: "growth",

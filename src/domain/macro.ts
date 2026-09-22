@@ -67,7 +67,7 @@ export const INDICATOR_DESCRIPTIONS: Record<string, string> = {
   trade_balance: "贸易差额（当月，亿美元），外需贡献",
   fx_reserves: "官方外汇储备（亿美元），对外支付能力与汇率稳定器",
   real_estate_index: "房地产开发景气指数（国房景气指数），100 为景气分界",
-  house_price_yoy: "70 城新建商品住宅价格指数同比均值，房价涨跌",
+  house_price_yoy: "70 城二手住宅价格指数同比均值，房价涨跌（新房口径受高端盘结构效应主导，故用二手住宅，2026-09 修正）",
   lpi_index: "中国物流业景气指数（月度），>50 为扩张",
   pax_load_factor: "民航客座率（月度），出行与商务活动强度",
   freight_rail_yoy: "铁路货运量同比（月度），大宗商品运输景气",

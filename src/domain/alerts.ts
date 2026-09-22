@@ -37,7 +37,7 @@ export const ALERT_RULES: readonly AlertRule[] = [
   { ruleId: "cpi-negative", indicatorKey: "cpi_yoy", kind: "threshold", op: "below", threshold: 0, severity: "warning", label: "CPI 同比为负", rationale: "消费端通缩压力" },
   { ruleId: "ppi-negative", indicatorKey: "ppi_yoy", kind: "threshold", op: "below", threshold: 0, severity: "warning", label: "PPI 同比为负", rationale: "工业品出厂价格下跌，企业盈利承压" },
   { ruleId: "m1-m2-scissor", indicatorKey: "m1_yoy", kind: "compare", compareToKey: "m2_yoy", severity: "warning", label: "M1-M2 剪刀差为负", rationale: "M1 增速低于 M2，资金活化不足、企业信心偏弱" },
-  { ruleId: "house-price-negative", indicatorKey: "house_price_yoy", kind: "threshold", op: "below", threshold: 0, severity: "warning", label: "70 城房价同比为负", rationale: "新房价格整体下跌" },
+  { ruleId: "house-price-negative", indicatorKey: "house_price_yoy", kind: "threshold", op: "below", threshold: 0, severity: "warning", label: "70 城房价同比为负", rationale: "二手住宅价格整体下跌（2026-09 由新房口径修正为二手口径后开始具备真实触发能力）" },
 ] as const;
 
 function fmt(v: number): string {

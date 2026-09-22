@@ -194,12 +194,18 @@ def extract_gdzctz():
 
 
 def extract_house_price():
-    """70 城新建商品住宅价格指数同比, 取各城市均值"""
+    """70 城二手住宅价格指数同比, 取各城市均值。
+
+    2026-09-22 口径修正: 原用「新建商品住宅」, 但该口径受高端盘结构效应主导,
+    70 城新房同比均值长期为正 (+0.35~1.85%), 与存量市场体感背离, 且使
+    house-price-negative 告警规则永不触发 (死规则)。改用「二手住宅」:
+    同期 −2.15 ~ −7.75%, 反映真实下跌。
+    """
     df = ak.macro_china_new_house_price()
     by_date = {}
     for _, r in df.iterrows():
         d = str(r["日期"])
-        v = clean(r.get("新建商品住宅价格指数-同比"))
+        v = clean(r.get("二手住宅价格指数-同比"))
         if v is None:
             continue
         by_date.setdefault(d, []).append(v - 100)  # 指数转同比百分比
@@ -377,7 +383,7 @@ def main():
          extract_fx_reserves),
         ("real_estate_index", "房地产开发景气指数", "", "月度", "realestate",
          extract_real_estate),
-        ("house_price_yoy", "70城新房价格指数同比(均值)", "%", "月度", "realestate",
+        ("house_price_yoy", "70城二手住宅价格指数同比(均值)", "%", "月度", "realestate",
          extract_house_price),
         ("lpi_index", "物流景气指数", "", "月度", "industry",
          extract_lpi),
