@@ -1,6 +1,6 @@
 # 010 — ai-vc-watch（AI 创投观察）
 
-状态: **draft**（2026-09-22 规格初版，待用户评审）
+状态: **done**（2026-09-22 规格初版 → 用户批复推荐方案 → 实现完成，`next build` 通过）
 
 ## 目标
 
@@ -57,23 +57,28 @@
 - `src/application/vc-service.test.ts` — 集成测试
 
 **基础设施**
-- `src/infrastructure/sqlite-vc-repository.ts` — 只读 + 写入仓储
-- `src/infrastructure/vc-fetch-runner.ts` — 子进程 runner（复用 `fetch-runner.ts` 泛化模式）
+- `src/infrastructure/sqlite-vc-repository.ts` — 只读 + 写入仓储（空库降级为空数据）
+- 子进程 runner 复用 `fetch-runner.ts`（`runFetchScript` 已按 `scriptPath` 参数化，无需新文件）
 
 **表现层**
 - `src/app/(vc)/layout.tsx` + 2 个子页（`/ai-vc` 事件流、`/ai-vc/analytics` 分析）
-- `src/components/vc/` 下 6 个组件
-- `src/app/api/vc/` 下 5 条路由
+- `src/components/vc/` 下 6 个组件（deal-table / deal-form / vc-fetch-button / sector-chart / monthly-trend / freshness-hint）
+- `src/app/api/vc/` 下 4 条路由文件（deals 含 GET+POST，共 5 个端点）
 
-## 已确认决策（待用户评审）
+## 已确认决策（2026-09-22 用户批复推荐方案）
 
-| 议题 | 建议方案 | 状态 |
-|---|---|---|
-| 板块名称与路由 | 「AI 创投观察」`/ai-vc` | 待确认 |
-| 二级菜单划分 | 事件流 + 分析 两页 | 待确认 |
-| 中文数据获取 | 本期人工录入，烯牛 MCP 后置 | 待确认 |
-| 金额展示 | 原币为主 + USD 近似换算（仅聚合） | 待确认 |
+| 议题 | 采用方案 |
+|---|---|
+| 板块名称与路由 | 「AI 创投观察」`/ai-vc` |
+| 二级菜单划分 | 事件流 `/ai-vc` + 分析 `/ai-vc/analytics` 两页 |
+| 中文数据获取 | 本期人工录入，烯牛 MCP 后置 |
+| 金额展示 | 原币为主 + USD 近似换算（仅聚合比较） |
 
 ## 变更记录
 
-- 2026-09-22: 初版（draft）。数据源结论基于本机实测；规格四件套齐备（README / requirements / design / tasks）。
+- 2026-09-22: 初版（draft）。数据源结论基于本机实测；规格四件套齐备。
+- 2026-09-22: 用户批复推荐方案（四项全采纳），状态转 implementing。
+- 2026-09-22: 实现完成，状态转 done。管道实跑：TechCrunch 4 条 + HN 27 条入库，幂等复跑全 `[SKIP]`；全量测试 158/158（新增 domain 39 + application 19）；`next build` 通过；页面与 5 个 API 实测 200。实现与规格的三处偏差均属实现细节对齐（无契约变更）：
+  1. 金额解析：裸完整数字（`$1,000,000`）不再默认乘 M 量级，仅在带 K/M/B/T 后缀时换算；
+  2. 事件过滤：TechCrunch/HN 均要求标题命中融资信号词**且**含金额或轮次，以排除 RSS/HN 混入的促销、观点与讨论帖；
+  3. 赛道关键词表补充中文词（芯片/大模型/智能体/医疗等），人工录入的中文事件可正确归类。

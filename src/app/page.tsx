@@ -7,6 +7,7 @@ import Topbar from "@/components/workbench/topbar";
 import { getAlertsDigest, type AlertSummary, type AlertView } from "@/application/alert-service";
 import { getIndustryDashboard, getNationalDashboard } from "@/application/macro-service";
 import { getMarketOverview } from "@/application/market-service";
+import { getVcOverview } from "@/application/vc-service";
 
 export const dynamic = "force-dynamic";
 
@@ -116,6 +117,23 @@ export default async function HomePage() {
     market = null;
   }
 
+  let vc: { count: number; latestDate: string | null; stale: boolean; top: string[] } | null = null;
+  try {
+    const overview = await getVcOverview();
+    vc = {
+      count: overview.count,
+      latestDate: overview.latestDate,
+      stale: overview.stale,
+      top: overview.sectors
+        .filter((s) => s.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 3)
+        .map((s) => s.key),
+    };
+  } catch {
+    vc = null;
+  }
+
   return (
     <>
       <Topbar title="工作台" />
@@ -123,8 +141,9 @@ export default async function HomePage() {
         <div className="mx-auto max-w-4xl px-8 py-10">
           <h1 className="text-[21px] font-semibold">下午好，苏伟杰</h1>
           <p className="mt-1.5 mb-7 text-[13px] text-ink-faint">
-            左侧两个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
-            跟踪提醒）与 <b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比），
+            左侧三个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
+            跟踪提醒）、<b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比）与{" "}
+            <b className="font-medium text-ink-muted">AI 创投观察</b>（融资事件流与分析），
             也可以从下方卡片直接进入。
           </p>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
@@ -230,6 +249,46 @@ export default async function HomePage() {
                 </p>
               )}
               <span className="mt-3 inline-block rounded-md bg-[#EEEDFE] px-2 py-0.5 text-[11px] text-[#534AB7]">
+                进入模块
+              </span>
+            </Link>
+
+            <Link
+              href="/ai-vc"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FDEBF0]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#A8384F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M12 2v4" />
+                    <path d="M12 18v4" />
+                    <path d="M4.9 5l3.5 2" />
+                    <path d="M15.6 17l3.5 2" />
+                    <path d="M4.9 19l3.5-2" />
+                    <path d="M15.6 7l3.5-2" />
+                    <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  AI 创投观察
+                </span>
+              </div>
+              <div className="mb-1.5 text-[14.5px] font-semibold">融资事件流</div>
+              {vc ? (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  沉淀 <b className="font-medium text-ink">{vc.count}</b> 条 AI 融资事件
+                  {vc.latestDate ? `，最新 ${vc.latestDate}` : ""}；
+                  英文源自动抓取，中文源手动录入，支持赛道与月度可视化分析。
+                  {vc.stale ? (
+                    <span className="text-amber-600"> 已有数日未更新。</span>
+                  ) : null}
+                </p>
+              ) : (
+                <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                  数据不可用，请点击「更新融资」抓取或手动录入。
+                </p>
+              )}
+              <span className="mt-3 inline-block rounded-md bg-[#FDEBF0] px-2 py-0.5 text-[11px] text-[#A8384F]">
                 进入模块
               </span>
             </Link>
