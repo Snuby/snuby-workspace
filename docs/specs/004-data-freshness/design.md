@@ -22,6 +22,20 @@
    不静默隐藏，改为界面标注滞后月数（US-2）。
 4. **新增 `consumer_confidence`**（消费者信心指数，月度，东财 `macro_china_xfzxx`），最新 2026-07，补上信心维度的新鲜数据。
 
+## 免费源穷尽性评估（2026-09 复核，结论：已穷尽）
+
+对 3 项滞后指标逐一评估过替代路径，均不可行，故保持「保留 + 标注」策略：
+
+| 候选路径 | 结果 |
+|---|---|
+| `macro_china_nbs_nation`（统计局 data.stats.gov.cn 通用接口） | ❌ 该域名被 WAF 拦截（`403 Forbidden / UrlACL`），akshare 侧表现统一为 `ValueError: Please check if the data path or indicator is correct`；换用法也无法绕过 |
+| 猜测统计局目录路径（固定资产投资/房地产/企业景气等 5 组） | ❌ 同上，接口层不可达 |
+| `macro_china_bank_financing` | ❌ 实为「银行理财产品发行数量」，非社融 |
+| `macro_china_bsi_index` | ❌ 实为「超灵便型船运价指数」，非企业景气 |
+| 社融其他免费源 | ❌ akshare 仅 `macro_china_shrzgm`（商务数据中心口径），止于 2026-04 |
+
+结论：免费可编程源范围内已无更优解。若要拿到当期数据，只能付费源（Wind/Choice）或自建统计局爬虫（需处理 WAF，维护成本高），不在本 spec 范围。
+
 ## 时效性判定（src/domain/macro.ts）
 
 ```ts
