@@ -46,3 +46,4 @@ draft → reviewed → implementing → done
 | 004 | data-freshness（数据时效性修复） | done |
 | 005 | industry-watch（行业观察） | done |
 | 006 | testing（领域层单测体系） | done |
+| 007 | integration-tests（用例层集成测试） | done |

@@ -70,7 +70,9 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 |---|---|
 | 运行 | `npm test`（Node 内置 `node:test`，`tsx` 作 TS 加载器） |
 | 位置 | 与被测模块同目录，命名 `*.test.ts` |
-| 范围 | 契约类纯逻辑（domain 层）必测；infra/application 的集成测试按需另立 spec |
+| 分层 | domain 纯函数 → 单测（spec 006）；application 用例 + 真实 SQLite fixture → 集成测试（spec 007）；presentation 暂不覆盖 |
+| 数据隔离 | 集成测试写 `os.tmpdir()` 临时库，通过 `MACRO_DB_PATH` 注入，绝不触碰 `data/china_economy.db` |
+| 时间稳定性 | fixture 日期相对当前月份生成（`monthOffset`），避免断言随真实时间腐化 |
 | 原则 | 断言固化 spec 契约（边界、排序、容忍度、key 完备性），不测实现细节 |
 
 ## Git 约定

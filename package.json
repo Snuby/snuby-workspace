@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3300",
     "fetch": "python3 scripts/fetch_data.py",
-    "test": "node --import tsx --test src/domain/*.test.ts",
+    "test": "node --import tsx --test src/domain/*.test.ts src/application/*.test.ts",
     "lint": "next lint"
   },
   "dependencies": {
