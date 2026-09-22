@@ -7,7 +7,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { getAssetSeries, getComparison, getMarketOverview } from "./market-service";
+import {
+  getAssetSeries,
+  getComparison,
+  getMarketFreshness,
+  getMarketOverview,
+} from "./market-service";
 
 const FIXTURE_DB = path.join(os.tmpdir(), `snuby-market-test-${process.pid}.db`);
 
@@ -226,6 +231,25 @@ describe("getMarketOverview — 资产统计", () => {
   it("updatedAt 取资产元信息中的最大抓取时间", async () => {
     const overview = await getMarketOverview();
     assert.equal(overview.updatedAt, "2026-09-22T00:00:00");
+  });
+});
+
+describe("getMarketFreshness — 模块级新鲜度 (布局左侧提示)", () => {
+  it("取全部资产 lastDate 的最大值并计算落后天数", async () => {
+    const fresh = await getMarketFreshness();
+    assert.equal(fresh.lastDate, dayOffset(0), "日频资产天天更新, 模块前沿应为今天");
+    assert.equal(fresh.lagDays, 0);
+    assert.equal(fresh.stale, false);
+    assert.equal(fresh.updatedAt, "2026-09-22T00:00:00");
+  });
+
+  it("落后超过日频容忍 (MARKET_STALE_DAYS) 时判滞后", async () => {
+    const ref = new Date();
+    ref.setDate(ref.getDate() + 10);
+    const fresh = await getMarketFreshness(ref);
+    assert.equal(fresh.lastDate, dayOffset(0), "lastDate 不随 ref 漂移");
+    assert.equal(fresh.lagDays, 10);
+    assert.equal(fresh.stale, true);
   });
 });
 

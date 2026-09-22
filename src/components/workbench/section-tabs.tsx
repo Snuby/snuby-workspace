@@ -17,36 +17,42 @@ const MACRO_TABS: readonly SectionTab[] = [
 
 export default function SectionTabs({
   tabs = MACRO_TABS,
+  hint,
   action,
 }: {
   tabs?: readonly SectionTab[];
+  /** 紧随 tabs 左侧的静态提示 (如行情的数据新鲜度), 由布局传入服务器组件 */
+  hint?: React.ReactNode;
   action?: React.ReactNode;
 }) {
   const pathname = usePathname();
 
   return (
     <div className="flex h-[46px] shrink-0 items-stretch justify-between gap-4 border-b border-line bg-surface px-6">
-      <nav className="flex items-stretch gap-1">
-        {tabs.map((tab) => {
-          const active = pathname === tab.href;
-          return (
-            <Link
-              key={tab.href}
-              href={tab.href}
-              aria-current={active ? "page" : undefined}
-              className={[
-                "relative flex items-center px-2.5 text-[13.5px] transition-colors",
-                active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
-              ].join(" ")}
-            >
-              {tab.label}
-              {active ? (
-                <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" />
-              ) : null}
-            </Link>
-          );
-        })}
-      </nav>
+      <div className="flex min-w-0 items-center gap-3">
+        <nav className="flex items-stretch gap-1">
+          {tabs.map((tab) => {
+            const active = pathname === tab.href;
+            return (
+              <Link
+                key={tab.href}
+                href={tab.href}
+                aria-current={active ? "page" : undefined}
+                className={[
+                  "relative flex items-center px-2.5 text-[13.5px] transition-colors",
+                  active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
+                ].join(" ")}
+              >
+                {tab.label}
+                {active ? (
+                  <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" />
+                ) : null}
+              </Link>
+            );
+          })}
+        </nav>
+        {hint ? <div className="flex items-center">{hint}</div> : null}
+      </div>
 
       {action ? <div className="flex items-center py-1.5">{action}</div> : null}
     </div>

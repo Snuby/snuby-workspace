@@ -88,6 +88,37 @@ export async function getMarketOverview(ref: Date = new Date()): Promise<MarketO
   return { updatedAt, assets: stats, sections };
 }
 
+export type MarketFreshness = {
+  updatedAt: string;
+  /** 全部资产中最新的数据日期 (YYYY-MM-DD); 无任何数据时为 null */
+  lastDate: string | null;
+  /** 相对今天的落后天数 (自然日); lastDate 为 null 时为 null */
+  lagDays: number | null;
+  /** 是否应视为滞后 — 取最活跃的日频口径 (MARKET_STALE_DAYS) 判定 */
+  stale: boolean;
+};
+
+/**
+ * 模块级新鲜度 (供行情布局左侧提示): 取全部资产 lastDate 的最大值。
+ * 加密货币为日频全周更新, 其 lastDate 代表数据管道的真实前沿;
+ * 月频房产类日期更早, 不会成为最大值, 故无需分口径。
+ * 只读 asset 元信息, 不加载 K 线 — 布局层每页导航都会调用, 保持轻量。
+ */
+export async function getMarketFreshness(ref: Date = new Date()): Promise<MarketFreshness> {
+  const { assets, updatedAt } = await loadAssets();
+  const dates = assets
+    .map((a) => a.lastDate)
+    .filter((d): d is string => Boolean(d))
+    .sort();
+  const lastDate = dates.length > 0 ? dates[dates.length - 1] : null;
+  return {
+    updatedAt,
+    lastDate,
+    lagDays: lastDate ? lagDays(lastDate, ref) : null,
+    stale: lastDate ? isMarketStale(lastDate, "D", ref) : true,
+  };
+}
+
 export type AssetSeries = {
   symbol: string;
   period: Period;
