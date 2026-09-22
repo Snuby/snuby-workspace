@@ -45,6 +45,11 @@ export default async function MacroPage() {
             <div className="text-[13px] text-ink-faint">
               数据来源: 国家统计局 · 中国人民银行 · 海关总署 · 国家外汇管理局 |
               数据更新: {formatUpdatedAt(dashboard.updatedAt)} | 共 {total} 项指标
+              {dashboard.staleCount > 0 ? (
+                <span className="ml-1 text-amber-600">
+                  （其中 {dashboard.staleCount} 项数据源滞后，见卡片标注）
+                </span>
+              ) : null}
             </div>
             <FetchButton />
           </div>

@@ -89,7 +89,7 @@ export default async function HomePage() {
               <div className="mb-1.5 text-[14.5px] font-semibold">国家经济数据</div>
               <p className="text-[12.5px] leading-relaxed text-ink-muted">
                 中国宏观经济大盘：GDP、物价、PMI、货币社融、进出口、房地产等
-                25 项核心指标，每周一自动更新。
+                26 项核心指标，手动更新、实时读库。
               </p>
               <span className="mt-3 inline-block rounded-md bg-accent-soft px-2 py-0.5 text-[11px] text-accent">
                 进入模块

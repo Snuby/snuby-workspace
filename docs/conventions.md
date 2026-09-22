@@ -71,7 +71,11 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 
 ## 数据口径备忘
 
-- 东财报告式接口（GDP/CPI/PPI/PMI/工业增加值/外储）数据滞后约一年，属数据源限制。
+- **数据源选择原则**（spec 004）: 优先用国家统计局官方接口，不用东财「报告式」接口（`*_yearly`，属网页快讯口径，源本身滞后约一年）。已替换: 工业增加值 `macro_china_gyzjz`、CPI `macro_china_cpi`、PPI `macro_china_ppi`、PMI `macro_china_pmi`、外储 `macro_china_fx_gold`。
+- 官方月度源返回**降序**（最新在前），提取器一律 `sorted(key=date)` 归一升序。
+- **时效性判定**: `isStale(latestDate, freq)` 按频率容忍滞后月数 —— 月度 3、季度 6、半年度 8（`STALE_LAG_MONTHS`）。超限的指标在界面标注「数据源滞后 N 个月」，不隐藏。
+- 确认滞后且无免费替代源的 3 项: 社融增量 `shrzgm`（商务数据中心口径）、企业景气指数 `boom_index`（季度）、国房景气指数 `real_estate_index`。引用这些指标做判断时须注意时效。
 - `macro_china_gdp` 官方源只有 Q1 单季 + 累计期，累计期统一映射到季度末月份（03/06/09/12）。
 - 70 城房价同比 = 各城市「新建商品住宅价格指数-同比」减 100 后的均值。
 - 贸易差额 = (当月出口额 − 当月进口额) / 1e5，单位亿美元（源单位千美元）。
+- 指标口径说明文案统一维护在 `src/domain/macro.ts` 的 `INDICATOR_DESCRIPTIONS`（键 = 指标 key）。

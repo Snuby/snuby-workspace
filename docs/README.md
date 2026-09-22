@@ -40,3 +40,4 @@ draft → reviewed → implementing → done
 | 001 | workbench-mvp（工作台外壳 + 国家经济数据） | done |
 | 002 | macro-alerts（跟踪提醒） | done |
 | 003 | manual-fetch（手动数据更新） | done |
+| 004 | data-freshness（数据时效性修复） | done |

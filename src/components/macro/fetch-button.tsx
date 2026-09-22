@@ -93,7 +93,7 @@ export default function FetchButton() {
         {running ? (
           <>
             <span className="inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-ink-faint border-t-transparent" />
-            抓取中 {job?.done ?? 0}/{job?.total ?? 25}
+            抓取中 {job?.done ?? 0}/{job?.total ?? 26}
           </>
         ) : (
           <>

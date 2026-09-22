@@ -188,6 +188,53 @@ def extract_house_price():
     return [(d, round(sum(vs) / len(vs), 2)) for d, vs in sorted(by_date.items())]
 
 
+# Spec: 004-data-freshness — 以下改用国家统计局官方月度接口 (东财报告式接口滞后约 1 年)
+
+def extract_gyzjz():
+    """工业增加值同比 (统计局月度, 官方)"""
+    df = ak.macro_china_gyzjz()
+    rows = [(month_to_date(r["月份"]), clean(r.get("同比增长"))) for _, r in df.iterrows()]
+    return sorted(rows, key=lambda t: t[0])
+
+
+def extract_cpi():
+    """CPI 同比 (统计局月度, 全国-同比增长)"""
+    df = ak.macro_china_cpi()
+    rows = [(month_to_date(r["月份"]), clean(r.get("全国-同比增长"))) for _, r in df.iterrows()]
+    return sorted(rows, key=lambda t: t[0])
+
+
+def extract_ppi():
+    """PPI 同比 (统计局月度, 当月同比增长)"""
+    df = ak.macro_china_ppi()
+    rows = [(month_to_date(r["月份"]), clean(r.get("当月同比增长"))) for _, r in df.iterrows()]
+    return sorted(rows, key=lambda t: t[0])
+
+
+def extract_pmi():
+    """PMI (统计局月度, 官方): (制造业指数, 非制造业指数)"""
+    df = ak.macro_china_pmi()
+    mfg = sorted(((month_to_date(r["月份"]), clean(r.get("制造业-指数"))) for _, r in df.iterrows()),
+                 key=lambda t: t[0])
+    non = sorted(((month_to_date(r["月份"]), clean(r.get("非制造业-指数"))) for _, r in df.iterrows()),
+                 key=lambda t: t[0])
+    return mfg, non
+
+
+def extract_fx_reserves():
+    """官方外汇储备 (月度, 亿美元)"""
+    df = ak.macro_china_fx_gold()
+    rows = [(month_to_date(r["月份"]), clean(r.get("国家外汇储备-数值"))) for _, r in df.iterrows()]
+    return sorted(rows, key=lambda t: t[0])
+
+
+def extract_consumer_confidence():
+    """消费者信心指数 (东财月度, 指数值)"""
+    df = ak.macro_china_xfzxx()
+    rows = [(month_to_date(r["月份"]), clean(r.get("消费者信心指数-指数值"))) for _, r in df.iterrows()]
+    return sorted(rows, key=lambda t: t[0])
+
+
 def extract_retail():
     df = ak.macro_china_consumer_goods_retail()
     return [(str(r["月份"]).replace("年", "-").replace("月份", "").replace("月", ""),
@@ -230,19 +277,21 @@ def main():
         ("fiscal_revenue_yoy", "财政收入当月同比", "%", "月度", "growth",
          extract_czsr),
         ("ind_yoy", "工业增加值同比", "%", "月度", "growth",
-         lambda: extract_report("macro_china_industrial_production_yoy")),
+         extract_gyzjz),
         ("cpi_yoy", "CPI 同比", "%", "月度", "price",
-         lambda: extract_report("macro_china_cpi_yearly")),
+         extract_cpi),
         ("ppi_yoy", "PPI 同比", "%", "月度", "price",
-         lambda: extract_report("macro_china_ppi_yearly")),
+         extract_ppi),
         ("pmi_mfg", "制造业 PMI", "", "月度", "confidence",
-         lambda: extract_report("macro_china_pmi_yearly")),
+         lambda: extract_pmi()[0]),
         ("pmi_non_mfg", "非制造业 PMI", "", "月度", "confidence",
-         lambda: extract_report("macro_china_non_man_pmi")),
+         lambda: extract_pmi()[1]),
         ("unemployment", "城镇调查失业率", "%", "月度", "confidence",
          extract_unemployment),
         ("boom_index", "企业景气指数", "", "季度", "confidence",
          extract_boom),
+        ("consumer_confidence", "消费者信心指数", "", "月度", "confidence",
+         extract_consumer_confidence),
         ("retail_yoy", "社会消费品零售总额同比", "%", "月度", "consumption",
          extract_retail),
         ("fdi_yoy", "固定资产投资同比", "%", "月度", "consumption",
@@ -264,8 +313,8 @@ def main():
          lambda: extract_hgjck()[1]),
         ("trade_balance", "贸易差额", "亿美元", "月度", "trade",
          lambda: extract_hgjck()[2]),
-        ("fx_reserves", "外汇储备", "亿美元", "半年度", "risk",
-         lambda: extract_report("macro_china_fx_reserves_yearly")),
+        ("fx_reserves", "外汇储备", "亿美元", "月度", "risk",
+         extract_fx_reserves),
         ("real_estate_index", "房地产开发景气指数", "", "月度", "realestate",
          extract_real_estate),
         ("house_price_yoy", "70城新房价格指数同比(均值)", "%", "月度", "realestate",

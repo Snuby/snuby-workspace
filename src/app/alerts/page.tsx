@@ -31,6 +31,11 @@ function AlertRow({ item }: { item: AlertView }) {
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[13.5px] font-semibold">{item.label}</span>
           <span className="text-[12px] text-ink-faint">{item.indicatorName}</span>
+          {item.lag !== null ? (
+            <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-600">
+              数据源滞后 {item.lag} 个月
+            </span>
+          ) : null}
           {isTriggered ? (
             <span
               className={[

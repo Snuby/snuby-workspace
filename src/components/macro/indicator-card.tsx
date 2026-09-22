@@ -10,7 +10,7 @@ function formatValue(value: number, unit: string): string {
 }
 
 export default function IndicatorCard({ indicator }: { indicator: IndicatorView }) {
-  const { name, unit, freq, description, trend, latest } = indicator;
+  const { name, unit, freq, description, trend, latest, lag } = indicator;
 
   return (
     <div className="rounded-xl border border-line bg-surface p-4">
@@ -20,8 +20,13 @@ export default function IndicatorCard({ indicator }: { indicator: IndicatorView 
           {latest ? formatValue(latest.value, unit) : "—"}
         </span>
       </div>
-      <div className="mt-0.5 text-[11px] text-ink-faint">
-        {latest ? `最新: ${latest.date} · ${freq}` : "暂无数据"}
+      <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
+        <span>{latest ? `最新: ${latest.date} · ${freq}` : "暂无数据"}</span>
+        {lag !== null ? (
+          <span className="rounded-md bg-amber-50 px-1.5 py-0.5 text-[10.5px] text-amber-600">
+            数据源滞后 {lag} 个月
+          </span>
+        ) : null}
       </div>
       <div className="mt-2.5">
         {trend.length > 1 ? (
