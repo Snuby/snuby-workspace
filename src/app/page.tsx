@@ -1,9 +1,71 @@
-// Spec: 001-workbench-mvp — 工作台首页 (US-1 AC3)
+// Spec: 001-workbench-mvp — 工作台首页 (US-1 AC3); 卡片摘要见 spec 002 US-3
 
 import Link from "next/link";
 import Topbar from "@/components/workbench/topbar";
+import { getAlertsDigest, type AlertSummary, type AlertView } from "@/application/alert-service";
 
-export default function HomePage() {
+export const dynamic = "force-dynamic";
+
+function AlertsCard({ summary, topItems }: { summary: AlertSummary | null; topItems: AlertView[] }) {
+  const hasData = summary !== null;
+  return (
+    <Link
+      href="/alerts"
+      className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+    >
+      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-[#FAEEDA]">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#854F0B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+          <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+        </svg>
+      </div>
+      <div className="mb-1.5 text-[14.5px] font-semibold">跟踪提醒</div>
+      {!hasData ? (
+        <p className="text-[12.5px] leading-relaxed text-ink-muted">
+          数据不可用，请先在「国家经济数据」页更新数据。
+        </p>
+      ) : summary.triggered > 0 ? (
+        <>
+          <p className="text-[12.5px] leading-relaxed text-ink-muted">
+            当前触发 <b className="text-ink">{summary.triggered}</b> 项异动
+            {summary.danger > 0 ? (
+              <span className="ml-1 text-red-600">（严重 {summary.danger}）</span>
+            ) : null}
+          </p>
+          <ul className="mt-2 space-y-1">
+            {topItems.map((item) => (
+              <li key={item.ruleId} className="flex items-center gap-1.5 text-[12.5px]">
+                <span
+                  className={[
+                    "h-1.5 w-1.5 shrink-0 rounded-full",
+                    item.severity === "danger" ? "bg-red-500" : "bg-amber-500",
+                  ].join(" ")}
+                />
+                <span className="truncate text-ink">{item.label}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p className="text-[12.5px] leading-relaxed text-ink-muted">
+          一切正常，{summary.normal} 项指标均在阈值内。
+        </p>
+      )}
+      <span className="mt-3 inline-block rounded-md bg-accent-soft px-2 py-0.5 text-[11px] text-accent">
+        查看详情
+      </span>
+    </Link>
+  );
+}
+
+export default async function HomePage() {
+  let digest: Awaited<ReturnType<typeof getAlertsDigest>> | null = null;
+  try {
+    digest = await getAlertsDigest();
+  } catch {
+    digest = null; // DB 缺失时卡片降级提示, 不影响首页
+  }
+
   return (
     <>
       <Topbar title="工作台" />
@@ -50,21 +112,7 @@ export default function HomePage() {
               </span>
             </div>
 
-            <div className="rounded-xl border border-line bg-surface p-5 opacity-60">
-              <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg bg-[#FAEEDA]">
-                <svg viewBox="0 0 24 24" fill="none" stroke="#854F0B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-                  <circle cx="12" cy="12" r="9" />
-                  <path d="M12 7v5l3 3" />
-                </svg>
-              </div>
-              <div className="mb-1.5 text-[14.5px] font-semibold">跟踪提醒</div>
-              <p className="text-[12.5px] leading-relaxed text-ink-muted">
-                关键指标异动与数据发布提醒（规划中）。
-              </p>
-              <span className="mt-3 inline-block rounded-md bg-black/5 px-2 py-0.5 text-[11px] text-ink-faint">
-                敬请期待
-              </span>
-            </div>
+            <AlertsCard summary={digest?.summary ?? null} topItems={digest?.topItems ?? []} />
           </div>
         </div>
       </div>

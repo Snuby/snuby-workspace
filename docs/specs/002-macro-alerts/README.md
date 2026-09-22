@@ -1,6 +1,6 @@
 # Spec 002 — macro-alerts（跟踪提醒）
 
-状态: **draft**（待评审）
+状态: **done**
 
 ## 目标
 

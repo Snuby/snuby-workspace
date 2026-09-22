@@ -40,6 +40,8 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 | 国家经济数据 | Macro Data | `数据观察` 下的模块，展示中国宏观经济指标 |
 | 抓取任务 | `FetchJobState` | 一次数据抓取的运行态（idle/running/done/error），存 Node 进程内存（spec 003） |
 | 更新数据 | Fetch Button | `/macro` 页手动触发抓取的按钮，运行中禁用防重复 |
+| 告警规则 | `AlertRule` | 对指标的阈值/异动判定配置（threshold / delta_drop / compare 三类，spec 002） |
+| 告警项 | `AlertItem` | 一条规则对最新数据的评估结果（triggered / normal / no_data） |
 
 ## 代码风格
 
