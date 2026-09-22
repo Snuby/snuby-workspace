@@ -8,6 +8,7 @@
 npm install          # 安装依赖
 npm run fetch        # 抓取宏观数据写入 data/china_economy.db (需 python venv)
 npm run build && npm start   # 生产模式 http://localhost:3300 (日常使用推荐)
+npm test             # 领域层单测 (27 例)
 ```
 
 开发模式: `npm run dev`。注意 dev 模式每次导航需现场编译，页面响应 ~2s，属正常现象；日常使用请用生产模式（响应 ~0.2s）。改代码后需重新 `npm run build && npm start`。

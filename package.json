@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3300",
     "fetch": "python3 scripts/fetch_data.py",
+    "test": "node --import tsx --test src/domain/*.test.ts",
     "lint": "next lint"
   },
   "dependencies": {
@@ -23,6 +24,7 @@
     "eslint": "^9.18.0",
     "eslint-config-next": "^15.1.6",
     "tailwindcss": "^4.0.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.0"
   }
 }

@@ -64,6 +64,15 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 - 生产模式改代码后必须重新 build；数据更新（`npm run fetch`）无需重新 build，页面为 `force-dynamic` 实时读库。
 - 端口统一 **3300**（`start` 脚本已内置）。
 
+## 测试约定（spec 006）
+
+| 项 | 约定 |
+|---|---|
+| 运行 | `npm test`（Node 内置 `node:test`，`tsx` 作 TS 加载器） |
+| 位置 | 与被测模块同目录，命名 `*.test.ts` |
+| 范围 | 契约类纯逻辑（domain 层）必测；infra/application 的集成测试按需另立 spec |
+| 原则 | 断言固化 spec 契约（边界、排序、容忍度、key 完备性），不测实现细节 |
+
 ## Git 约定
 
 - 分支：`feat/<spec编号>-<slug>`，如 `feat/001-macro-dashboard`。

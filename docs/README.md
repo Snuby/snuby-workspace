@@ -10,6 +10,7 @@ docs/
 ├── conventions.md         # 全局编码与架构规范（所有 spec 必须遵守）
 └── specs/
     └── 001-workbench-mvp/ # 每个 spec 一个目录, 编号递增
+        ├── README.md        # 概要: 状态 + 目标 + 非目标
         ├── requirements.md  # 需求: 用户故事 + 验收标准
         ├── design.md        # 设计: 架构决策 + 数据流 + 接口契约
         └── tasks.md         # 任务: 拆解步骤 + 状态跟踪
@@ -32,6 +33,8 @@ draft → reviewed → implementing → done
 2. **术语一致**: 文档与代码使用同一套领域术语（见 `conventions.md` 术语表），如 `Indicator`（指标）、`SeriesPoint`（数据点）。
 3. **接口契约**: API 路由的请求/响应结构必须在对应 `design.md` 中定义，代码注释引用 spec 编号（如 `// Spec: 001-workbench-mvp`）。
 4. **任务可追溯**: `tasks.md` 中的每项任务对应一次可验证的提交，状态只允许 `[ ]` / `[x]` / `[-]`（取消）。
+5. **目录齐备**: 每个 spec 目录必须包含 `README.md` / `requirements.md` / `design.md` / `tasks.md` 四个文件（轻量 spec 的 design 可并入 README，但需在 README 中说明）；缺文件视为规格不完整。
+6. **测试即规格**: 契约类逻辑（阈值边界、排序、容忍度、key 完备性）必须有对应单测，改契约需先改 spec（见 spec 006）。
 
 ## 当前规格索引
 
@@ -42,3 +45,4 @@ draft → reviewed → implementing → done
 | 003 | manual-fetch（手动数据更新） | done |
 | 004 | data-freshness（数据时效性修复） | done |
 | 005 | industry-watch（行业观察） | done |
+| 006 | testing（领域层单测体系） | done |
