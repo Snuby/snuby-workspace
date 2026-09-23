@@ -43,17 +43,6 @@ const ICONS = {
       <rect x="15" y="7" width="4" height="10" rx="1" />
     </svg>
   ),
-  vc: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="M12 2v4" />
-      <path d="M12 18v4" />
-      <path d="M4.9 5l3.5 2" />
-      <path d="M15.6 17l3.5 2" />
-      <path d="M4.9 19l3.5-2" />
-      <path d="M15.6 7l3.5-2" />
-      <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" />
-    </svg>
-  ),
 };
 
 /** 「宏观经济」一级菜单对应的全部子页路径 (即二级菜单项, 见 section-tabs.tsx) */
@@ -62,14 +51,10 @@ const MACRO_PATHS: readonly string[] = ["/macro", "/industry", "/alerts"];
 /** 「资产行情」一级菜单对应的全部子页路径 (spec 009) */
 const MARKET_PATHS: readonly string[] = ["/market", "/metal", "/crypto", "/equity", "/realestate"];
 
-/** 「AI 创投观察」一级菜单对应的全部子页路径 (spec 010) */
-const VC_PATHS: readonly string[] = ["/ai-vc", "/ai-vc/analytics"];
-
 const NAV: NavLeaf[] = [
   { href: "/", label: "工作台", icon: ICONS.home },
   { href: "/macro", label: "宏观经济", icon: ICONS.chart, match: MACRO_PATHS },
   { href: "/market", label: "资产行情", icon: ICONS.market, match: MARKET_PATHS },
-  { href: "/ai-vc", label: "AI 创投观察", icon: ICONS.vc, match: VC_PATHS },
   { href: "/settings", label: "设置", icon: ICONS.gear },
 ];
 

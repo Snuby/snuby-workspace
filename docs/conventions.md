@@ -51,13 +51,8 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 | 归一化 | `normalize` | 以基准日收盘价折算为 100 的指数化（保留涨跌幅语义，非 min-max），基准点 `NORMALIZE_BASE = 100` |
 | 资产行情 | Market Quotes | **工作台一级菜单**，五个子页共用同一外壳（spec 009） |
 | 行情二级菜单 | `MARKET_SECTIONS` | 综合对比 `/market`、贵金属 `/metal`、加密货币 `/crypto`、股票指数 `/equity`、房产 `/realestate` |
-| 融资事件 | `DealEvent` | 一条 AI 融资记录：公司 / 轮次 / 原币金额 / USD 近似 / 公告日期 / 赛道 / 来源（spec 010） |
-| 赛道 | `Sector` | 10 个赛道分类 + `unclassified`；关键词规则 `SECTOR_TAGS` 命中取最高分（`classifySector`） |
-| 事件视图 | `DealEventView` | API/页面使用的视图模型（含折算后的 `amountUsd`，原币金额保留展示） |
-| 金额解析 | `parseAmount` | 纯函数：`$10M` / `€40M` / `¥500M` / `10亿元`；多金额取首个，失败 null（未披露） |
-| AI 创投观察 | AI VC Watch | **工作台一级菜单**，事件流 `/ai-vc` + 分析 `/ai-vc/analytics` 两页（spec 010） |
 
-## 信息架构（spec 008 / 009 / 010）
+## 信息架构（spec 008 / 009）
 
 ```
 侧边栏（一级菜单）
@@ -74,14 +69,10 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 │          ├── 加密货币  /crypto      BTC / ETH / DOGE
 │          ├── 股票指数  /equity      道指 / 纳指 / 恒生 / 上证（四市场合一页）
 │          └── 房产      /realestate  北京 / 上海房价（月频，禁用日/周粒度）
-├── AI 创投观察    /ai-vc        ← 一级入口，两个子页共用同一外壳 (spec 010)
-│     └─ 顶部二级菜单 (SectionTabs)
-│          ├── 事件流  /ai-vc         融资事件倒序列表 + 过滤/分页 + 手动录入
-│          └── 分析    /ai-vc/analytics  赛道分布 + 月度趋势（ECharts）
 └── 设置          /settings
 ```
 
-- 层级用 **Next.js 路由组** `src/app/(macro)/`、`src/app/(market)/`、`src/app/(vc)/` + 共享 `layout.tsx` 表达；URL 不带前缀，见 spec 008 design 决策 1。
+- 层级用 **Next.js 路由组** `src/app/(macro)/`、`src/app/(market)/` + 共享 `layout.tsx` 表达；URL 不带前缀，见 spec 008 design 决策 1。
 - 子页**不各自渲染 Topbar 与滚动容器**，由路由组 `layout.tsx` 统一提供；页面只返回内容节点。
 - 一级菜单激活判定：`NavLeaf.match` 列出该菜单对应的全部路径，任一命中即高亮。
 - **一个指标只属于一个二级菜单**：`getNationalDashboard()` 与 `getIndustryDashboard()` 的指标集互不相交、并集等于全量（`getMacroDashboard()`）；新增分组时默认归入「国家经济数据」，除非显式排除。
@@ -148,19 +139,6 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 - **贵金属 OHLC 存在已知不自洽**：COMEX 外盘期货源约 1.5%（金）/1.1%（银）的交易日 `low > open` 或 `high < close`（幅度 0.1~0.5%，且越近年份越多），即**开盘价不可靠**；收盘价、趋势与归一化合并图不受影响。经确认暂不修复，仅记录在案。
 - **两套配色语义分离**：K 线/涨跌用「红涨绿跌」token（`--color-up` / `--color-down`）；合并图曲线用资产分类色（`ASSET_COLORS`），不可混用。
 - **归一化口径**：各资产以自身基准日收盘价折算为 100（基准日独立，不强行对齐）；日期轴取所选资产交易日并集 + 前向填充，首点之前保持断线（`null`），不用回填值伪造历史。
-
-## 创投数据口径（spec 010）
-
-- **只沉淀融资事件，不做资讯聚合**：板块收录「公司 + 轮次 + 金额 + 公告日期 + 赛道 + 来源 + 链接」的结构化记录；RSS 文章正文、观点与讨论不进入 `deal_event`。
-- **数据源（2026-09-22 本机实测）**：TechCrunch Venture RSS（`https://techcrunch.com/category/venture/feed/`，WordPress 结构，小时级）为英文主源；HN Algolia API（`search_by_date` + `tags=story` + `restrictSearchableAttributes=title` + `numericFilters` 增量，首次回填近 90 天）为英文补充。IT桔子（HTTP 412 瑞数混淆）、烯牛（SPA 登录墙）、Dealroom 真实数据（app 内登录）、36氪 gateway（签名）均实测不可程序化抓取 → 中文源走人工录入（`source='manual'`），烯牛 MCP 适配器后置。
-- **事件判定**：标题必须命中融资信号词（raises/funding/series/valuation/ipo/secures/lands 等）**且**含金额（`$10M`/`€40M`/`10亿元` 等）或轮次词；否则视为促销/观点/讨论帖过滤（`is_funding_event`）。排除 `raises prices` 类价格新闻。
-- **金额口径**：`amount` + `currency` 存原币（解析失败 = `NULL` = 未披露，不入金额聚合）；`amount_usd` 按汇率常量近似换算（EUR 1.08 / GBP 1.27 / CNY 0.14，**非实时汇率**），仅用于跨币种聚合比较；原币金额始终展示（tooltip/行内）。
-- **赛道口径**：`SECTOR_TAGS` 关键词表（中英文），命中计数取最高分赛道；未命中 = `unclassified`。赛道用 TEXT + domain 常量表，扩展赛道不迁移表。
-- **轮次口径**：`ROUND_ALIASES` 归一化（`Series A`/`A轮` → `A`，`seed`/`种子轮` → `Seed`，`天使轮` → `Angel`）；非法轮次人工录入时存原文。
-- **去重与幂等**：主键 `id = '{source}:{source_id}'`（guid / objectID / 人工 uuid4），`INSERT OR REPLACE` 幂等；`url` 非唯一索引支持「同链接多轮次」（人工录入 409 提示后强制确认可写）。
-- **增量与短路**：HN 按 `created_at_i > {库内最大日期-1天}` 增量拉取；写入前比对该源 `announced_at` 最大值，源最新 ≤ 库内最新即 `[SKIP]` 跳过写事务。
-- **聚合口径**：`amount_usd IS NULL` 的事件计入 `count`、不计入金额合计；月度键 = `announced_at` 前 7 位（`YYYY-MM`）。
-- **展示格式**：USD 统一 `$X.XM`/`$X.XB`（1 位小数，含 `$0.5M` 这类 <1M 值）；CNY 原币用中文单位（`¥7000万`/`¥1.2亿`）；未披露统一「未披露」。
 - **增量策略**：全量幂等 upsert（`INSERT OR REPLACE`）+ `last_date` 短路；上游修正历史时重跑即可自愈。
 - **时效判定**：日频资产滞后 >5 天、月频 >60 天（`MARKET_STALE_DAYS` / `MARKET_STALE_DAYS_MONTHLY`）在界面标注 amber 徽标。
 - **ECharts 蜡烛数据顺序是 `[open, close, low, high]`**，与 OHLC 直觉顺序不同，写反会静默畸变。

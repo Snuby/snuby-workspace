@@ -9,7 +9,7 @@ npm install          # 安装依赖
 npm run fetch        # 抓取宏观数据写入 data/china_economy.db (需 python venv)
 npm run fetch:market # 抓取资产行情写入 data/market.db (11 项资产, 幂等)
 npm run build && npm start   # 生产模式 http://localhost:3300 (日常使用推荐)
-npm test             # 测试套件 (158 例: domain 单测 + application 集成测试)
+npm test             # 测试套件 (97 例: domain 单测 + application 集成测试)
 ```
 
 开发模式: `npm run dev`。注意 dev 模式每次导航需现场编译，页面响应 ~2s，属正常现象；日常使用请用生产模式（响应 ~0.2s）。改代码后需重新 `npm run build && npm start`。
@@ -26,14 +26,13 @@ snuby-workspace/
 │   ├── specs/001-workbench-mvp/
 ├── scripts/
 │   ├── fetch_data.py      # Python 宏观数据管道 (akshare -> SQLite)
-│   ├── fetch_market.py    # Python 行情数据管道 (akshare/Binance -> SQLite)
-│   └── fetch_vc.py        # Python 创投事件管道 (TechCrunch RSS + HN Algolia -> SQLite)
+│   └── fetch_market.py    # Python 行情数据管道 (akshare/Binance -> SQLite)
 ├── data/                  # SQLite 数据库 (gitignore, 可由管道重建)
 └── src/
     ├── domain/            # 领域类型与规则
     ├── application/       # 用例编排
     ├── infrastructure/    # SQLite 仓储
-    ├── components/        # UI 组件 (workbench / macro / market / vc)
+    ├── components/        # UI 组件 (workbench / macro / market)
     └── app/               # Next.js 路由 (页面 + API)
 ```
 
@@ -45,12 +44,9 @@ snuby-workspace/
 - **跟踪提醒** `/alerts` — 8 条预置规则实时评估，触发中/正常/无数据分组展示（spec 002）
 - **资产行情** `/market` — 综合对比：11 项资产归一化合并图（基准点 100）+ 资产卡，日/周/月/年粒度（spec 009）
   - `/metal` 贵金属（黄金/白银 COMEX）· `/crypto` 加密货币（BTC/ETH/DOGE）· `/equity` 股票指数（道指/纳指/恒生/上证）· `/realestate` 房产（京沪房价，月频）
-- **AI 创投观察** `/ai-vc` — AI 融资事件流：英文源自动抓取（TechCrunch + HN）、中文源手动录入，赛道/来源/金额过滤 + 分页（spec 010）
-  - `/ai-vc/analytics` 分析：赛道分布（事件数/融资额切换）+ 月度融资趋势（柱+线双轴，ECharts）
 - **API** `GET /api/macro/indicators` — 指标数据 JSON（契约见 spec 001 design.md）
 - **API** `GET /api/macro/alerts` — 告警评估结果 JSON（契约见 spec 002 design.md）
 - **API** `GET /api/market/assets` / `kline` / `compare` — 行情数据 JSON（契约见 spec 009 design.md）
-- **API** `GET /api/vc/deals` / `stats` — 融资事件与聚合 JSON；`POST /api/vc/deals` 人工录入（契约见 spec 010 design.md）
 - **设置** `/settings` — 数据管道信息
 
 ## 环境变量
@@ -59,7 +55,6 @@ snuby-workspace/
 |------|--------|------|
 | `MACRO_DB_PATH` | `<项目根>/data/china_economy.db` | 宏观数据库路径 |
 | `MARKET_DB_PATH` | `<项目根>/data/market.db` | 行情数据库路径 |
-| `VC_DB_PATH` | `<项目根>/data/vc.db` | AI 创投事件数据库路径（spec 010） |
 | `FETCH_PYTHON_BIN` | 本地 venv python（含 akshare） | 抓取子进程使用的 Python 解释器 |
 
 ## 数据管道
@@ -71,7 +66,5 @@ snuby-workspace/
 数据更新为**手动触发**: `/macro` 页「更新数据」按钮 → `POST /api/macro/fetch`（运行中重复请求返回 409）→ 轮询 `GET /api/macro/fetch/status` 显示逐指标进度（spec 003）。定时任务已于 spec 003 取消。
 
 行情管道 `scripts/fetch_market.py` 抓取 11 项资产日线（43,000+ 行），幂等 upsert + `last_date` 短路；`/market` 页「更新行情」按钮触发 `POST /api/market/fetch`，亦可 `npm run fetch:market` 独立执行。数据源与口径详见 `docs/conventions.md`「行情数据口径」。
-
-创投管道 `scripts/fetch_vc.py` 抓取 AI 融资事件（TechCrunch Venture RSS + HN Algolia，首次回填近 90 天），写入独立库 `data/vc.db` 的 `deal_event` 表；信号词 + 金额/轮次过滤剔除促销与讨论帖，幂等 upsert + `announced_at` 短路，单源失败隔离。`/ai-vc` 页「更新融资」按钮触发 `POST /api/vc/fetch`，亦可 `npm run fetch:vc` 独立执行。中文源（IT桔子/烯牛等）反爬不可抓取 → 页面表单手动录入（`source='manual'`）。口径详见 `docs/conventions.md`「创投数据口径」。
 
 Python 环境: `/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python`（akshare 已安装）。
