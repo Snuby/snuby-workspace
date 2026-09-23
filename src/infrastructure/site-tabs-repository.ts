@@ -8,9 +8,9 @@ import path from "node:path";
 
 export type SiteTabRow = { id: string; url: string; title: string };
 export type SiteHistoryRow = { url: string; title: string; closedAt: number };
-export type SiteSettings = { maxTabs: number; maxHistory: number };
+export type SiteSettings = { maxTabs: number; maxHistory: number; activeSite?: string | null };
 
-const DEFAULT_SETTINGS: SiteSettings = { maxTabs: 10, maxHistory: 100 };
+const DEFAULT_SETTINGS: SiteSettings = { maxTabs: 10, maxHistory: 100, activeSite: null };
 
 let db: DatabaseSync | null = null;
 
@@ -41,31 +41,40 @@ function getDb(): DatabaseSync {
     CREATE TABLE IF NOT EXISTS site_settings (
       module      TEXT PRIMARY KEY,
       max_tabs    INTEGER NOT NULL DEFAULT 10,
-      max_history INTEGER NOT NULL DEFAULT 100
+      max_history INTEGER NOT NULL DEFAULT 100,
+      active_site TEXT
     );
   `);
+  // 兼容旧库: 若缺 active_site 列则补 (PRAGMA 检查, 不依赖 ALTER ... IF NOT EXISTS 版本支持)
+  const cols = db.prepare("PRAGMA table_info(site_settings)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "active_site")) {
+    db.exec("ALTER TABLE site_settings ADD COLUMN active_site TEXT");
+  }
   return db;
 }
 
 /** 读取模块设置, 无记录则落默认值并返回 */
 export function getSettings(module: string): SiteSettings {
   const row = getDb()
-    .prepare("SELECT max_tabs, max_history FROM site_settings WHERE module = ?")
-    .get(module) as { max_tabs: number; max_history: number } | undefined;
+    .prepare("SELECT max_tabs, max_history, active_site FROM site_settings WHERE module = ?")
+    .get(module) as { max_tabs: number; max_history: number; active_site: string | null } | undefined;
   if (!row) {
     setSettings(module, DEFAULT_SETTINGS);
     return { ...DEFAULT_SETTINGS };
   }
-  return { maxTabs: row.max_tabs, maxHistory: row.max_history };
+  return { maxTabs: row.max_tabs, maxHistory: row.max_history, activeSite: row.active_site };
 }
 
 export function setSettings(module: string, s: SiteSettings): void {
   getDb()
     .prepare(
-      `INSERT INTO site_settings (module, max_tabs, max_history) VALUES (?, ?, ?)
-       ON CONFLICT(module) DO UPDATE SET max_tabs = excluded.max_tabs, max_history = excluded.max_history`,
+      `INSERT INTO site_settings (module, max_tabs, max_history, active_site) VALUES (?, ?, ?, ?)
+       ON CONFLICT(module) DO UPDATE SET
+         max_tabs = excluded.max_tabs,
+         max_history = excluded.max_history,
+         active_site = excluded.active_site`,
     )
-    .run(module, s.maxTabs, s.maxHistory);
+    .run(module, s.maxTabs, s.maxHistory, s.activeSite ?? null);
 }
 
 /** 读取某模块全部站点组的标签与历史 */

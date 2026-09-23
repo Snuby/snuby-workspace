@@ -76,9 +76,11 @@ export async function POST(req: Request) {
     if (action === "settings") {
       const maxTabs = Number(body.maxTabs);
       const maxHistory = Number(body.maxHistory);
+      const activeSite = typeof body.activeSite === "string" && body.activeSite ? body.activeSite : null;
       const st: SiteSettings = {
         maxTabs: Number.isInteger(maxTabs) ? maxTabs : 10,
         maxHistory: Number.isInteger(maxHistory) ? maxHistory : 100,
+        activeSite,
       };
       setSettings(moduleKey, st);
       return NextResponse.json({ ok: true });

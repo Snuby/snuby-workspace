@@ -31,7 +31,7 @@ export type SiteHistoryEntry = {
   closedAt: number;
 };
 
-type SiteSettings = { maxTabs: number; maxHistory: number };
+type SiteSettings = { maxTabs: number; maxHistory: number; activeSite?: string | null };
 type TabView = { siteId: string; tabId: string };
 
 const HOME_SUFFIX = "::home";
@@ -90,12 +90,6 @@ const IconX = ({ className }: { className?: string }) => (
   <Icon className={className}>
     <path d="M18 6 6 18" />
     <path d="m6 6 12 12" />
-  </Icon>
-);
-const IconPlus = ({ className }: { className?: string }) => (
-  <Icon className={className}>
-    <path d="M5 12h14" />
-    <path d="M12 5v14" />
   </Icon>
 );
 
@@ -158,18 +152,26 @@ export default function SiteBrowser({
         const res = await fetch(`/api/site-tabs?module=${encodeURIComponent(moduleKey)}`);
         if (!res.ok) return;
         const data = await res.json();
-        if (data.settings) setSettings(data.settings);
+        if (data.settings) {
+          setSettings(data.settings);
+          // 恢复上次激活站点 (非受控模式)
+          if (!activeSiteProp && typeof data.settings.activeSite === "string") {
+            setActiveSiteInner(data.settings.activeSite);
+          }
+        }
         if (data.tabs) {
-          // 清理幽灵标签: 丢弃半加载态(标题为 "…")的标签 — 无保留价值, 重新点击即恢复;
-          // 同组同 URL 只保留一个 (历史遗留的双 popup 重复标签)
+          // 只去重同 URL 重复(保留标题完整者); 孤立的 "…" 标签保留 — URL 有效, 激活渲染后标题会自然更新
           const cleaned: Record<string, SiteTab[]> = {};
           for (const [sid, tabs] of Object.entries(data.tabs as Record<string, SiteTab[]>)) {
             const byUrl = new Map<string, SiteTab>();
             for (const t of tabs) {
-              if (t.title === LOADING_DOT) continue;
               const k = t.url.split("#")[0];
               const existing = byUrl.get(k);
-              if (!existing) byUrl.set(k, t);
+              if (!existing) {
+                byUrl.set(k, t);
+              } else if (existing.title === LOADING_DOT && t.title !== LOADING_DOT) {
+                byUrl.set(k, t);
+              }
             }
             cleaned[sid] = [...byUrl.values()];
           }
@@ -198,6 +200,23 @@ export default function SiteBrowser({
     return () => window.removeEventListener("snuby-webview-popup", onPopup);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupId, loaded]);
+
+  // —— 激活站点持久化 (非受控模式; 切站点/加载恢复后落库, 下次进入模块恢复) ——
+  useEffect(() => {
+    if (activeSiteProp || !loaded) return;
+    void fetch("/api/site-tabs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        module: moduleKey,
+        action: "settings",
+        maxTabs: settings.maxTabs,
+        maxHistory: settings.maxHistory,
+        activeSite: activeSiteInner,
+      }),
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSiteInner, loaded]);
 
   // —— 标签页操作 ——
   const tabsOf = useCallback(
@@ -500,14 +519,6 @@ export default function SiteBrowser({
               </div>
             );
           })}
-          <button
-            type="button"
-            title="新建标签"
-            onClick={() => openTab(groupId, activeSiteDef.url)}
-            className="mb-[6px] flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-ink-faint transition-colors hover:bg-black/10 hover:text-ink"
-          >
-            <IconPlus className="h-3.5 w-3.5" />
-          </button>
         </div>
 
         {/* 工具栏 */}
