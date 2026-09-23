@@ -7,6 +7,7 @@
 // 桌面版(Electron) 渲染 <webview>; 非 Electron 渲染外链兜底 (Web 版不再维护)。
 
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { webviewPool } from "./webview-pool";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -157,6 +158,31 @@ export default function SiteBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const groupId = addressMode ? "default" : activeSite;
+  // 激活标签变化 → touch 池内对应 webview 的活跃时间 (切到即活跃, 防止被清扫误销毁)
+  useEffect(() => {
+    const tabId = activeTab && activeTab.siteId === groupId ? activeTab.tabId : null;
+    if (tabId) webviewPool.touch(`${moduleKey}:${groupId}:${tabId}`);
+  }, [activeTab, groupId, moduleKey]);
+  // 读取全局 WebView 保留策略 (设置页 module=webview 行), 应用到全局池
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/site-tabs?module=webview");
+        if (!res.ok) return;
+        const data = await res.json();
+        const sv = data.settings as { webviewMinKeep?: number; webviewRetentionHours?: number };
+        if (
+          sv &&
+          typeof sv.webviewMinKeep === "number" &&
+          typeof sv.webviewRetentionHours === "number"
+        ) {
+          webviewPool.setPolicy(sv.webviewMinKeep, sv.webviewRetentionHours * 3600 * 1000);
+        }
+      } catch {
+        // 读取失败保持默认策略 (5 个 + 3 小时)
+      }
+    })();
+  }, []);
 
   // —— 数据加载 (SQLite, 每模块) ——
   useEffect(() => {
@@ -610,6 +636,7 @@ export default function SiteBrowser({
             style={t.id === activeTabDef.id ? undefined : { display: "none" }}
           >
             <SiteWebview
+              moduleKey={moduleKey}
               src={t.url}
               siteId={groupId}
               tabId={t.id}
@@ -623,40 +650,58 @@ export default function SiteBrowser({
   );
 }
 
-/** 激活标签的 webview 挂载 (每标签一个实例; 切换时重建, 内部浏览状态不保留) */
+/** 标签 webview: 全局池化实例
+ * - 首次挂载创建 webview 并存入 webviewPool (key=module:site:tab)
+ * - 站点/模块切换卸载时, webview 移入池的隐藏容器保留, 浏览状态不丢
+ * - 切回时直接取回原实例 append 到宿主 div, 无需重新加载
+ * - src 只在新建时取一次: 标签 url 后续变化 (did-navigate 回写) 不触发重载, 避免 SPA 无限刷新
+ * - 池内不活跃超过 30 分钟的实例由 webviewPool 后台清扫销毁
+ */
 function SiteWebview({
+  moduleKey,
   src,
   siteId,
   tabId,
   partition,
   onRef,
 }: {
+  moduleKey: string;
   src: string;
   siteId: string;
   tabId: string;
   partition?: string;
   onRef: (el: HTMLElement | null, siteId: string, tabId: string) => void;
 }) {
-  // src 只在挂载时取一次: 标签 url 后续变化 (did-navigate 回写) 不得触发 webview 重载,
-  // 否则 SPA 站点 (微信后台/小红书) 会无限刷新。切换标签由外层 key 重建本组件, 新实例用新 src。
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const key = useMemo(() => `${moduleKey}:${siteId}:${tabId}`, [moduleKey, siteId, tabId]);
   const [initialSrc] = useState(src);
-  const setEl = useCallback(
-    (el: HTMLElement | null) => {
-      onRef(el, siteId, tabId);
-    },
-    [onRef, siteId, tabId],
-  );
 
-  return createElement("div", { className: "h-full w-full" }, [
-    createElement("webview", {
-      ref: setEl,
-      src: initialSrc,
-      partition,
-      allowpopups: "true",
-      className: "h-full w-full border-0",
-      style: { width: "100%", height: "100%" },
-    }),
-  ]);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    let el = webviewPool.get(key);
+    if (!el) {
+      el = document.createElement("webview");
+      el.setAttribute("src", initialSrc);
+      if (partition) el.setAttribute("partition", partition);
+      el.setAttribute("allowpopups", "true");
+      el.setAttribute("class", "h-full w-full border-0");
+      el.style.width = "100%";
+      el.style.height = "100%";
+      webviewPool.put(key, el);
+      onRef(el, siteId, tabId);
+    } else {
+      webviewPool.touch(key);
+    }
+    host.appendChild(el);
+    return () => {
+      // 组件卸载: 把 webview 移入全局隐藏容器保留 (不随 React DOM 销毁)
+      webviewPool.hide(key, el);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return createElement("div", { ref: hostRef, className: "h-full w-full" });
 }
 
 function ToolButton({

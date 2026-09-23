@@ -8,9 +8,22 @@ import path from "node:path";
 
 export type SiteTabRow = { id: string; url: string; title: string };
 export type SiteHistoryRow = { url: string; title: string; closedAt: number };
-export type SiteSettings = { maxTabs: number; maxHistory: number; activeSite?: string | null };
+export type SiteSettings = {
+  maxTabs: number;
+  maxHistory: number;
+  activeSite?: string | null;
+  /** 全局 WebView 保留策略 (存 module=webview 行, 其他模块行为 null 表示沿用库内值) */
+  webviewMinKeep?: number | null;
+  webviewRetentionHours?: number | null;
+};
 
-const DEFAULT_SETTINGS: SiteSettings = { maxTabs: 10, maxHistory: 100, activeSite: null };
+const DEFAULT_SETTINGS: SiteSettings = {
+  maxTabs: 10,
+  maxHistory: 100,
+  activeSite: null,
+  webviewMinKeep: 5,
+  webviewRetentionHours: 3,
+};
 
 let db: DatabaseSync | null = null;
 
@@ -42,7 +55,9 @@ function getDb(): DatabaseSync {
       module      TEXT PRIMARY KEY,
       max_tabs    INTEGER NOT NULL DEFAULT 10,
       max_history INTEGER NOT NULL DEFAULT 100,
-      active_site TEXT
+      active_site TEXT,
+      webview_min_keep          INTEGER NOT NULL DEFAULT 5,
+      webview_retention_hours   INTEGER NOT NULL DEFAULT 3
     );
   `);
   // 兼容旧库: 若缺 active_site 列则补 (PRAGMA 检查, 不依赖 ALTER ... IF NOT EXISTS 版本支持)
@@ -50,31 +65,63 @@ function getDb(): DatabaseSync {
   if (!cols.some((c) => c.name === "active_site")) {
     db.exec("ALTER TABLE site_settings ADD COLUMN active_site TEXT");
   }
+  if (!cols.some((c) => c.name === "webview_min_keep")) {
+    db.exec("ALTER TABLE site_settings ADD COLUMN webview_min_keep INTEGER NOT NULL DEFAULT 5");
+  }
+  if (!cols.some((c) => c.name === "webview_retention_hours")) {
+    db.exec("ALTER TABLE site_settings ADD COLUMN webview_retention_hours INTEGER NOT NULL DEFAULT 3");
+  }
   return db;
 }
 
 /** 读取模块设置, 无记录则落默认值并返回 */
 export function getSettings(module: string): SiteSettings {
   const row = getDb()
-    .prepare("SELECT max_tabs, max_history, active_site FROM site_settings WHERE module = ?")
-    .get(module) as { max_tabs: number; max_history: number; active_site: string | null } | undefined;
+    .prepare(
+      "SELECT max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours FROM site_settings WHERE module = ?",
+    )
+    .get(module) as
+    | {
+        max_tabs: number;
+        max_history: number;
+        active_site: string | null;
+        webview_min_keep: number;
+        webview_retention_hours: number;
+      }
+    | undefined;
   if (!row) {
     setSettings(module, DEFAULT_SETTINGS);
     return { ...DEFAULT_SETTINGS };
   }
-  return { maxTabs: row.max_tabs, maxHistory: row.max_history, activeSite: row.active_site };
+  return {
+    maxTabs: row.max_tabs,
+    maxHistory: row.max_history,
+    activeSite: row.active_site,
+    webviewMinKeep: row.webview_min_keep,
+    webviewRetentionHours: row.webview_retention_hours,
+  };
 }
 
 export function setSettings(module: string, s: SiteSettings): void {
+  // webview 保留策略是全局配置 (module=webview 行): 其他模块保存设置时未显式传入,
+  // 必须保留库内已有值, 不得被默认值覆盖
+  const existing = getDb()
+    .prepare("SELECT webview_min_keep, webview_retention_hours FROM site_settings WHERE module = ?")
+    .get(module) as { webview_min_keep: number; webview_retention_hours: number } | undefined;
+  const minKeep = s.webviewMinKeep ?? existing?.webview_min_keep ?? 5;
+  const retention = s.webviewRetentionHours ?? existing?.webview_retention_hours ?? 3;
   getDb()
     .prepare(
-      `INSERT INTO site_settings (module, max_tabs, max_history, active_site) VALUES (?, ?, ?, ?)
+      `INSERT INTO site_settings (module, max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(module) DO UPDATE SET
          max_tabs = excluded.max_tabs,
          max_history = excluded.max_history,
-         active_site = excluded.active_site`,
+         active_site = excluded.active_site,
+         webview_min_keep = excluded.webview_min_keep,
+         webview_retention_hours = excluded.webview_retention_hours`,
     )
-    .run(module, s.maxTabs, s.maxHistory, s.activeSite ?? null);
+    .run(module, s.maxTabs, s.maxHistory, s.activeSite ?? null, minKeep, retention);
 }
 
 /** 读取某模块全部站点组的标签与历史 */
