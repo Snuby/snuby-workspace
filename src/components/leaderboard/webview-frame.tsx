@@ -37,19 +37,9 @@ export default function WebviewFrame({
     style: { flex: "1 1 0%", minHeight: 0 },
   });
 
+  // spec 016: 去除顶条提示与「在新窗口打开」链接 (用户批复 2026-09-23)
   return (
     <div className="flex h-full w-full flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-4 py-2 text-[12px] text-ink-muted">
-        <span>内容跟随官方页面实时更新；交互与滚动在框架内进行。</span>
-        <a
-          href={src}
-          target="_blank"
-          rel="noreferrer"
-          className="shrink-0 font-medium text-accent-deep hover:underline"
-        >
-          在新窗口打开 ↗
-        </a>
-      </div>
       {webview}
     </div>
   );
