@@ -79,9 +79,15 @@ function applyDesktopEnv(dataDir) {
 }
 
 /** 启动 next 生产服务器 (utilityProcess.fork, 无 Dock 图标), 返回随机可用端口 */
+const NEXT_LOG = "/tmp/snuby-next.log";
+function logNext(msg) {
+  try { fs.appendFileSync(NEXT_LOG, `[${new Date().toISOString()}] ${msg}\n`); } catch {}
+}
+
 function startNextServer() {
   // 开发便利: 外部已手动起 next start (如 SNUBY_EXTERNAL_PORT=3310) 时直接复用,
   // 便于单独调试 main 进程而不用每次等 next-server fork。打包态不设置此 env, 行为不变。
+  logNext("startNextServer called, SNUBY_EXTERNAL_PORT=" + process.env.SNUBY_EXTERNAL_PORT);
   if (process.env.SNUBY_EXTERNAL_PORT) {
     const port = Number(process.env.SNUBY_EXTERNAL_PORT);
     if (Number.isInteger(port) && port > 0) return Promise.resolve(port);
@@ -92,6 +98,7 @@ function startNextServer() {
     const tryPort = (port) => {
       if (attempts > 10) return reject(new Error("未找到可用端口"));
       attempts += 1;
+      logNext("fork attempt port=" + port + " cli=" + cli + " appPath=" + app.getAppPath());
       const child = utilityProcess.fork(
         cli,
         ["start", "-H", "127.0.0.1", "-p", String(port)],
@@ -101,6 +108,7 @@ function startNextServer() {
           stdio: "pipe",
         },
       );
+      logNext("fork returned pid=" + child.pid);
       let settled = false;
       let logs = "";
       const net = require("node:net");
@@ -122,10 +130,12 @@ function startNextServer() {
         });
       child.stdout.on("data", async (d) => {
         logs += String(d);
+        logNext("stdout: " + String(d).slice(0, 200));
         if (!settled && /Local:|Ready/.test(logs)) {
           settled = true;
           // Ready 打印 ≠ HTTP 可服务 (冷启动时序), 轮询端口就绪再 resolve; 超时视为失败
           const ok = await waitUntilReachable(Date.now() + 20000);
+          logNext("port ready check port=" + port + " ok=" + ok);
           if (!ok) return reject(new Error(`端口 ${port} 在 20s 内未就绪`));
           app.on("will-quit", () => {
             try {
@@ -139,6 +149,7 @@ function startNextServer() {
         logs += String(d);
       });
       child.on("exit", (code) => {
+        logNext("child exit code=" + code + " settled=" + settled + " port=" + port);
         if (!settled) {
           // 端口被占用 (EADDRINUSE) 等非零退出 → 试下一个端口
           if (code !== null) tryPort(port + 1);
@@ -146,6 +157,7 @@ function startNextServer() {
         }
       });
       child.on("error", (e) => {
+        logNext("child error: " + String(e));
         if (!settled) reject(e);
       });
     };
