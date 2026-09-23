@@ -9,7 +9,7 @@ npm install          # 安装依赖
 npm run fetch        # 抓取宏观数据写入 data/china_economy.db (需 python venv)
 npm run fetch:market # 抓取资产行情写入 data/market.db (11 项资产, 幂等)
 npm run build && npm start   # 生产模式 http://localhost:3300 (日常使用推荐)
-npm test             # 测试套件 (97 例: domain 单测 + application 集成测试)
+npm test             # 测试套件 (106 例: domain 单测 + application 集成测试)
 ```
 
 开发模式: `npm run dev`。注意 dev 模式每次导航需现场编译，页面响应 ~2s，属正常现象；日常使用请用生产模式（响应 ~0.2s）。改代码后需重新 `npm run build && npm start`。
@@ -44,6 +44,9 @@ snuby-workspace/
 - **跟踪提醒** `/alerts` — 8 条预置规则实时评估，触发中/正常/无数据分组展示（spec 002）
 - **资产行情** `/market` — 综合对比：11 项资产归一化合并图（基准点 100）+ 资产卡，日/周/月/年粒度（spec 009）
   - `/metal` 贵金属（黄金/白银 COMEX）· `/crypto` 加密货币（BTC/ETH/DOGE）· `/equity` 股票指数（道指/纳指/恒生/上证）· `/realestate` 房产（京沪房价，月频）
+- **AI 模型榜单** `/ai-leaderboard` — 双榜单板块（spec 011）：
+  - `/ai-leaderboard` Artificial Analysis 官方页 iframe 直嵌（实时跟随）
+  - `/ai-leaderboard/openrouter` OpenRouter 排名：官方公开 API 服务端聚合自渲染（Top 15 横向柱图 + Top 50 表格，按真实 token 用量，零本地数据）
 - **API** `GET /api/macro/indicators` — 指标数据 JSON（契约见 spec 001 design.md）
 - **API** `GET /api/macro/alerts` — 告警评估结果 JSON（契约见 spec 002 design.md）
 - **API** `GET /api/market/assets` / `kline` / `compare` — 行情数据 JSON（契约见 spec 009 design.md）

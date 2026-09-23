@@ -49,3 +49,4 @@ draft → reviewed → implementing → done
 | 007 | integration-tests（用例层集成测试） | done |
 | 008 | macro-hierarchy（宏观经济层级收敛） | done |
 | 009 | market-quotes（资产行情板块） | done |
+| 011 | ai-leaderboard（AI 模型榜单板块） | done |

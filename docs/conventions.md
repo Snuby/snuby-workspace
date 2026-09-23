@@ -51,8 +51,10 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 | 归一化 | `normalize` | 以基准日收盘价折算为 100 的指数化（保留涨跌幅语义，非 min-max），基准点 `NORMALIZE_BASE = 100` |
 | 资产行情 | Market Quotes | **工作台一级菜单**，五个子页共用同一外壳（spec 009） |
 | 行情二级菜单 | `MARKET_SECTIONS` | 综合对比 `/market`、贵金属 `/metal`、加密货币 `/crypto`、股票指数 `/equity`、房产 `/realestate` |
+| AI 模型榜单 | AI Leaderboard | **工作台一级菜单**，两源共用同一外壳（spec 011） |
+| 榜单二级菜单 | `LEADERBOARD_PATHS` | Artificial Analysis `/ai-leaderboard`（iframe 直嵌）、OpenRouter 排名 `/ai-leaderboard/openrouter`（官方公开 API 自渲染） |
 
-## 信息架构（spec 008 / 009）
+## 信息架构（spec 008 / 009 / 011）
 
 ```
 侧边栏（一级菜单）
@@ -69,10 +71,14 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 │          ├── 加密货币  /crypto      BTC / ETH / DOGE
 │          ├── 股票指数  /equity      道指 / 纳指 / 恒生 / 上证（四市场合一页）
 │          └── 房产      /realestate  北京 / 上海房价（月频，禁用日/周粒度）
+├── AI 模型榜单  /ai-leaderboard ← 一级入口，两源共用同一外壳 (spec 011)
+│     └─ 顶部二级菜单 (SectionTabs)
+│          ├── Artificial Analysis  /ai-leaderboard       iframe 直嵌官方页
+│          └── OpenRouter 排名      /ai-leaderboard/openrouter  官方公开 API 服务端自渲染（Top15 图 + Top50 表）
 └── 设置          /settings
 ```
 
-- 层级用 **Next.js 路由组** `src/app/(macro)/`、`src/app/(market)/` + 共享 `layout.tsx` 表达；URL 不带前缀，见 spec 008 design 决策 1。
+- 层级用 **Next.js 路由组** `src/app/(macro)/`、`src/app/(market)/`、`src/app/(leaderboard)/` + 共享 `layout.tsx` 表达；URL 不带前缀，见 spec 008 design 决策 1。
 - 子页**不各自渲染 Topbar 与滚动容器**，由路由组 `layout.tsx` 统一提供；页面只返回内容节点。
 - 一级菜单激活判定：`NavLeaf.match` 列出该菜单对应的全部路径，任一命中即高亮。
 - **一个指标只属于一个二级菜单**：`getNationalDashboard()` 与 `getIndustryDashboard()` 的指标集互不相交、并集等于全量（`getMacroDashboard()`）；新增分组时默认归入「国家经济数据」，除非显式排除。

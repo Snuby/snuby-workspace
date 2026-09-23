@@ -1,6 +1,7 @@
 // Spec: 001-workbench-mvp — 工作台首页 (US-1 AC3); 卡片摘要见 spec 002 US-3
 // Spec: 008-macro-hierarchy — 三个数据模块收敛到「宏观经济」, 卡片计数由用例层实际范围推导 (US-3 AC3)
 // Spec: 009-market-quotes — 新增「资产行情」卡片
+// Spec: 011-ai-leaderboard — 新增「AI 模型榜单」卡片 (纯链接, 无数据库依赖)
 
 import Link from "next/link";
 import Topbar from "@/components/workbench/topbar";
@@ -123,8 +124,10 @@ export default async function HomePage() {
         <div className="mx-auto max-w-4xl px-8 py-10">
           <h1 className="text-[21px] font-semibold">下午好，苏伟杰</h1>
           <p className="mt-1.5 mb-7 text-[13px] text-ink-faint">
-            左侧两个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
-            跟踪提醒）与 <b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比），
+            左侧四个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
+            跟踪提醒）、<b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比）与{" "}
+            <b className="font-medium text-ink-muted">AI 模型榜单</b>（Artificial Analysis 实时嵌入
+            + OpenRouter 官方 API 实时榜单），
             也可以从下方卡片直接进入。
           </p>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
@@ -230,6 +233,34 @@ export default async function HomePage() {
                 </p>
               )}
               <span className="mt-3 inline-block rounded-md bg-[#EEEDFE] px-2 py-0.5 text-[11px] text-[#534AB7]">
+                进入模块
+              </span>
+            </Link>
+
+            <Link
+              href="/ai-leaderboard"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#E3EEF9]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#1F5E8E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M8 21h8" />
+                    <path d="M12 17v4" />
+                    <path d="M7 4h10" />
+                    <path d="M17 4v8a5 5 0 0 1-10 0V4" />
+                    <circle cx="12" cy="12" r="2.5" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  AI 模型榜单
+                </span>
+              </div>
+              <div className="mb-1.5 text-[14.5px] font-semibold">权威榜单</div>
+              <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                Artificial Analysis（独立综合评测）实时嵌入；OpenRouter Rankings（按真实 token
+                用量排名）经官方公开 API 实时自渲染。零本地数据。
+              </p>
+              <span className="mt-3 inline-block rounded-md bg-[#E3EEF9] px-2 py-0.5 text-[11px] text-[#1F5E8E]">
                 进入模块
               </span>
             </Link>

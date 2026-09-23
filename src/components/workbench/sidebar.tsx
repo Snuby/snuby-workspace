@@ -43,6 +43,15 @@ const ICONS = {
       <rect x="15" y="7" width="4" height="10" rx="1" />
     </svg>
   ),
+  leaderboard: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+      <path d="M7 4h10" />
+      <path d="M17 4v8a5 5 0 0 1-10 0V4" />
+      <circle cx="12" cy="12" r="2.5" />
+    </svg>
+  ),
 };
 
 /** 「宏观经济」一级菜单对应的全部子页路径 (即二级菜单项, 见 section-tabs.tsx) */
@@ -51,10 +60,14 @@ const MACRO_PATHS: readonly string[] = ["/macro", "/industry", "/alerts"];
 /** 「资产行情」一级菜单对应的全部子页路径 (spec 009) */
 const MARKET_PATHS: readonly string[] = ["/market", "/metal", "/crypto", "/equity", "/realestate"];
 
+/** 「AI 模型榜单」一级菜单对应的全部子页路径 (spec 011) */
+const LEADERBOARD_PATHS: readonly string[] = ["/ai-leaderboard", "/ai-leaderboard/openrouter"];
+
 const NAV: NavLeaf[] = [
   { href: "/", label: "工作台", icon: ICONS.home },
   { href: "/macro", label: "宏观经济", icon: ICONS.chart, match: MACRO_PATHS },
   { href: "/market", label: "资产行情", icon: ICONS.market, match: MARKET_PATHS },
+  { href: "/ai-leaderboard", label: "AI 模型榜单", icon: ICONS.leaderboard, match: LEADERBOARD_PATHS },
   { href: "/settings", label: "设置", icon: ICONS.gear },
 ];
 
