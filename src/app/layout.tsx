@@ -16,7 +16,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="zh-CN">
       <body className="flex h-screen overflow-hidden">
         <Sidebar />
-        <main className="flex min-w-0 flex-1 flex-col">{children}</main>
+        <main className="relative flex min-w-0 flex-1 flex-col">
+          {children}
+          {/* 全局 WebView 舞台: 所有标签的 webview 常驻于此 (跨模块/站点保留, 只改 visibility 切换) */}
+          <div
+            id="snuby-stage"
+            aria-hidden
+            className="pointer-events-none absolute inset-0 z-0"
+          />
+        </main>
       </body>
     </html>
   );

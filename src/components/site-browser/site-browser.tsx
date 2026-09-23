@@ -7,6 +7,7 @@
 // 桌面版(Electron) 渲染 <webview>; 非 Electron 渲染外链兜底 (Web 版不再维护)。
 
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { webviewStage } from "./webview-stage";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -132,10 +133,11 @@ export default function SiteBrowser({
   const [currentUrl, setCurrentUrl] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const guestIdMapRef = useRef<Record<number, TabView>>({});
-  /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
-  const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
-  const activeTabIdRef = useRef<string | null>(null);
+  /** 当前激活标签的舞台 key (供工具栏/地址栏取 webview) */
+  const activeKeyRef = useRef<string | null>(null);
+  /** 始终指向最新 activeTab: 舞台同步 effect 依赖少, 直接捕获 activeTab 会拿陈旧快照 */
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
   /** 同 URL 短时幂等: 站点对一次点击可能触发多次 window.open (双 popup) → 只开一个标签 */
   const pendingOpenRef = useRef<Record<string, number>>({});
   /** 始终指向最新 openTab: popup 监听 effect 依赖少, 闭包若直接捕获 openTab 会拿到陈旧 tabsBySite 快照, 导致新建标签覆盖已有标签 */
@@ -152,6 +154,13 @@ export default function SiteBrowser({
       for (const s of moduleSites) {
         const tabs = tabsBySiteRef.current[s.id];
         if (tabs && tabs.length > 0) persistTabs(s.id, tabs);
+        // 舞台实例保留 (跨模块), 但断开 handlers, 避免事件回调指向已卸载组件
+        for (const t of tabs ?? []) {
+          const entry = webviewStage.get(`${moduleKey}:${s.id}:${t.id}`);
+          if (entry) {
+            (entry.el as unknown as { __snubyHandlers?: null }).__snubyHandlers = null;
+          }
+        }
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -207,7 +216,8 @@ export default function SiteBrowser({
     const onPopup = (e: Event) => {
       const detail = (e as CustomEvent<{ url?: string; guestId?: number }>).detail;
       if (!detail?.url) return;
-      const host = guestIdMapRef.current[detail.guestId ?? -1];
+      // webview 实例常驻全局舞台, 用 guestId 从舞台注册表反查宿主 (不依赖组件 state)
+      const host = typeof detail.guestId === "number" ? webviewStage.getHost(detail.guestId) : null;
       const siteId = host?.siteId ?? groupId;
       openTabRef.current?.(siteId, detail.url);
     };
@@ -306,6 +316,7 @@ export default function SiteBrowser({
       next.push(tab);
       setTabsBySite((prev) => ({ ...prev, [siteId]: next }));
       if (evicted) {
+        webviewStage.remove(`${moduleKey}:${siteId}:${evicted.id}`);
         appendHistory(siteId, [{ url: evicted.url, title: evicted.title, closedAt: Date.now() }]);
       }
       persistTabs(siteId, next);
@@ -324,6 +335,7 @@ export default function SiteBrowser({
       const closed = group[idx];
       const next = group.filter((t) => t.id !== tabId);
       setTabsBySite((prev) => ({ ...prev, [siteId]: next }));
+      webviewStage.remove(`${moduleKey}:${siteId}:${tabId}`);
       appendHistory(siteId, [{ url: closed.url, title: closed.title, closedAt: Date.now() }]);
       persistTabs(siteId, next);
       if (activeTab?.siteId === siteId && activeTab.tabId === tabId) {
@@ -363,72 +375,81 @@ export default function SiteBrowser({
     [openTab],
   );
 
-  // —— webview 事件上报 ——
-  const registerGuest = useCallback((el: HTMLElement | null, siteId: string, tabId: string) => {
-    if (el) {
-      webviewRefs.current[tabId] = el;
-    } else {
-      delete webviewRefs.current[tabId];
-      return;
-    }
-    const onAttach = () => {
-      const gid = (el as unknown as { getWebContentsId?: () => number }).getWebContentsId?.();
-      if (typeof gid === "number") {
-        guestIdMapRef.current[gid] = { siteId, tabId };
-      }
-    };
-    const updateTabUrl = (url: string) => {
-      setCurrentUrl(url);
-      setTabsBySite((prev) => ({
-        ...prev,
-        [siteId]: (prev[siteId] ?? []).map((t) => (t.id === tabId ? { ...t, url } : t)),
-      }));
-    };
-    // 整页导航: 回写标签 url (持久化/信息展示)
-    const onNavigateFull = (e: Event) => {
-      const url = (e as unknown as { url?: string }).url;
-      if (url) updateTabUrl(url);
-    };
-    // SPA 路由 (did-navigate-in-page): 只更新地址栏, 不回写标签 url —
-    // 否则标签 url 变化会经受控 src 触发 webview 重载, 造成无限刷新循环
-    const onNavigateInPage = (e: Event) => {
-      const url = (e as unknown as { url?: string }).url;
-      if (url) setCurrentUrl(url);
-    };
-    const onTitle = (e: Event) => {
-      const t = (e as unknown as { title?: string }).title;
-      if (t) {
+  // —— 舞台同步: 每个标签在全局舞台创建/复用 webview 实例 + 绑定事件转发 + 切换显示 ——
+  useEffect(() => {
+    if (!isElectronEnv() || desktopState !== "yes") return;
+    const tabs = tabsOf(groupId);
+    const activeDef =
+      activeTabRef.current && activeTabRef.current.siteId === groupId
+        ? tabs.find((t) => t.id === activeTabRef.current!.tabId) ?? tabs[0]
+        : tabs[0];
+    const siteDef = moduleSites.find((s) => s.id === groupId);
+    const activeKey = activeDef ? `${moduleKey}:${groupId}:${activeDef.id}` : null;
+    for (const t of tabs) {
+      const key = `${moduleKey}:${groupId}:${t.id}`;
+      const entry = webviewStage.create(key, t.url, siteDef?.partition, groupId, t.id);
+      const el = entry.el as unknown as {
+        __snubyHandlers?: {
+          onNavigateFull: (e: Event) => void;
+          onNavigateInPage: (e: Event) => void;
+          onTitle: (e: Event) => void;
+          onStart: () => void;
+          onStop: () => void;
+          onFail: () => void;
+        };
+      };
+      const updateTabUrl = (url: string) => {
+        setCurrentUrl(url);
         setTabsBySite((prev) => ({
           ...prev,
-          [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, title: t } : x)),
+          [groupId]: (prev[groupId] ?? []).map((x) => (x.id === t.id ? { ...x, url } : x)),
         }));
-      }
-    };
-    const onStart = () => setLoading(true);
-    const onStop = () => setLoading(false);
-    const onFail = () => {
-      setLoading(false);
-      setTabsBySite((prev) => ({
-        ...prev,
-        [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, error: true } : x)),
-      }));
-    };
-    if (!el.getAttribute("data-snuby-bound")) {
-      el.setAttribute("data-snuby-bound", "1");
-      el.addEventListener("did-attach", onAttach);
-      el.addEventListener("did-navigate", onNavigateFull);
-      el.addEventListener("did-navigate-in-page", onNavigateInPage);
-      el.addEventListener("page-title-updated", onTitle);
-      el.addEventListener("did-start-loading", onStart);
-      el.addEventListener("did-stop-loading", onStop);
-      el.addEventListener("did-fail-load", onFail);
+      };
+      // 事件转发目标: 每次同步刷新闭包 → 永远指向当前组件
+      el.__snubyHandlers = {
+        // 整页导航: 回写标签 url (持久化/信息展示)
+        onNavigateFull: (e) => {
+          const url = (e as unknown as { url?: string }).url;
+          if (url) updateTabUrl(url);
+        },
+        // SPA 路由 (did-navigate-in-page): 只更新地址栏, 不回写标签 url —
+        // 否则标签 url 变化会触发 webview 重载, 造成无限刷新循环
+        onNavigateInPage: (e) => {
+          const url = (e as unknown as { url?: string }).url;
+          if (url) setCurrentUrl(url);
+        },
+        onTitle: (e) => {
+          const title = (e as unknown as { title?: string }).title;
+          if (title) {
+            setTabsBySite((prev) => ({
+              ...prev,
+              [groupId]: (prev[groupId] ?? []).map((x) => (x.id === t.id ? { ...x, title } : x)),
+            }));
+          }
+        },
+        onStart: () => setLoading(true),
+        onStop: () => setLoading(false),
+        onFail: () => {
+          setLoading(false);
+          setTabsBySite((prev) => ({
+            ...prev,
+            [groupId]: (prev[groupId] ?? []).map((x) => (x.id === t.id ? { ...x, error: true } : x)),
+          }));
+        },
+      };
     }
-  }, []);
+    // 切换显示: 只改 visibility/pointer-events, 实例不销毁不重载
+    for (const t of tabs) {
+      const k = `${moduleKey}:${groupId}:${t.id}`;
+      if (k === activeKey) webviewStage.show(k);
+      else webviewStage.hide(k);
+    }
+    activeKeyRef.current = activeKey;
+  }, [groupId, moduleKey, tabsBySite, activeTab, desktopState]);
 
   // —— 工具栏动作 (作用于激活标签) ——
   const nav = (fn: "goBack" | "goForward" | "reload") => {
-    const tabId = activeTabIdRef.current;
-    const el = tabId ? webviewRefs.current[tabId] : null;
+    const el = activeKeyRef.current ? webviewStage.getEl(activeKeyRef.current) : null;
     if (el && typeof (el as unknown as Record<string, () => void>)[fn] === "function") {
       (el as unknown as Record<string, () => void>)[fn]();
     }
@@ -464,18 +485,17 @@ export default function SiteBrowser({
       ? groupTabs.find((t) => t.id === activeTab.tabId) ?? groupTabs[0]
       : groupTabs[0];
   const activeHistory = historyBySite[groupId] ?? [];
-  activeTabIdRef.current = activeTabDef?.id ?? null;
+  activeKeyRef.current = activeTabDef ? `${moduleKey}:${groupId}:${activeTabDef.id}` : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface">
+    <div className="relative z-10 flex h-full min-h-0 flex-col">
       {/* 站点层: 选项卡 或 地址栏 (hideSiteBar 时由外部渲染) */}
       {hideSiteBar ? null : addressMode ? (
         <AddressBar
           title={title}
           currentUrl={currentUrl}
           onNavigate={(url) => {
-            const tabId = activeTabIdRef.current;
-            const el = tabId ? webviewRefs.current[tabId] : null;
+            const el = activeKeyRef.current ? webviewStage.getEl(activeKeyRef.current) : null;
             if (el && typeof (el as unknown as { loadURL: (u: string) => void }).loadURL === "function") {
               (el as unknown as { loadURL: (u: string) => void }).loadURL(url);
               setCurrentUrl(url);
@@ -601,66 +621,12 @@ export default function SiteBrowser({
         </div>
       </div>
 
-      {/* 内容区: 每个标签一个常驻 webview, 绝对叠放, 激活用 visibility 切换 —
-          不销毁/不重载/不重挂载, 浏览状态与滚动位置全保留, 切换秒回 (display:none 会触发
-          Electron 暂停渲染+重挂载闪烁, 是之前白屏卡顿的来源) */}
-      <div className="relative min-h-0 flex-1">
-        {groupTabs.map((t) => (
-          <div
-            key={t.id}
-            className="absolute inset-0 h-full w-full"
-            style={{ visibility: t.id === activeTabDef.id ? "visible" : "hidden" }}
-          >
-            <SiteWebview
-              src={t.url}
-              siteId={groupId}
-              tabId={t.id}
-              partition={activeSiteDef?.partition}
-              onRef={registerGuest}
-            />
-          </div>
-        ))}
-      </div>
+      {/* 内容区: 透明穿透层 — webview 实例常驻全局舞台 (#snuby-stage, z-0),
+          由舞台同步 effect 控制 visibility 切换; 此处不渲染任何 webview,
+          标签栏/工具栏 (z-10 内) 正常交互, 舞台实例跨模块/站点保留 */}
+      <div className="pointer-events-none min-h-0 flex-1" />
     </div>
   );
-}
-
-/** 标签 webview: React 直接管理的独立实例 (无缓存池)
- * - 挂载创建、卸载销毁, 生命周期随标签 DOM
- * - 标签切换不改动实例 (父容器 visibility 切换) → 状态保留、无重载
- * - src 只在挂载时取一次: 标签 url 后续变化 (did-navigate 回写) 不触发重载, 避免 SPA 无限刷新
- */
-function SiteWebview({
-  src,
-  siteId,
-  tabId,
-  partition,
-  onRef,
-}: {
-  src: string;
-  siteId: string;
-  tabId: string;
-  partition?: string;
-  onRef: (el: HTMLElement | null, siteId: string, tabId: string) => void;
-}) {
-  const [initialSrc] = useState(src);
-  const setEl = useCallback(
-    (el: HTMLElement | null) => {
-      onRef(el, siteId, tabId);
-    },
-    [onRef, siteId, tabId],
-  );
-
-  return createElement("div", { className: "h-full w-full" }, [
-    createElement("webview", {
-      ref: setEl,
-      src: initialSrc,
-      partition,
-      allowpopups: "true",
-      className: "h-full w-full border-0",
-      style: { width: "100%", height: "100%" },
-    }),
-  ]);
 }
 
 function ToolButton({
