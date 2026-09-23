@@ -6,7 +6,7 @@
 // 关闭的标签进历史 (上限 maxHistory, 可重开); 配置在设置页按模块独立维护 (SQLite)。
 // 桌面版(Electron) 渲染 <webview>; 非 Electron 渲染外链兜底 (Web 版不再维护)。
 
-import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { webviewPool } from "./webview-pool";
 
 export type SiteDef = {
@@ -676,7 +676,10 @@ function SiteWebview({
   const key = useMemo(() => `${moduleKey}:${siteId}:${tabId}`, [moduleKey, siteId, tabId]);
   const [initialSrc] = useState(src);
 
-  useEffect(() => {
+  // 必须用 useLayoutEffect: 其 cleanup 在 React 移除 DOM 之前执行。
+  // useEffect 的 cleanup 在 DOM 移除之后才跑, 届时 host div 已连同 webview 一起被销毁,
+  // hide 只会把"死"实例放进池, 切回时恢复失败 (表现为缓存不生效)。
+  useLayoutEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     let el = webviewPool.get(key);
