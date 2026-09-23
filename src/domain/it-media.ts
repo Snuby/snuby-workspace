@@ -9,6 +9,12 @@ export type MediaItem = {
   desc?: string;
   /** 内置集固定不可删; 自定义集可删 (D2) */
   builtin?: boolean;
+  /**
+   * Web 版是否可用 iframe 内嵌阅读 (默认 true)。实测反 iframe 机制 (2026-09-23):
+   * 量子位点击文章强制顶层跳转、新智元/InfoQ 点击被静默拦截 → 中文媒体站标 false,
+   * Web 版降级为「在新窗口打开」外链卡片; 桌面版 webview 不受影响。
+   */
+  embed?: boolean;
 };
 
 export const BUILTIN_IT_MEDIA: readonly MediaItem[] = [
@@ -39,6 +45,7 @@ export const BUILTIN_IT_MEDIA: readonly MediaItem[] = [
     url: "https://www.qbitai.com/",
     desc: "AI 前沿快讯, 小时级更新",
     builtin: true,
+    embed: false,
   },
   {
     slug: "aiera",
@@ -46,6 +53,7 @@ export const BUILTIN_IT_MEDIA: readonly MediaItem[] = [
     url: "https://aiera.com.cn/",
     desc: "AI 产业评论、论文解读",
     builtin: true,
+    embed: false,
   },
   {
     slug: "jiqizhixin",
@@ -53,6 +61,7 @@ export const BUILTIN_IT_MEDIA: readonly MediaItem[] = [
     url: "https://www.jiqizhixin.com/",
     desc: "深度技术解读、论文评测",
     builtin: true,
+    embed: false,
   },
   {
     slug: "infoq-cn",
@@ -60,6 +69,7 @@ export const BUILTIN_IT_MEDIA: readonly MediaItem[] = [
     url: "https://www.infoq.cn/",
     desc: "开发者工程实践、大厂案例",
     builtin: true,
+    embed: false,
   },
 ];
 

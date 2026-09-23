@@ -18,6 +18,20 @@ test("it-media 内置集 slug 唯一且字段齐全", () => {
   }
 });
 
+test("it-media 中文媒体站标记 embed=false (实测反 iframe: 量子位跳顶层/新智元/InfoQ 拦截)", () => {
+  const chinese = BUILTIN_IT_MEDIA.filter((m) => m.embed === false);
+  assert.deepEqual(
+    chinese.map((m) => m.slug).sort(),
+    ["aiera", "infoq-cn", "jiqizhixin", "qbitai"],
+  );
+  // 英文站不设 embed → 默认可内嵌
+  const embeddable = BUILTIN_IT_MEDIA.filter((m) => m.embed !== false);
+  assert.deepEqual(
+    embeddable.map((m) => m.slug).sort(),
+    ["ars-technica", "mit-tech-review", "the-verge"],
+  );
+});
+
 test("mergeMedia 内置在前, 自定义追加", () => {
   const custom: MediaItem[] = [
     { slug: "custom-1", label: "我的博客", url: "https://blog.example.com" },

@@ -6,6 +6,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import ItMediaTabs from "@/components/news/it-media-tabs";
+import ItMediaExternal from "@/components/news/it-media-external";
 import WebviewFrame from "@/components/leaderboard/webview-frame";
 import LeaderboardFrame from "@/components/leaderboard/leaderboard-frame";
 import { BUILTIN_IT_MEDIA, mergeMedia, type MediaItem } from "@/domain/it-media";
@@ -74,15 +75,18 @@ export default function ItNewsPage() {
 
   if (!hydrated) {
     // SSR/首帧: 与桌面版首帧一致渲染内置集默认页, 避免 hydration 不匹配
-    return (
+    const first = BUILTIN_IT_MEDIA[0];
+    return first.embed === false ? (
+      <ItMediaExternal label={first.label} url={first.url} desc={first.desc} />
+    ) : (
       <WebviewFrame
-        src={BUILTIN_IT_MEDIA[0].url}
+        src={first.url}
         title="IT 资讯"
         fallback={
           <LeaderboardFrame
-            src={BUILTIN_IT_MEDIA[0].url}
-            title={BUILTIN_IT_MEDIA[0].label}
-            externalUrl={BUILTIN_IT_MEDIA[0].url}
+            src={first.url}
+            title={first.label}
+            externalUrl={first.url}
           />
         }
       />
@@ -93,17 +97,21 @@ export default function ItNewsPage() {
     <div className="flex h-full min-h-0 flex-col">
       <ItMediaTabs items={items} activeSlug={active.slug} onSelect={select} onAdd={add} onRemove={remove} />
       <div className="min-h-0 flex-1">
-        <WebviewFrame
-          src={active.url}
-          title={`${active.label} — IT 资讯`}
-          fallback={
-            <LeaderboardFrame
-              src={active.url}
-              title={active.label}
-              externalUrl={active.url}
-            />
-          }
-        />
+        {active.embed === false ? (
+          <ItMediaExternal label={active.label} url={active.url} desc={active.desc} />
+        ) : (
+          <WebviewFrame
+            src={active.url}
+            title={`${active.label} — IT 资讯`}
+            fallback={
+              <LeaderboardFrame
+                src={active.url}
+                title={active.label}
+                externalUrl={active.url}
+              />
+            }
+          />
+        )}
       </div>
     </div>
   );
