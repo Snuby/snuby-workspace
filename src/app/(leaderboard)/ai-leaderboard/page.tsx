@@ -1,24 +1,12 @@
-// Spec: 011/013 — 默认页: Artificial Analysis (US-1, AC-A/AC-B)
-// 桌面版(Electron): <webview> 顶层导航加载官网原页 (不受 XFO/CSP 限制, spec 013)
-// Web 版: 该站响应头无 X-Frame-Options / CSP frame-ancestors 限制 (011 实测), 保持 iframe 直嵌。
+// Spec: 017-site-tabs — AI 模型榜单页 (AA / OpenRouter 两个站点选项卡 + 站内标签页)
 
-import WebviewFrame from "@/components/leaderboard/webview-frame";
-import LeaderboardFrame from "@/components/leaderboard/leaderboard-frame";
+import SiteBrowser from "@/components/site-browser/site-browser";
 
-const AA_URL = "https://artificialanalysis.ai/";
+const SITES = [
+  { id: "aa", label: "Artificial Analysis", url: "https://artificialanalysis.ai/" },
+  { id: "openrouter", label: "OpenRouter 排名", url: "https://openrouter.ai/rankings" },
+];
 
 export default function AiLeaderboardPage() {
-  return (
-    <WebviewFrame
-      src={AA_URL}
-      title="Artificial Analysis — AI 模型榜单"
-      fallback={
-        <LeaderboardFrame
-          src={AA_URL}
-          title="Artificial Analysis — AI 模型榜单"
-          externalUrl={AA_URL}
-        />
-      }
-    />
-  );
+  return <SiteBrowser moduleKey="leaderboard" title="AI 模型榜单" sites={SITES} />;
 }

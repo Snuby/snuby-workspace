@@ -27,7 +27,16 @@ if (!app.isPackaged) {
 app.on("web-contents-created", (_event, contents) => {
   contents.setWindowOpenHandler(({ url }) => {
     if (contents.getType() === "webview") {
-      contents.loadURL(url);
+      // 站内 target=_blank / window.open → 不弹新窗口, 通知宿主页面以站内标签页打开
+      // (宿主 React 监听 window 的 snuby-webview-popup 事件; guestId 用于定位所属模块/站点组)
+      const host = contents.hostWebContents;
+      if (host && !host.isDestroyed()) {
+        try {
+          host.executeJavaScript(
+            `window.dispatchEvent(new CustomEvent("snuby-webview-popup", { detail: { url: ${JSON.stringify(url)}, guestId: ${contents.id} } }))`,
+          );
+        } catch {}
+      }
     }
     return { action: "deny" };
   });
@@ -64,12 +73,19 @@ function initDataDir() {
 function applyDesktopEnv(dataDir) {
   process.env.MACRO_DB_PATH = path.join(dataDir, "china_economy.db");
   process.env.MARKET_DB_PATH = path.join(dataDir, "market.db");
+  process.env.SITE_TABS_DB_PATH = path.join(dataDir, "site_tabs.db");
   if (fs.existsSync(VENV_PYTHON)) process.env.FETCH_PYTHON_BIN = VENV_PYTHON;
   process.chdir(bundledRoot()); // fetch 的 PROJECT_ROOT=process.cwd() 命中 scripts/
 }
 
 /** 启动 next 生产服务器 (utilityProcess.fork, 无 Dock 图标), 返回随机可用端口 */
 function startNextServer() {
+  // 开发便利: 外部已手动起 next start (如 SNUBY_EXTERNAL_PORT=3310) 时直接复用,
+  // 便于单独调试 main 进程而不用每次等 next-server fork。打包态不设置此 env, 行为不变。
+  if (process.env.SNUBY_EXTERNAL_PORT) {
+    const port = Number(process.env.SNUBY_EXTERNAL_PORT);
+    if (Number.isInteger(port) && port > 0) return Promise.resolve(port);
+  }
   return new Promise((resolve, reject) => {
     const cli = path.join(app.getAppPath(), "node_modules", "next", "dist", "bin", "next");
     let attempts = 0;

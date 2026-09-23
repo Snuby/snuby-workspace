@@ -1,7 +1,13 @@
-// Spec: 016-nav-modules — /creators 根路径重定向到默认页 (小红书创作中心)
+// Spec: 017-site-tabs — 自媒体页 (小红书创作中心 / 微信公众号后台 + 站内标签页)
+// 所有标签共享 persist:snuby-creators 分区 → 登录态互通 (扫一次码全标签通用)。
 
-import { redirect } from "next/navigation";
+import SiteBrowser from "@/components/site-browser/site-browser";
 
-export default function CreatorsIndexPage() {
-  redirect("/creators/xiaohongshu");
+const SITES = [
+  { id: "xiaohongshu", label: "小红书创作中心", url: "https://creator.xiaohongshu.com/", partition: "persist:snuby-creators" },
+  { id: "wechat", label: "微信公众号后台", url: "https://mp.weixin.qq.com/", partition: "persist:snuby-creators" },
+];
+
+export default function CreatorsPage() {
+  return <SiteBrowser moduleKey="creators" title="自媒体" sites={SITES} />;
 }

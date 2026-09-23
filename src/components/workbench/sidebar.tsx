@@ -82,11 +82,11 @@ const MACRO_PATHS: readonly string[] = ["/macro", "/industry", "/alerts"];
 /** 「资产行情」一级菜单对应的全部子页路径 (spec 009) */
 const MARKET_PATHS: readonly string[] = ["/market", "/metal", "/crypto", "/equity", "/realestate"];
 
-/** 「AI 模型榜单」一级菜单对应的全部子页路径 (spec 011) */
-const LEADERBOARD_PATHS: readonly string[] = ["/ai-leaderboard", "/ai-leaderboard/openrouter"];
+/** 「AI 模型榜单」一级菜单对应的全部子页路径 (spec 011 / 017 合并为单页) */
+const LEADERBOARD_PATHS: readonly string[] = ["/ai-leaderboard"];
 
-/** 「自媒体」一级菜单对应的全部子页路径 (spec 016) */
-const CREATORS_PATHS: readonly string[] = ["/creators/xiaohongshu", "/creators/wechat"];
+/** 「自媒体」一级菜单对应的全部子页路径 (spec 016 / 017 合并为单页) */
+const CREATORS_PATHS: readonly string[] = ["/creators"];
 
 const NAV: NavLeaf[] = [
   { href: "/", label: "工作台", icon: ICONS.home },

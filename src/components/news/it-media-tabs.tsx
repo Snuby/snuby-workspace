@@ -13,12 +13,15 @@ export default function ItMediaTabs({
   onSelect,
   onAdd,
   onRemove,
+  title,
 }: {
   items: readonly MediaItem[];
   activeSlug: string;
   onSelect: (slug: string) => void;
   onAdd: (item: MediaItem) => void;
   onRemove: (slug: string) => void;
+  /** 模块标题: 渲染在选项卡栏最左侧 (加粗); 替代顶部 Topbar */
+  title?: string;
 }) {
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState("");
@@ -44,7 +47,12 @@ export default function ItMediaTabs({
   }
 
   return (
-    <div className="flex h-[46px] shrink-0 items-stretch justify-between gap-4 border-b border-line bg-surface px-6">
+    <div className="flex h-[42px] shrink-0 items-stretch justify-between gap-4 border-b border-line bg-surface px-4">
+      {title ? (
+        <span className="flex shrink-0 items-center whitespace-nowrap text-[14px] font-bold text-ink">
+          {title}
+        </span>
+      ) : null}
       <nav className="flex min-w-0 items-stretch gap-1 overflow-x-auto">
         {items.map((item) => {
           const active = item.slug === activeSlug;
