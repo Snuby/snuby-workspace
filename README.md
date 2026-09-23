@@ -16,6 +16,16 @@ npm test             # 测试套件 (106 例: domain 单测 + application 集成
 
 > 端口约定: 默认使用 **3300**，避开本机其他工作台应用占用的 3000/3100。
 
+### 桌面版（Electron，spec 012）
+
+```bash
+npm run dist   # 构建 + 打包 macOS .app / dmg（产物在 dist/，不提交 git）
+```
+
+- 双击 `dist/mac-arm64/Snuby 工作台.app` 即可使用，无需启动 Node/Next（应用内自带生产服务器，端口 3310+ 自动探测）。
+- 数据隔离：首次启动把内置模板库复制到 `~/Library/Application Support/snuby-workspace/data/`（幂等），读取与「更新数据」按钮均写该目录，不污染项目仓库。
+- 开发壳：`npm run desktop`（= `npm run build && electron .`，直接加载项目根产物与 `data/`）。
+
 ## 目录结构
 
 ```

@@ -26,6 +26,9 @@ npm-debug.log*
 /data/*.db
 /data/*.db-journal
 
+# electron 打包产物 (spec 012, 由 npm run dist 重建)
+/dist
+
 # python
 __pycache__/
 *.pyc

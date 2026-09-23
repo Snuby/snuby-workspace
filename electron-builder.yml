@@ -1,0 +1,30 @@
+# Spec: 012-electron-packaging — electron-builder 配置
+appId: com.snuby.workbench
+productName: Snuby 工作台
+directories:
+  output: dist
+  buildResources: build
+files:
+  - electron/**
+  - .next/**
+  - "!**/.next/cache/**"
+  - package.json
+# 不用 asar: next 运行时内部会 spawn 自身组件, asar 内路径无法作可执行文件 (spawn ENOTDIR, 实测)
+# 全量真实文件打包, 保证 require/spawn/原生模块均正常
+asar: false
+# next server 运行时大量 fs 读 .next, 外置规避 asar 补丁边界行为
+asarUnpack:
+  - .next/**
+# 数据模板与数据管道脚本: 运行时由主进程复制/引用
+extraResources:
+  - from: data
+    to: data
+  - from: scripts
+    to: scripts
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.productivity
+  identity: null
+npmRebuild: false

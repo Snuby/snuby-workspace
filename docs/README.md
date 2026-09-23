@@ -50,3 +50,4 @@ draft → reviewed → implementing → done
 | 008 | macro-hierarchy（宏观经济层级收敛） | done |
 | 009 | market-quotes（资产行情板块） | done |
 | 011 | ai-leaderboard（AI 模型榜单板块） | done |
+| 012 | electron-packaging（Snuby 工作台桌面版） | done |
