@@ -15,21 +15,10 @@ const MODULES: Array<{ key: string; label: string }> = [
 
 type ModuleSettings = { maxTabs: number; maxHistory: number };
 
-type WebviewPolicy = { minKeep: number; retentionHours: number };
-
 const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
-
-const WEBVIEW_KEEP_OPTIONS = [5, 10, 15, 20];
-const WEBVIEW_RETENTION_OPTIONS: Array<{ label: string; hours: number }> = [
-  { label: "1 小时", hours: 1 },
-  { label: "3 小时", hours: 3 },
-  { label: "24 小时", hours: 24 },
-  { label: "3 天", hours: 72 },
-];
 
 export default function SettingsPage() {
   const [values, setValues] = useState<Record<string, ModuleSettings>>({});
-  const [webview, setWebview] = useState<WebviewPolicy>({ minKeep: 5, retentionHours: 3 });
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -49,31 +38,12 @@ export default function SettingsPage() {
         }
       }
       setValues(next);
-      try {
-        const res = await fetch("/api/site-tabs?module=webview");
-        if (res.ok) {
-          const data = await res.json();
-          const sv = data.settings as { webviewMinKeep?: number; webviewRetentionHours?: number };
-          setWebview({
-            minKeep: sv.webviewMinKeep ?? 5,
-            retentionHours: sv.webviewRetentionHours ?? 3,
-          });
-        }
-      } catch {
-        // 保持默认
-      }
       setLoaded(true);
     })();
   }, []);
 
   function update(key: string, patch: Partial<ModuleSettings>) {
     setValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? { maxTabs: 10, maxHistory: 100 }), ...patch } }));
-    setDirty(true);
-    setSavedTip(false);
-  }
-
-  function updateWebview(patch: Partial<WebviewPolicy>) {
-    setWebview((prev) => ({ ...prev, ...patch }));
     setDirty(true);
     setSavedTip(false);
   }
@@ -97,21 +67,6 @@ export default function SettingsPage() {
       } catch {
         // 单个模块失败不中断其余
       }
-    }
-    // 全局 WebView 保留策略
-    try {
-      await fetch("/api/site-tabs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          module: "webview",
-          action: "settings",
-          webviewMinKeep: webview.minKeep,
-          webviewRetentionHours: webview.retentionHours,
-        }),
-      });
-    } catch {
-      // 忽略
     }
     setSaving(false);
     setDirty(false);
@@ -181,55 +136,6 @@ export default function SettingsPage() {
               })}
             </div>
           )}
-
-          <div className="mt-6 rounded-[10px] border border-line bg-surface px-4 py-3">
-            <div className="mb-3 text-[13px] font-medium text-ink">
-              WebView 保留策略（全局）
-              <span className="ml-2 text-[11px] font-normal text-ink-faint">
-                站内标签的页面实例跨模块保留，最近使用的保底数量内永不回收
-              </span>
-            </div>
-            <div className="flex flex-wrap items-center gap-x-10 gap-y-3">
-              <div>
-                <div className="mb-1.5 text-[12px] text-ink-muted">至少保留（最近使用的数量）</div>
-                <div className="flex gap-1.5">
-                  {WEBVIEW_KEEP_OPTIONS.map((n) => (
-                    <button
-                      key={n}
-                      type="button"
-                      onClick={() => updateWebview({ minKeep: n })}
-                      className={`h-7 min-w-[40px] rounded-md border px-2 text-[12.5px] transition-colors ${
-                        webview.minKeep === n
-                          ? "border-accent bg-accent/10 font-medium text-accent-deep"
-                          : "border-line bg-white text-ink-muted hover:border-accent"
-                      }`}
-                    >
-                      {n}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <div className="mb-1.5 text-[12px] text-ink-muted">超出部分按不活跃时长回收</div>
-                <div className="flex gap-1.5">
-                  {WEBVIEW_RETENTION_OPTIONS.map((o) => (
-                    <button
-                      key={o.hours}
-                      type="button"
-                      onClick={() => updateWebview({ retentionHours: o.hours })}
-                      className={`h-7 rounded-md border px-2.5 text-[12.5px] transition-colors ${
-                        webview.retentionHours === o.hours
-                          ? "border-accent bg-accent/10 font-medium text-accent-deep"
-                          : "border-line bg-white text-ink-muted hover:border-accent"
-                      }`}
-                    >
-                      {o.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
 
           <div className="mt-6 space-y-2">
             {[

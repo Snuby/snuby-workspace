@@ -6,8 +6,7 @@
 // 关闭的标签进历史 (上限 maxHistory, 可重开); 配置在设置页按模块独立维护 (SQLite)。
 // 桌面版(Electron) 渲染 <webview>; 非 Electron 渲染外链兜底 (Web 版不再维护)。
 
-import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { webviewPool } from "./webview-pool";
+import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -158,31 +157,6 @@ export default function SiteBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const groupId = addressMode ? "default" : activeSite;
-  // 激活标签变化 → touch 池内对应 webview 的活跃时间 (切到即活跃, 防止被清扫误销毁)
-  useEffect(() => {
-    const tabId = activeTab && activeTab.siteId === groupId ? activeTab.tabId : null;
-    if (tabId) webviewPool.touch(`${moduleKey}:${groupId}:${tabId}`);
-  }, [activeTab, groupId, moduleKey]);
-  // 读取全局 WebView 保留策略 (设置页 module=webview 行), 应用到全局池
-  useEffect(() => {
-    void (async () => {
-      try {
-        const res = await fetch("/api/site-tabs?module=webview");
-        if (!res.ok) return;
-        const data = await res.json();
-        const sv = data.settings as { webviewMinKeep?: number; webviewRetentionHours?: number };
-        if (
-          sv &&
-          typeof sv.webviewMinKeep === "number" &&
-          typeof sv.webviewRetentionHours === "number"
-        ) {
-          webviewPool.setPolicy(sv.webviewMinKeep, sv.webviewRetentionHours * 3600 * 1000);
-        }
-      } catch {
-        // 读取失败保持默认策略 (5 个 + 3 小时)
-      }
-    })();
-  }, []);
 
   // —— 数据加载 (SQLite, 每模块) ——
   useEffect(() => {
@@ -627,16 +601,17 @@ export default function SiteBrowser({
         </div>
       </div>
 
-      {/* 内容区: 每个标签一个常驻 webview, 非激活隐藏 — 切标签不重建, 无白屏且浏览状态保留 */}
-      <div className="min-h-0 flex-1">
+      {/* 内容区: 每个标签一个常驻 webview, 绝对叠放, 激活用 visibility 切换 —
+          不销毁/不重载/不重挂载, 浏览状态与滚动位置全保留, 切换秒回 (display:none 会触发
+          Electron 暂停渲染+重挂载闪烁, 是之前白屏卡顿的来源) */}
+      <div className="relative min-h-0 flex-1">
         {groupTabs.map((t) => (
           <div
             key={t.id}
-            className="h-full w-full"
-            style={t.id === activeTabDef.id ? undefined : { display: "none" }}
+            className="absolute inset-0 h-full w-full"
+            style={{ visibility: t.id === activeTabDef.id ? "visible" : "hidden" }}
           >
             <SiteWebview
-              moduleKey={moduleKey}
               src={t.url}
               siteId={groupId}
               tabId={t.id}
@@ -650,61 +625,42 @@ export default function SiteBrowser({
   );
 }
 
-/** 标签 webview: 全局池化实例
- * - 首次挂载创建 webview 并存入 webviewPool (key=module:site:tab)
- * - 站点/模块切换卸载时, webview 移入池的隐藏容器保留, 浏览状态不丢
- * - 切回时直接取回原实例 append 到宿主 div, 无需重新加载
- * - src 只在新建时取一次: 标签 url 后续变化 (did-navigate 回写) 不触发重载, 避免 SPA 无限刷新
- * - 池内不活跃超过 30 分钟的实例由 webviewPool 后台清扫销毁
+/** 标签 webview: React 直接管理的独立实例 (无缓存池)
+ * - 挂载创建、卸载销毁, 生命周期随标签 DOM
+ * - 标签切换不改动实例 (父容器 visibility 切换) → 状态保留、无重载
+ * - src 只在挂载时取一次: 标签 url 后续变化 (did-navigate 回写) 不触发重载, 避免 SPA 无限刷新
  */
 function SiteWebview({
-  moduleKey,
   src,
   siteId,
   tabId,
   partition,
   onRef,
 }: {
-  moduleKey: string;
   src: string;
   siteId: string;
   tabId: string;
   partition?: string;
   onRef: (el: HTMLElement | null, siteId: string, tabId: string) => void;
 }) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const key = useMemo(() => `${moduleKey}:${siteId}:${tabId}`, [moduleKey, siteId, tabId]);
   const [initialSrc] = useState(src);
-
-  // 必须用 useLayoutEffect: 其 cleanup 在 React 移除 DOM 之前执行。
-  // useEffect 的 cleanup 在 DOM 移除之后才跑, 届时 host div 已连同 webview 一起被销毁,
-  // hide 只会把"死"实例放进池, 切回时恢复失败 (表现为缓存不生效)。
-  useLayoutEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    let el = webviewPool.get(key);
-    if (!el) {
-      el = document.createElement("webview");
-      el.setAttribute("src", initialSrc);
-      if (partition) el.setAttribute("partition", partition);
-      el.setAttribute("allowpopups", "true");
-      el.setAttribute("class", "h-full w-full border-0");
-      el.style.width = "100%";
-      el.style.height = "100%";
-      webviewPool.put(key, el);
+  const setEl = useCallback(
+    (el: HTMLElement | null) => {
       onRef(el, siteId, tabId);
-    } else {
-      webviewPool.touch(key);
-    }
-    host.appendChild(el);
-    return () => {
-      // 组件卸载: 把 webview 移入全局隐藏容器保留 (不随 React DOM 销毁)
-      webviewPool.hide(key, el);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+    },
+    [onRef, siteId, tabId],
+  );
 
-  return createElement("div", { ref: hostRef, className: "h-full w-full" });
+  return createElement("div", { className: "h-full w-full" }, [
+    createElement("webview", {
+      ref: setEl,
+      src: initialSrc,
+      partition,
+      allowpopups: "true",
+      className: "h-full w-full border-0",
+      style: { width: "100%", height: "100%" },
+    }),
+  ]);
 }
 
 function ToolButton({
