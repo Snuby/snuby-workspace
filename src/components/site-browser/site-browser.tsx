@@ -133,7 +133,9 @@ export default function SiteBrowser({
   const [showHistory, setShowHistory] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const guestIdMapRef = useRef<Record<number, TabView>>({});
-  const webviewRef = useRef<HTMLElement | null>(null);
+  /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
+  const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
+  const activeTabIdRef = useRef<string | null>(null);
   /** 同 URL 短时幂等: 站点对一次点击可能触发多次 window.open (双 popup) → 只开一个标签 */
   const pendingOpenRef = useRef<Record<string, number>>({});
   /** 始终指向最新 openTab: popup 监听 effect 依赖少, 闭包若直接捕获 openTab 会拿到陈旧 tabsBySite 快照, 导致新建标签覆盖已有标签 */
@@ -141,6 +143,19 @@ export default function SiteBrowser({
 
   const activeSite = activeSiteProp ?? activeSiteInner;
   const moduleSites = useMemo(() => sites, [sites]);
+  // 卸载 (切走模块/关窗) 前把最新内存态 (含页面加载后的真实标题) 落库,
+  // 否则标签标题只在 openTab 时持久化 (当时为 "…"), 切回模块恢复的标签全是 "…"
+  const tabsBySiteRef = useRef(tabsBySite);
+  tabsBySiteRef.current = tabsBySite;
+  useEffect(() => {
+    return () => {
+      for (const s of moduleSites) {
+        const tabs = tabsBySiteRef.current[s.id];
+        if (tabs && tabs.length > 0) persistTabs(s.id, tabs);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const groupId = addressMode ? "default" : activeSite;
 
   // —— 数据加载 (SQLite, 每模块) ——
@@ -350,8 +365,12 @@ export default function SiteBrowser({
 
   // —— webview 事件上报 ——
   const registerGuest = useCallback((el: HTMLElement | null, siteId: string, tabId: string) => {
-    webviewRef.current = el;
-    if (!el) return;
+    if (el) {
+      webviewRefs.current[tabId] = el;
+    } else {
+      delete webviewRefs.current[tabId];
+      return;
+    }
     const onAttach = () => {
       const gid = (el as unknown as { getWebContentsId?: () => number }).getWebContentsId?.();
       if (typeof gid === "number") {
@@ -408,7 +427,8 @@ export default function SiteBrowser({
 
   // —— 工具栏动作 (作用于激活标签) ——
   const nav = (fn: "goBack" | "goForward" | "reload") => {
-    const el = webviewRef.current;
+    const tabId = activeTabIdRef.current;
+    const el = tabId ? webviewRefs.current[tabId] : null;
     if (el && typeof (el as unknown as Record<string, () => void>)[fn] === "function") {
       (el as unknown as Record<string, () => void>)[fn]();
     }
@@ -444,6 +464,7 @@ export default function SiteBrowser({
       ? groupTabs.find((t) => t.id === activeTab.tabId) ?? groupTabs[0]
       : groupTabs[0];
   const activeHistory = historyBySite[groupId] ?? [];
+  activeTabIdRef.current = activeTabDef?.id ?? null;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
@@ -453,7 +474,8 @@ export default function SiteBrowser({
           title={title}
           currentUrl={currentUrl}
           onNavigate={(url) => {
-            const el = webviewRef.current;
+            const tabId = activeTabIdRef.current;
+            const el = tabId ? webviewRefs.current[tabId] : null;
             if (el && typeof (el as unknown as { loadURL: (u: string) => void }).loadURL === "function") {
               (el as unknown as { loadURL: (u: string) => void }).loadURL(url);
               setCurrentUrl(url);
@@ -579,22 +601,23 @@ export default function SiteBrowser({
         </div>
       </div>
 
-      {/* 内容区: 激活标签的 webview */}
+      {/* 内容区: 每个标签一个常驻 webview, 非激活隐藏 — 切标签不重建, 无白屏且浏览状态保留 */}
       <div className="min-h-0 flex-1">
-        {activeTabDef ? (
-          <div className="flex h-full w-full flex-col">
-            <div className="min-h-0 flex-1">
-              <SiteWebview
-                key={`${groupId}-${activeTabDef.id}`}
-                src={activeTabDef.url}
-                siteId={groupId}
-                tabId={activeTabDef.id}
-                partition={activeSiteDef?.partition}
-                onRef={registerGuest}
-              />
-            </div>
+        {groupTabs.map((t) => (
+          <div
+            key={t.id}
+            className="h-full w-full"
+            style={t.id === activeTabDef.id ? undefined : { display: "none" }}
+          >
+            <SiteWebview
+              src={t.url}
+              siteId={groupId}
+              tabId={t.id}
+              partition={activeSiteDef?.partition}
+              onRef={registerGuest}
+            />
           </div>
-        ) : null}
+        ))}
       </div>
     </div>
   );
