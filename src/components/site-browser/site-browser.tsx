@@ -438,11 +438,15 @@ export default function SiteBrowser({
         },
       };
     }
-    // 切换显示: 只改 visibility/pointer-events, 实例不销毁不重载
-    for (const t of tabs) {
-      const k = `${moduleKey}:${groupId}:${t.id}`;
-      if (k === activeKey) webviewStage.show(k);
-      else webviewStage.hide(k);
+    // 切换显示: 遍历本模块全部站点的实例, 只激活 activeKey, 其余全部隐藏 —
+    // 若只遍历当前组, 跨站点切换时旧站点的实例保持 visible 与新实例叠放,
+    // 上层实例未绘制完时下层旧页面会透出 (白屏/错页的根源)
+    for (const site of moduleSites) {
+      for (const t of tabsOf(site.id)) {
+        const k = `${moduleKey}:${site.id}:${t.id}`;
+        if (k === activeKey) webviewStage.show(k);
+        else webviewStage.hide(k);
+      }
     }
     activeKeyRef.current = activeKey;
   }, [groupId, moduleKey, tabsBySite, activeTab, desktopState]);
