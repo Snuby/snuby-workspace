@@ -358,15 +358,23 @@ export default function SiteBrowser({
         guestIdMapRef.current[gid] = { siteId, tabId };
       }
     };
-    const onNavigate = (e: Event) => {
+    const updateTabUrl = (url: string) => {
+      setCurrentUrl(url);
+      setTabsBySite((prev) => ({
+        ...prev,
+        [siteId]: (prev[siteId] ?? []).map((t) => (t.id === tabId ? { ...t, url } : t)),
+      }));
+    };
+    // 整页导航: 回写标签 url (持久化/信息展示)
+    const onNavigateFull = (e: Event) => {
       const url = (e as unknown as { url?: string }).url;
-      if (url) {
-        setCurrentUrl(url);
-        setTabsBySite((prev) => ({
-          ...prev,
-          [siteId]: (prev[siteId] ?? []).map((t) => (t.id === tabId ? { ...t, url } : t)),
-        }));
-      }
+      if (url) updateTabUrl(url);
+    };
+    // SPA 路由 (did-navigate-in-page): 只更新地址栏, 不回写标签 url —
+    // 否则标签 url 变化会经受控 src 触发 webview 重载, 造成无限刷新循环
+    const onNavigateInPage = (e: Event) => {
+      const url = (e as unknown as { url?: string }).url;
+      if (url) setCurrentUrl(url);
     };
     const onTitle = (e: Event) => {
       const t = (e as unknown as { title?: string }).title;
@@ -389,8 +397,8 @@ export default function SiteBrowser({
     if (!el.getAttribute("data-snuby-bound")) {
       el.setAttribute("data-snuby-bound", "1");
       el.addEventListener("did-attach", onAttach);
-      el.addEventListener("did-navigate", onNavigate);
-      el.addEventListener("did-navigate-in-page", onNavigate);
+      el.addEventListener("did-navigate", onNavigateFull);
+      el.addEventListener("did-navigate-in-page", onNavigateInPage);
       el.addEventListener("page-title-updated", onTitle);
       el.addEventListener("did-start-loading", onStart);
       el.addEventListener("did-stop-loading", onStop);
@@ -606,6 +614,9 @@ function SiteWebview({
   partition?: string;
   onRef: (el: HTMLElement | null, siteId: string, tabId: string) => void;
 }) {
+  // src 只在挂载时取一次: 标签 url 后续变化 (did-navigate 回写) 不得触发 webview 重载,
+  // 否则 SPA 站点 (微信后台/小红书) 会无限刷新。切换标签由外层 key 重建本组件, 新实例用新 src。
+  const [initialSrc] = useState(src);
   const setEl = useCallback(
     (el: HTMLElement | null) => {
       onRef(el, siteId, tabId);
@@ -616,7 +627,7 @@ function SiteWebview({
   return createElement("div", { className: "h-full w-full" }, [
     createElement("webview", {
       ref: setEl,
-      src,
+      src: initialSrc,
       partition,
       allowpopups: "true",
       className: "h-full w-full border-0",
