@@ -1,5 +1,7 @@
 # Spec 014 — 内嵌 Webview 导航白名单配置化
 
+> ⚠️ **已废弃（spec 015）**：用户决定取消整套白名单机制，内嵌 webview 默认放行所有导航（提交 `294f8b7`）。白名单代码（embed-hosts.js / preload.js / embed-hosts-panel.tsx）已删除，设置页不再含白名单面板。本目录保留作为历史与审计记录。
+
 ## 背景
 
 013 为桌面版内嵌 webview（OpenRouter / Artificial Analysis）设置了固定白名单（仅两榜域名）+ 弹窗 deny。用户实测发现 **Google / GitHub 授权登录跑不了**（OAuth 需要导航到 accounts.google.com / github.com，被白名单拦截）。用户要求：白名单进「设置」页，支持 `*.google.com` 通配，增删即时生效并持久化。
