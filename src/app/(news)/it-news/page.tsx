@@ -32,13 +32,20 @@ function loadCustom(): MediaItem[] {
   }
 }
 
+/** 桌面版 (Electron webview) 环境: webview 为独立窗口, 无 iframe 检测, 不受反嵌入影响 */
+function isElectronEnv() {
+  return typeof navigator !== "undefined" && /electron/i.test(navigator.userAgent);
+}
+
 export default function ItNewsPage() {
   const [custom, setCustom] = useState<MediaItem[]>([]);
   const [activeSlug, setActiveSlug] = useState<string>(BUILTIN_IT_MEDIA[0].slug);
   const [hydrated, setHydrated] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(false);
 
   useEffect(() => {
     setCustom(loadCustom());
+    setIsDesktop(isElectronEnv());
     setHydrated(true);
   }, []);
 
@@ -75,6 +82,7 @@ export default function ItNewsPage() {
 
   if (!hydrated) {
     // SSR/首帧: 与桌面版首帧一致渲染内置集默认页, 避免 hydration 不匹配
+    // (未 hydrate 时 isDesktop=false, 按 Web 版渲染; mount 后桌面版切 webview)
     const first = BUILTIN_IT_MEDIA[0];
     return first.embed === false ? (
       <ItMediaExternal label={first.label} url={first.url} desc={first.desc} />
@@ -97,7 +105,7 @@ export default function ItNewsPage() {
     <div className="flex h-full min-h-0 flex-col">
       <ItMediaTabs items={items} activeSlug={active.slug} onSelect={select} onAdd={add} onRemove={remove} />
       <div className="min-h-0 flex-1">
-        {active.embed === false ? (
+        {active.embed === false && !isDesktop ? (
           <ItMediaExternal label={active.label} url={active.url} desc={active.desc} />
         ) : (
           <WebviewFrame
