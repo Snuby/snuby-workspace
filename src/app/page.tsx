@@ -126,8 +126,8 @@ export default async function HomePage() {
           <p className="mt-1.5 mb-7 text-[13px] text-ink-faint">
             左侧四个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
             跟踪提醒）、<b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比）与{" "}
-            <b className="font-medium text-ink-muted">AI 模型榜单</b>（Artificial Analysis 实时嵌入
-            + OpenRouter 官方 API 实时榜单），
+            <b className="font-medium text-ink-muted">AI 模型榜单</b>（Artificial Analysis 官网原页
+            + OpenRouter 官方实时排名），
             也可以从下方卡片直接进入。
           </p>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
@@ -257,8 +257,8 @@ export default async function HomePage() {
               </div>
               <div className="mb-1.5 text-[14.5px] font-semibold">权威榜单</div>
               <p className="text-[12.5px] leading-relaxed text-ink-muted">
-                Artificial Analysis（独立综合评测）实时嵌入；OpenRouter Rankings（按真实 token
-                用量排名）经官方公开 API 实时自渲染。零本地数据。
+                桌面版内嵌官网原页（Artificial Analysis 独立评测 / OpenRouter 真实用量排名）；
+                网页版保持 iframe 与官方 API 自渲染降级。零本地数据。
               </p>
               <span className="mt-3 inline-block rounded-md bg-[#E3EEF9] px-2 py-0.5 text-[11px] text-[#1F5E8E]">
                 进入模块

@@ -51,3 +51,4 @@ draft → reviewed → implementing → done
 | 009 | market-quotes（资产行情板块） | done |
 | 011 | ai-leaderboard（AI 模型榜单板块） | done |
 | 012 | electron-packaging（Snuby 工作台桌面版） | done |
+| 013 | webview-embeds（榜单 webview 内嵌，桌面官网原页 / Web 降级） | done |

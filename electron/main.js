@@ -4,13 +4,34 @@
 // 数据契约: MACRO_DB_PATH / MARKET_DB_PATH / FETCH_PYTHON_BIN (与 Web 版同组 env),
 // fetch 脚本相对 cwd (process.chdir 到资源根, 含 scripts/)。
 
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 
 const APP_TITLE = "Snuby 工作台";
 const VENV_PYTHON = "/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python";
+
+// Spec: 013-webview-embeds — webview 内嵌白名单 (AC-C)
+const ALLOWED_EMBED_HOSTS = ["openrouter.ai", "artificialanalysis.ai"];
+
+function isAllowedEmbedUrl(url) {
+  try {
+    const host = new URL(url).hostname;
+    return ALLOWED_EMBED_HOSTS.some((d) => host === d || host.endsWith(`.${d}`));
+  } catch {
+    return false;
+  }
+}
+
+// 权限: webview 全拒 (摄像头/定位/通知等); 主页面默认放行 (本项目主页面无特殊权限)
+app.on("web-contents-created", (_event, contents) => {
+  const isEmbed = contents.getType() === "webview";
+  contents.setWindowOpenHandler(() => ({ action: isEmbed ? "deny" : "allow" }));
+  contents.on("will-navigate", (event, url) => {
+    if (isEmbed && !isAllowedEmbedUrl(url)) event.preventDefault();
+  });
+});
 
 // 单实例锁: 双击/重复启动时聚焦已有窗口而非再开一个
 const gotLock = app.requestSingleInstanceLock();
@@ -66,10 +87,29 @@ function startNextServer() {
       );
       let settled = false;
       let logs = "";
-      child.stdout.on("data", (d) => {
+      const net = require("node:net");
+      const waitUntilReachable = (deadlineMs) =>
+        new Promise((resolve) => {
+          const probe = () => {
+            const sock = net.connect(port, "127.0.0.1");
+            sock.once("connect", () => {
+              sock.destroy();
+              resolve(true);
+            });
+            sock.once("error", () => {
+              sock.destroy();
+              if (Date.now() < deadlineMs) setTimeout(probe, 300);
+              else resolve(false);
+            });
+          };
+          probe();
+        });
+      child.stdout.on("data", async (d) => {
         logs += String(d);
         if (!settled && /Local:|Ready/.test(logs)) {
           settled = true;
+          // Ready 打印 ≠ HTTP 可服务 (冷启动时序), 轮询端口就绪再 resolve
+          await waitUntilReachable(Date.now() + 20000);
           app.on("will-quit", () => child.kill());
           resolve(port);
         }
@@ -92,8 +132,25 @@ function startNextServer() {
   });
 }
 
+/** next 打印 Ready 后首个请求仍可能未就绪 (冷启动慢于监听就绪), loadURL 带重试 */
+async function loadURLWithRetry(win, url, retries = 12, gapMs = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await win.loadURL(url);
+      return;
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, gapMs));
+    }
+  }
+}
+
 app.whenReady().then(async () => {
   try {
+    // 权限: webview 全拒 (摄像头/定位/通知等); 主页面默认放行 (本项目主页面无特殊权限)
+    session.defaultSession.setPermissionRequestHandler((wc, _permission, callback) => {
+      callback(wc.getType() !== "webview");
+    });
     const dataDir = initDataDir();
     applyDesktopEnv(dataDir);
     const port = await startNextServer();
@@ -102,9 +159,10 @@ app.whenReady().then(async () => {
       height: 960,
       title: APP_TITLE,
       autoHideMenuBar: true,
-      webPreferences: { contextIsolation: true, nodeIntegration: false },
+      // webviewTag: 桌面版榜单以 <webview> 内嵌第三方官网 (spec 013, AC-A)
+      webPreferences: { contextIsolation: true, nodeIntegration: false, webviewTag: true },
     });
-    await win.loadURL(`http://127.0.0.1:${port}/`);
+    await loadURLWithRetry(win, `http://127.0.0.1:${port}/`);
   } catch (err) {
     try {
       fs.appendFileSync("/tmp/snuby-pack.log", `FATAL ${err && err.stack ? err.stack : String(err)}\n`);
