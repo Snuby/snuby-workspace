@@ -20,10 +20,17 @@ if (!app.isPackaged) {
 }
 
 // Spec: 013 webview 内嵌第三方官网; 015 起取消导航白名单 — 内嵌 webview 默认放行所有导航
-// (用户决定: 不限制可访问网站)。window.open 保持放行 (OAuth 弹窗登录需要)。
+// (用户决定: 不限制可访问网站)。webview 内 target=_blank / window.open 拒绝弹新窗口,
+// 改为 webview 内部导航 (量子位等媒体文章链接均为 target=_blank, 无处理时点击被静默吞掉);
+// 非 webview (主页面 OAuth 弹窗等) 保持放行。
 // 权限: webview 全拒 (摄像头/定位/通知等); 主页面默认放行 (本项目主页面无特殊权限)
 app.on("web-contents-created", (_event, contents) => {
-  contents.setWindowOpenHandler(() => ({ action: "allow" }));
+  contents.setWindowOpenHandler(({ url }) => {
+    if (contents.getType() === "webview") {
+      contents.loadURL(url);
+    }
+    return { action: "deny" };
+  });
 });
 
 // 单实例锁: 双击/重复启动时聚焦已有窗口而非再开一个

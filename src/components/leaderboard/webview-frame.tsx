@@ -37,6 +37,9 @@ export default function WebviewFrame({
     src,
     title,
     partition,
+    // allowpopups: target=_blank 链接触发主进程 setWindowOpenHandler,
+    // 主进程改为 webview 内部导航 (量子位等媒体文章均为 target=_blank)
+    allowpopups: "true",
     className: "min-h-0 w-full flex-1 border-0",
     style: { flex: "1 1 0%", minHeight: 0 },
   });
