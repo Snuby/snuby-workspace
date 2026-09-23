@@ -1,12 +1,5 @@
-// Spec: 017-site-tabs — AI 模型榜单页 (AA / OpenRouter 两个站点选项卡 + 站内标签页)
-
-import SiteBrowser from "@/components/site-browser/site-browser";
-
-const SITES = [
-  { id: "aa", label: "Artificial Analysis", url: "https://artificialanalysis.ai/" },
-  { id: "openrouter", label: "OpenRouter 排名", url: "https://openrouter.ai/rankings" },
-];
+// Spec: 017-site-tabs — AI 模型榜单路由页 (空壳): 模块由 ModuleHost 常驻渲染 (见 leaderboard-module)。
 
 export default function AiLeaderboardPage() {
-  return <SiteBrowser moduleKey="leaderboard" title="AI 模型榜单" sites={SITES} />;
+  return null;
 }

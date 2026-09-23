@@ -4,6 +4,7 @@
 
 import type { Metadata } from "next";
 import Sidebar from "@/components/workbench/sidebar";
+import ModuleHost from "@/components/workbench/module-host";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -17,13 +18,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="flex h-screen overflow-hidden">
         <Sidebar />
         <main className="relative flex min-w-0 flex-1 flex-col">
-          {children}
-          {/* 全局 WebView 舞台: 所有标签的 webview 常驻于此 (跨模块/站点保留, 只改 visibility 切换) */}
-          <div
-            id="snuby-stage"
-            aria-hidden
-            className="pointer-events-none absolute inset-0 z-0"
-          />
+          {/* 模块常驻容器: 站点型模块的 SiteBrowser 常驻于此, 路由切换只改 visibility
+              → webview 实例/浏览状态跨模块保留, 切回秒回; 非站点型页面走 children */}
+          <ModuleHost>{children}</ModuleHost>
         </main>
       </body>
     </html>

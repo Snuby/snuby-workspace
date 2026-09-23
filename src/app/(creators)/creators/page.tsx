@@ -1,13 +1,6 @@
-// Spec: 017-site-tabs — 自媒体页 (小红书创作中心 / 微信公众号后台 + 站内标签页)
-// 所有标签共享 persist:snuby-creators 分区 → 登录态互通 (扫一次码全标签通用)。
-
-import SiteBrowser from "@/components/site-browser/site-browser";
-
-const SITES = [
-  { id: "xiaohongshu", label: "小红书创作中心", url: "https://creator.xiaohongshu.com/", partition: "persist:snuby-creators" },
-  { id: "wechat", label: "微信公众号后台", url: "https://mp.weixin.qq.com/", partition: "persist:snuby-creators" },
-];
+// Spec: 017-site-tabs — 自媒体路由页 (空壳): SiteBrowser 由 ModuleHost 常驻渲染,
+// 跨模块切换只切容器 visibility, 组件不卸载 → 浏览状态/登录态保留。
 
 export default function CreatorsPage() {
-  return <SiteBrowser moduleKey="creators" title="自媒体" sites={SITES} />;
+  return null;
 }
