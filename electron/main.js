@@ -5,78 +5,18 @@
 // 数据契约: MACRO_DB_PATH / MARKET_DB_PATH / FETCH_PYTHON_BIN (与 Web 版同组 env),
 // fetch 脚本相对 cwd (process.chdir 到资源根, 含 scripts/)。
 
-const { app, BrowserWindow, dialog, session, utilityProcess, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, session, utilityProcess } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const embedHosts = require("./embed-hosts");
 
 const APP_TITLE = "Snuby 工作台";
 const VENV_PYTHON = "/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python";
 
-// Spec: 013+014 — webview 内嵌导航白名单, 可配置 (设置页增删, 支持 *.example.com 通配)。
-// 默认内置含 OAuth 登录域: Google 授权 accounts.google.com, GitHub github.com,
-// 授权回调均回到 openrouter.ai / artificialanalysis.ai (内置), 登录链路可闭环。
-// 运行时白名单 = 内置 + userData/embed-hosts.json 自定义, 热更新 + 持久化。
-const EMBED_HOSTS_FILE = "embed-hosts.json";
-let userEmbedHosts = []; // 自定义条目 (persisted)
-let combinedEmbedHosts = embedHosts.DEFAULT_EMBED_HOSTS.slice();
-
-function loadUserEmbedHosts() {
-  try {
-    const p = path.join(app.getPath("userData"), EMBED_HOSTS_FILE);
-    if (fs.existsSync(p)) {
-      const arr = JSON.parse(fs.readFileSync(p, "utf8"));
-      userEmbedHosts = Array.isArray(arr) ? embedHosts.sanitizeList(arr).valid : [];
-    }
-  } catch {
-    userEmbedHosts = [];
-  }
-  combinedEmbedHosts = [...embedHosts.DEFAULT_EMBED_HOSTS, ...userEmbedHosts];
-}
-
-function saveUserEmbedHosts(entries) {
-  userEmbedHosts = entries;
-  combinedEmbedHosts = [...embedHosts.DEFAULT_EMBED_HOSTS, ...entries];
-  try {
-    fs.writeFileSync(
-      path.join(app.getPath("userData"), EMBED_HOSTS_FILE),
-      JSON.stringify(entries, null, 2),
-      "utf8",
-    );
-  } catch (e) {
-    console.error("embed-hosts 持久化失败:", e);
-  }
-}
-
-// 设置页读写 (preload 暴露 window.snubyEmbedHosts)
-ipcMain.handle("embed-hosts:get", () => ({
-  builtin: embedHosts.DEFAULT_EMBED_HOSTS,
-  custom: userEmbedHosts,
-}));
-ipcMain.handle("embed-hosts:set", (_event, entries) => {
-  const { valid, invalid } = embedHosts.sanitizeList(Array.isArray(entries) ? entries : []);
-  if (invalid.length > 0) return { ok: false, invalid };
-  saveUserEmbedHosts(valid);
-  return { ok: true, builtin: embedHosts.DEFAULT_EMBED_HOSTS, custom: valid };
-});
-
-function isAllowedEmbedUrl(url) {
-  try {
-    return embedHosts.isHostAllowed(new URL(url).hostname, combinedEmbedHosts);
-  } catch {
-    return false;
-  }
-}
-
+// Spec: 013 webview 内嵌第三方官网; 015 起取消导航白名单 — 内嵌 webview 默认放行所有导航
+// (用户决定: 不限制可访问网站)。window.open 保持放行 (OAuth 弹窗登录需要)。
 // 权限: webview 全拒 (摄像头/定位/通知等); 主页面默认放行 (本项目主页面无特殊权限)
 app.on("web-contents-created", (_event, contents) => {
-  const isEmbed = contents.getType() === "webview";
-  // window.open: 放行 OAuth 弹窗登录 (014 修订, 原 deny 会拦死 Google/GitHub 授权)。
-  // 弹窗导航同样受 isAllowedEmbedUrl 约束 (授权域 + 回调域均在白名单, 可闭环)。
   contents.setWindowOpenHandler(() => ({ action: "allow" }));
-  contents.on("will-navigate", (event, url) => {
-    if (isEmbed && !isAllowedEmbedUrl(url)) event.preventDefault();
-  });
 });
 
 // 单实例锁: 双击/重复启动时聚焦已有窗口而非再开一个
@@ -204,7 +144,6 @@ app.whenReady().then(async () => {
     });
     const dataDir = initDataDir();
     applyDesktopEnv(dataDir);
-    loadUserEmbedHosts();
     const port = await startNextServer();
     const win = new BrowserWindow({
       width: 1440,
@@ -212,7 +151,7 @@ app.whenReady().then(async () => {
       title: APP_TITLE,
       autoHideMenuBar: true,
       // webviewTag: 桌面版榜单以 <webview> 内嵌第三方官网 (spec 013, AC-A)
-      webPreferences: { contextIsolation: true, nodeIntegration: false, webviewTag: true, preload: path.join(__dirname, "preload.js") },
+      webPreferences: { contextIsolation: true, nodeIntegration: false, webviewTag: true },
     });
     await loadURLWithRetry(win, `http://127.0.0.1:${port}/`);
   } catch (err) {
