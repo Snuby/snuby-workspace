@@ -12,6 +12,13 @@ const fs = require("node:fs");
 const APP_TITLE = "Snuby 工作台";
 const VENV_PYTHON = "/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python";
 
+// Spec: 016 — 开发态与打包态数据隔离: package.json name = "snuby-workspace" 使开发态
+// userData 与打包版相同 → 单实例锁互相排斥 (用户运行打包版时开发壳无法启动), 且开发壳
+// 会读写用户真实数据。开发态改用独立 profile (snuby-dev), 打包版行为不变。
+if (!app.isPackaged) {
+  app.setPath("userData", path.join(app.getPath("appData"), "snuby-dev"));
+}
+
 // Spec: 013 webview 内嵌第三方官网; 015 起取消导航白名单 — 内嵌 webview 默认放行所有导航
 // (用户决定: 不限制可访问网站)。window.open 保持放行 (OAuth 弹窗登录需要)。
 // 权限: webview 全拒 (摄像头/定位/通知等); 主页面默认放行 (本项目主页面无特殊权限)

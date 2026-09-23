@@ -17,10 +17,13 @@ export default function WebviewFrame({
   src,
   title,
   fallback,
+  partition,
 }: {
   src: string;
   title: string;
   fallback: ReactNode;
+  /** spec 016: 自媒体登录态持久化分区 (persist:snuby-creators), 缺省不设 */
+  partition?: string;
 }) {
   const [isDesktop, setIsDesktop] = useState(false);
 
@@ -33,6 +36,7 @@ export default function WebviewFrame({
   const webview = createElement("webview", {
     src,
     title,
+    partition,
     className: "min-h-0 w-full flex-1 border-0",
     style: { flex: "1 1 0%", minHeight: 0 },
   });

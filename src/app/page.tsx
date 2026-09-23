@@ -124,10 +124,12 @@ export default async function HomePage() {
         <div className="mx-auto max-w-4xl px-8 py-10">
           <h1 className="text-[21px] font-semibold">下午好，苏伟杰</h1>
           <p className="mt-1.5 mb-7 text-[13px] text-ink-faint">
-            左侧四个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
-            跟踪提醒）、<b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比）与{" "}
+            左侧七个板块：<b className="font-medium text-ink-muted">宏观经济</b>（国家经济数据 / 行业观察 /
+            跟踪提醒）、<b className="font-medium text-ink-muted">资产行情</b>（跨资产 K 线与归一化对比）、{" "}
             <b className="font-medium text-ink-muted">AI 模型榜单</b>（Artificial Analysis 官网原页
-            + OpenRouter 官方实时排名），
+            + OpenRouter 官方实时排名）、<b className="font-medium text-ink-muted">IT 资讯</b>（权威媒体内嵌阅读）、{" "}
+            <b className="font-medium text-ink-muted">自媒体</b>（小红书 / 微信创作后台）与{" "}
+            <b className="font-medium text-ink-muted">Web 访问</b>（自填网址简易浏览器），
             也可以从下方卡片直接进入。
           </p>
           <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
@@ -261,6 +263,83 @@ export default async function HomePage() {
                 网页版保持 iframe 与官方 API 自渲染降级。零本地数据。
               </p>
               <span className="mt-3 inline-block rounded-md bg-[#E3EEF9] px-2 py-0.5 text-[11px] text-[#1F5E8E]">
+                进入模块
+              </span>
+            </Link>
+
+            <Link
+              href="/it-news"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FEF3E2]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#9A6B1F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M4 5h15v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+                    <path d="M19 8h1a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2" />
+                    <path d="M8 9h7" />
+                    <path d="M8 13h7" />
+                    <path d="M8 17h4" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  IT 资讯
+                </span>
+              </div>
+              <div className="mb-1.5 text-[14.5px] font-semibold">媒体资讯</div>
+              <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                内置 7 家权威 IT 媒体（The Verge / Ars Technica / MIT Tech Review / 量子位 / 新智元 /
+                机器之心 / InfoQ 中文），可动态添加自定义媒体；桌面版内嵌官网阅读。
+              </p>
+              <span className="mt-3 inline-block rounded-md bg-[#FEF3E2] px-2 py-0.5 text-[11px] text-[#9A6B1F]">
+                进入模块
+              </span>
+            </Link>
+
+            <Link
+              href="/creators"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#FDE8E8]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#B04444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  自媒体
+                </span>
+              </div>
+              <div className="mb-1.5 text-[14.5px] font-semibold">创作后台</div>
+              <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                小红书创作中心与微信公众号后台，桌面版内嵌官网（手机扫码登录），登录态持久保留。
+              </p>
+              <span className="mt-3 inline-block rounded-md bg-[#FDE8E8] px-2 py-0.5 text-[11px] text-[#B04444]">
+                进入模块
+              </span>
+            </Link>
+
+            <Link
+              href="/browser"
+              className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+            >
+              <div className="mb-3 flex items-start justify-between gap-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#E8F5E9]">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#3E7A46" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M3 12h18" />
+                    <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
+                  </svg>
+                </div>
+                <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  Web 访问
+                </span>
+              </div>
+              <div className="mb-1.5 text-[14.5px] font-semibold">简易浏览器</div>
+              <p className="text-[12.5px] leading-relaxed text-ink-muted">
+                顶部自填网址的简易浏览器（前进 / 后退 / 刷新 / 主页），默认主页 Google；桌面版功能。
+              </p>
+              <span className="mt-3 inline-block rounded-md bg-[#E8F5E9] px-2 py-0.5 text-[11px] text-[#3E7A46]">
                 进入模块
               </span>
             </Link>
