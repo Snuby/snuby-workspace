@@ -1,6 +1,7 @@
-// Spec: 001-workbench-mvp — 设置页 (US-1 AC4)
+// Spec: 001-workbench-mvp — 设置页 (US-1 AC4); spec 014 增加内嵌白名单配置 (桌面版)
 
 import Topbar from "@/components/workbench/topbar";
+import EmbedHostsPanel from "@/components/settings/embed-hosts-panel";
 
 const ITEMS: Array<[string, string]> = [
   ["数据更新方式", "手动触发（宏观「更新数据」/ 行情「更新行情」按钮）"],
@@ -17,6 +18,7 @@ export default function SettingsPage() {
       <div className="flex-1 overflow-auto">
         <div className="mx-auto max-w-xl px-8 py-10">
           <h1 className="mb-4 text-[18px] font-semibold">设置</h1>
+          <EmbedHostsPanel />
           {ITEMS.map(([k, v]) => (
             <div
               key={k}
