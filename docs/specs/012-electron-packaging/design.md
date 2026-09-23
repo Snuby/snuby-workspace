@@ -80,3 +80,14 @@
 2. 浏览器（bu）目检窗口：首页、`/macro`、`/market`、`/ai-leaderboard`、`/ai-leaderboard/openrouter`。
 3. `npm run dist` → 启动 `dist/mac-arm64/Snuby 工作台.app` → 复检上述页面 + userData 数据文件存在 + 3300 端口未被占用（桌面端用 3310+）。
 4. 退出 app → 确认主进程与 next 子进程均退出、端口释放（AC-D）。
+
+### 决策 1 修订（2026-09-23）：ELECTRON_RUN_AS_NODE → utilityProcess.fork
+
+原方案实测暴露缺陷：`ELECTRON_RUN_AS_NODE=1` spawn 的进程「有可执行文件身份、无 GUI 身份」，macOS 在 Dock 上显示为通用 exec 图标，用户可随手点关（杀掉后窗口白屏——外壳与内核是两个进程，但内核不应暴露为可关对象）。
+
+修订：改用 Electron 官方 `utilityProcess.fork(nextCli, ["start", "-H", "127.0.0.1", "-p", port], { cwd: app.getAppPath(), env: {...process.env}, stdio: "pipe" })`：
+- 纯后台 Node 进程（Helper Utility 形态），不上 Dock、无独立图标；
+- 生命周期挂靠主进程：app 退出自动终止，不留孤儿进程占端口（will-quit 内 `child.kill()` 双保险）；
+- 无需 ELECTRON_RUN_AS_NODE；Ready 日志 / 端口可达性轮询 / 3310+ 探测逻辑不变。
+
+验证：开发壳与打包版 3310 服务正常，进程形态为 `Electron Helper (Utility)` / `next-server`，退出零残留。

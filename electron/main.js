@@ -1,13 +1,13 @@
 // Spec: 012-electron-packaging — Electron 主进程
-// next 生产服务器以 ELECTRON_RUN_AS_NODE 子进程运行 (与 Web 版 npm start 同构, 行为可预期);
+// next 生产服务器以 utilityProcess.fork 运行 (官方「主进程外跑 Node 逻辑」通道):
+// 纯后台 Node 进程, 不上 Dock / 无 GUI 身份, 生命周期随主进程 (app 退出自动终止, 不留孤儿占端口)。
 // 端口从 3310 起递增探测, 避免与开发端口 3300 冲突。
 // 数据契约: MACRO_DB_PATH / MARKET_DB_PATH / FETCH_PYTHON_BIN (与 Web 版同组 env),
 // fetch 脚本相对 cwd (process.chdir 到资源根, 含 scripts/)。
 
-const { app, BrowserWindow, dialog, session } = require("electron");
+const { app, BrowserWindow, dialog, session, utilityProcess } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
-const { spawn } = require("node:child_process");
 
 const APP_TITLE = "Snuby 工作台";
 const VENV_PYTHON = "/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python";
@@ -68,7 +68,7 @@ function applyDesktopEnv(dataDir) {
   process.chdir(bundledRoot()); // fetch 的 PROJECT_ROOT=process.cwd() 命中 scripts/
 }
 
-/** 启动 next 生产服务器 (ELECTRON_RUN_AS_NODE 子进程), 返回随机可用端口 */
+/** 启动 next 生产服务器 (utilityProcess.fork, 无 Dock 图标), 返回随机可用端口 */
 function startNextServer() {
   return new Promise((resolve, reject) => {
     const cli = path.join(app.getAppPath(), "node_modules", "next", "dist", "bin", "next");
@@ -76,13 +76,13 @@ function startNextServer() {
     const tryPort = (port) => {
       if (attempts > 10) return reject(new Error("未找到可用端口"));
       attempts += 1;
-      const child = spawn(
-        process.execPath,
-        ["--no-warnings", cli, "start", "-H", "127.0.0.1", "-p", String(port)],
+      const child = utilityProcess.fork(
+        cli,
+        ["start", "-H", "127.0.0.1", "-p", String(port)],
         {
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
           cwd: app.getAppPath(),
-          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env },
+          stdio: "pipe",
         },
       );
       let settled = false;
@@ -108,9 +108,14 @@ function startNextServer() {
         logs += String(d);
         if (!settled && /Local:|Ready/.test(logs)) {
           settled = true;
-          // Ready 打印 ≠ HTTP 可服务 (冷启动时序), 轮询端口就绪再 resolve
-          await waitUntilReachable(Date.now() + 20000);
-          app.on("will-quit", () => child.kill());
+          // Ready 打印 ≠ HTTP 可服务 (冷启动时序), 轮询端口就绪再 resolve; 超时视为失败
+          const ok = await waitUntilReachable(Date.now() + 20000);
+          if (!ok) return reject(new Error(`端口 ${port} 在 20s 内未就绪`));
+          app.on("will-quit", () => {
+            try {
+              child.kill();
+            } catch {}
+          });
           resolve(port);
         }
       });
