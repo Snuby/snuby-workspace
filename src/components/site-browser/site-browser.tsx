@@ -140,6 +140,10 @@ export default function SiteBrowser({
   const [loaded, setLoaded] = useState(false);
   const guestIdMapRef = useRef<Record<number, TabView>>({});
   const webviewRef = useRef<HTMLElement | null>(null);
+  /** 同 URL 短时幂等: 站点对一次点击可能触发多次 window.open (双 popup) → 只开一个标签 */
+  const pendingOpenRef = useRef<Record<string, number>>({});
+  /** 始终指向最新 openTab: popup 监听 effect 依赖少, 闭包若直接捕获 openTab 会拿到陈旧 tabsBySite 快照, 导致新建标签覆盖已有标签 */
+  const openTabRef = useRef<((siteId: string, url: string) => void) | null>(null);
 
   const activeSite = activeSiteProp ?? activeSiteInner;
   const moduleSites = useMemo(() => sites, [sites]);
@@ -155,7 +159,22 @@ export default function SiteBrowser({
         if (!res.ok) return;
         const data = await res.json();
         if (data.settings) setSettings(data.settings);
-        if (data.tabs) setTabsBySite(data.tabs);
+        if (data.tabs) {
+          // 清理幽灵标签: 丢弃半加载态(标题为 "…")的标签 — 无保留价值, 重新点击即恢复;
+          // 同组同 URL 只保留一个 (历史遗留的双 popup 重复标签)
+          const cleaned: Record<string, SiteTab[]> = {};
+          for (const [sid, tabs] of Object.entries(data.tabs as Record<string, SiteTab[]>)) {
+            const byUrl = new Map<string, SiteTab>();
+            for (const t of tabs) {
+              if (t.title === LOADING_DOT) continue;
+              const k = t.url.split("#")[0];
+              const existing = byUrl.get(k);
+              if (!existing) byUrl.set(k, t);
+            }
+            cleaned[sid] = [...byUrl.values()];
+          }
+          setTabsBySite(cleaned);
+        }
         if (data.history) setHistoryBySite(data.history);
       } catch {
         // 读取失败保持默认 (空会话)
@@ -173,7 +192,7 @@ export default function SiteBrowser({
       if (!detail?.url) return;
       const host = guestIdMapRef.current[detail.guestId ?? -1];
       const siteId = host?.siteId ?? groupId;
-      openTab(siteId, detail.url);
+      openTabRef.current?.(siteId, detail.url);
     };
     window.addEventListener("snuby-webview-popup", onPopup);
     return () => window.removeEventListener("snuby-webview-popup", onPopup);
@@ -222,8 +241,19 @@ export default function SiteBrowser({
     (siteId: string, url: string) => {
       const site = moduleSites.find((s) => s.id === siteId);
       if (!site) return;
-      const group = tabsBySite[siteId] ?? [];
       const urlNorm = url.split("#")[0];
+      // 同 URL 短时幂等: 一次点击可能被站点触发多次 window.open (双 popup) → 重复事件忽略
+      const now = Date.now();
+      const pending = pendingOpenRef.current[urlNorm];
+      if (pending && now - pending < 1000) return;
+      pendingOpenRef.current[urlNorm] = now;
+      // 主页 URL → 激活主页标签 (不新建副本)
+      if (urlNorm === site.url.split("#")[0]) {
+        setActiveTab({ siteId, tabId: `${siteId}${HOME_SUFFIX}` });
+        setActiveSiteInner(siteId);
+        return;
+      }
+      const group = tabsBySite[siteId] ?? [];
       // URL 去重: 同 URL 标签已存在 → 激活之
       const existing = group.find((t) => t.url.split("#")[0] === urlNorm);
       if (existing) {
@@ -232,10 +262,11 @@ export default function SiteBrowser({
         return;
       }
       const next = [...group];
-      // 超限: 淘汰最旧非主页标签, 进历史
+      // 超限: 淘汰最旧非主页标签 (避开当前激活标签), 进历史
       let evicted: SiteTab | null = null;
       if (next.length >= settings.maxTabs - 1) {
-        evicted = next.shift() ?? null;
+        const evictIdx = next.findIndex((t) => !(activeTab?.siteId === siteId && activeTab.tabId === t.id));
+        evicted = next.splice(evictIdx >= 0 ? evictIdx : 0, 1)[0] ?? null;
       }
       const tab: SiteTab = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, url, title: LOADING_DOT };
       next.push(tab);
@@ -249,6 +280,7 @@ export default function SiteBrowser({
     },
     [moduleSites, tabsBySite, settings.maxTabs, appendHistory, persistTabs],
   );
+  openTabRef.current = openTab;
 
   const closeTab = useCallback(
     (siteId: string, tabId: string) => {
