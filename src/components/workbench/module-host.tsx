@@ -18,11 +18,11 @@ import LeaderboardModule from "@/components/site-browser/modules/leaderboard-mod
 import BrowserModule from "@/components/site-browser/modules/browser-module";
 
 const MODULE_PATHS = ["/creators", "/it-news", "/ai-leaderboard", "/browser"] as const;
-const MODULES: { path: string; render: () => React.ReactNode }[] = [
-  { path: "/creators", render: () => <CreatorsModule /> },
-  { path: "/it-news", render: () => <ItNewsModule /> },
-  { path: "/ai-leaderboard", render: () => <LeaderboardModule /> },
-  { path: "/browser", render: () => <BrowserModule /> },
+const MODULES: { path: string; render: (active: boolean) => React.ReactNode }[] = [
+  { path: "/creators", render: (active) => <CreatorsModule active={active} /> },
+  { path: "/it-news", render: (active) => <ItNewsModule active={active} /> },
+  { path: "/ai-leaderboard", render: (active) => <LeaderboardModule active={active} /> },
+  { path: "/browser", render: (active) => <BrowserModule active={active} /> },
 ];
 
 export default function ModuleHost({ children }: { children: React.ReactNode }) {
@@ -46,7 +46,7 @@ export default function ModuleHost({ children }: { children: React.ReactNode }) 
             style={{ visibility: pathname === m.path ? "visible" : "hidden" }}
             className="absolute inset-0 z-0 overflow-hidden"
           >
-            {m.render()}
+            {m.render(pathname === m.path)}
           </div>
         ) : null,
       )}

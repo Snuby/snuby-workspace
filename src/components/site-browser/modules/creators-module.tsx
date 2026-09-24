@@ -10,6 +10,7 @@ const SITES = [
   { id: "wechat", label: "微信公众号后台", url: "https://mp.weixin.qq.com/", partition: "persist:snuby-creators" },
 ];
 
-export default function CreatorsModule() {
-  return <SiteBrowser moduleKey="creators" title="自媒体" sites={SITES} />;
+export default function CreatorsModule({ active }: { active?: boolean }) {
+  return <SiteBrowser
+          active={active} moduleKey="creators" title="自媒体" sites={SITES} />;
 }

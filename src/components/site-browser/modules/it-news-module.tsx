@@ -31,7 +31,7 @@ function loadCustom(): MediaItem[] {
   }
 }
 
-export default function ItNewsModule() {
+export default function ItNewsModule({ active: moduleActive }: { active?: boolean }) {
   const [custom, setCustom] = useState<MediaItem[]>([]);
   const [activeSlug, setActiveSlug] = useState<string>(BUILTIN_IT_MEDIA[0].slug);
 
@@ -82,6 +82,7 @@ export default function ItNewsModule() {
           hideSiteBar
           activeSite={active.slug}
           onActiveSiteChange={select}
+          active={moduleActive}
         />
       </div>
     </div>

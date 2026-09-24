@@ -109,6 +109,7 @@ export default function SiteBrowser({
   activeSite: activeSiteProp,
   onActiveSiteChange,
   title,
+  active = true,
 }: {
   moduleKey: string;
   sites: SiteDef[];
@@ -121,6 +122,10 @@ export default function SiteBrowser({
   onActiveSiteChange?: (id: string) => void;
   /** 模块标题: 渲染在站点栏/地址栏最左侧 (加粗); 替代顶部 Topbar, 省出一行高度 */
   title?: string;
+  /** 模块是否激活 (常驻容器跨模块切换时传入): false 时强制隐藏本模块全部 webview,
+   *  因 webview guest 图层不随父容器 visibility 继承 (内部标签 div 显式 visible 会覆盖
+   *  容器 hidden), 必须直接作用于 webview 元素自身; true 时清空 inline 交还标签级控制 */
+  active?: boolean;
 }) {
   const [desktopState, setDesktopState] = useState<"unknown" | "yes" | "no">("unknown");
   const [settings, setSettings] = useState<SiteSettings>({ maxTabs: 10, maxHistory: 100 });
@@ -157,6 +162,18 @@ export default function SiteBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const groupId = addressMode ? "default" : activeSite;
+
+  // —— 模块级可见性: active=false 时强制隐藏全部 webview (容器 visibility 挡不住
+  //   内部标签 div 的显式 visible, 必须直接操作 webview 元素自身); active=true 时
+  //   清空 inline, 交还标签级 div 继承控制 → 激活标签立即恢复可见 (切回秒回) ——
+  useEffect(() => {
+    if (!isElectronEnv() || desktopState !== "yes") return;
+    for (const el of Object.values(webviewRefs.current)) {
+      if (!el) continue;
+      el.style.visibility = active ? "" : "hidden";
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, desktopState, tabsBySite, activeTab]);
 
   // —— 数据加载 (SQLite, 每模块) ——
   useEffect(() => {

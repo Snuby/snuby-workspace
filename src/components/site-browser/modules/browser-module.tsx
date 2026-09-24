@@ -6,6 +6,7 @@ import SiteBrowser from "@/components/site-browser/site-browser";
 
 const HOME = [{ id: "default", label: "主页", url: "https://www.google.com/" }];
 
-export default function BrowserModule() {
-  return <SiteBrowser moduleKey="browser" title="Web 访问" sites={HOME} addressMode />;
+export default function BrowserModule({ active }: { active?: boolean }) {
+  return <SiteBrowser
+          active={active} moduleKey="browser" title="Web 访问" sites={HOME} addressMode />;
 }

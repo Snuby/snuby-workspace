@@ -10,6 +10,7 @@ const SITES = [
   { id: "openrouter", label: "OpenRouter 排名", url: "https://openrouter.ai/rankings" },
 ];
 
-export default function LeaderboardModule() {
-  return <SiteBrowser moduleKey="leaderboard" title="AI 模型榜单" sites={SITES} />;
+export default function LeaderboardModule({ active }: { active?: boolean }) {
+  return <SiteBrowser
+          active={active} moduleKey="leaderboard" title="AI 模型榜单" sites={SITES} />;
 }
