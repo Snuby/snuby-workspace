@@ -181,16 +181,21 @@ export default function SiteBrowser({
   //   渲染, 输入通道永不中断, 切换零闪烁。隐藏层 pointer-events:none 不拦截下层点击。 ——
   useEffect(() => {
     if (!isElectronEnv() || desktopState !== "yes") return;
+    const activeTabId = activeTabIdRef.current;
     for (const [tabId, el] of Object.entries(webviewRefs.current)) {
       if (!el) continue;
       const siteId = tabSiteRef.current[tabId];
       if (!siteId) continue;
-      const show = active && siteId === groupId;
+      // ★ 必须按"激活标签"精确设置: 容器 div 的 pe:none 会被 webview 元素显式
+      //   pe:auto 覆盖 (子元素显式值优先于父继承) — 若激活站点组内全部标签都设 auto,
+      //   非激活标签 webview 会以 pe:auto + opacity:0 叠在激活标签之上拦截鼠标
+      //   (可见性正常但点不到激活标签, target=_blank popup 也不触发)
+      const show = active && siteId === groupId && tabId === activeTabId;
       el.style.opacity = show ? "1" : "0";
       el.style.pointerEvents = show ? "auto" : "none";
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, groupId, tabsBySite, desktopState]);
+  }, [active, groupId, tabsBySite, desktopState, activeTab]);
 
   // —— 数据加载 (SQLite, 每模块) ——
   useEffect(() => {
