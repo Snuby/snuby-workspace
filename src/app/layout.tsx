@@ -4,7 +4,8 @@
 
 import type { Metadata } from "next";
 import Sidebar from "@/components/workbench/sidebar";
-import ModuleHost from "@/components/workbench/module-host";
+import TopicHost from "@/components/workbench/topic-host";
+import { TopicsProvider } from "@/components/workbench/topics-context";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -16,12 +17,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="zh-CN">
       <body className="flex h-screen overflow-hidden">
-        <Sidebar />
-        <main className="relative flex min-w-0 flex-1 flex-col">
-          {/* 模块常驻容器: 站点型模块的 SiteBrowser 常驻于此, 路由切换只改 visibility
-              → webview 实例/浏览状态跨模块保留, 切回秒回; 非站点型页面走 children */}
-          <ModuleHost>{children}</ModuleHost>
-        </main>
+        <TopicsProvider>
+          <Sidebar />
+          <main className="relative flex min-w-0 flex-1 flex-col">
+            {/* 主题常驻容器: 访问过的主题 SiteBrowser 常驻于此 (opacity+pe 切换可见性)
+                → webview 实例/浏览状态跨主题保留, 切回秒回; 非站点型页面走 children */}
+            <TopicHost>{children}</TopicHost>
+          </main>
+        </TopicsProvider>
       </body>
     </html>
   );

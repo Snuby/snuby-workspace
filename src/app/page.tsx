@@ -240,7 +240,7 @@ export default async function HomePage() {
             </Link>
 
             <Link
-              href="/ai-leaderboard"
+              href="/topic/leaderboard"
               className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
             >
               <div className="mb-3 flex items-start justify-between gap-2">
@@ -268,7 +268,7 @@ export default async function HomePage() {
             </Link>
 
             <Link
-              href="/it-news"
+              href="/topic/it-news"
               className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
             >
               <div className="mb-3 flex items-start justify-between gap-2">
@@ -296,7 +296,7 @@ export default async function HomePage() {
             </Link>
 
             <Link
-              href="/creators"
+              href="/topic/creators"
               className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
             >
               <div className="mb-3 flex items-start justify-between gap-2">

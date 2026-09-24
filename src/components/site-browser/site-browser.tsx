@@ -7,6 +7,7 @@
 // 桌面版(Electron) 渲染 <webview>; 非 Electron 渲染外链兜底 (Web 版不再维护)。
 
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTopics } from "@/components/workbench/topics-context";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -92,6 +93,12 @@ const IconX = ({ className }: { className?: string }) => (
     <path d="m6 6 12 12" />
   </Icon>
 );
+const IconAdd = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M12 5v14" />
+    <path d="M5 12h14" />
+  </Icon>
+);
 
 function isElectronEnv() {
   return typeof navigator !== "undefined" && /electron/i.test(navigator.userAgent);
@@ -136,6 +143,13 @@ export default function SiteBrowser({
   const [loading, setLoading] = useState(false);
   const [currentUrl, setCurrentUrl] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  // —— 站点管理 (topic 动态配置): 添加站点表单 / Web 访问"添加到主题" ——
+  const { topics, addSite, removeSite } = useTopics();
+  const [addSiteOpen, setAddSiteOpen] = useState(false);
+  const [siteUrl, setSiteUrl] = useState("");
+  const [siteLabel, setSiteLabel] = useState("");
+  const [addToTopicOpen, setAddToTopicOpen] = useState(false);
+  const [siteNotice, setSiteNotice] = useState("");
   const [loaded, setLoaded] = useState(false);
   /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -163,12 +177,31 @@ export default function SiteBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const groupId = addressMode ? "default" : activeSite;
+  // 站点集动态变化兜底 (topic 化后 sites 从 DB 异步加载/可增删): 非受控模式下
+  // activeSiteInner 若不在当前站点集 → 回退首个站点; addressMode 恒 "default" 不受影响
+  useEffect(() => {
+    if (addressMode || activeSiteProp) return;
+    if (moduleSites.length === 0) return;
+    if (moduleSites.some((s) => s.id === activeSiteInner)) return;
+    setActiveSiteInner(moduleSites[0].id);
+  }, [moduleSites, activeSiteInner, activeSiteProp, addressMode]);
 
   // —— 站点级懒挂载 + 常驻: 访问过的站点组全量渲染 (切回不重建、不重载); 首个站点随组件初始化 ——
   const [visitedSites, setVisitedSites] = useState<Set<string>>(() => new Set([groupId]));
   useEffect(() => {
     setVisitedSites((prev) => (prev.has(groupId) ? prev : new Set(prev).add(groupId)));
   }, [groupId]);
+  // —— 主题内站点全量常驻: sites 来自 DB 动态配置, 新增站点自动挂载 (首次出现即渲染);
+  //   删除站点后 id 不再出现在 moduleSites, 容器渲染自然跳过 (下方 !siteDef 防御) ——
+  useEffect(() => {
+    setVisitedSites((prev) => {
+      const missing = moduleSites.filter((s) => !prev.has(s.id));
+      if (missing.length === 0) return prev;
+      const next = new Set(prev);
+      for (const s of missing) next.add(s.id);
+      return next;
+    });
+  }, [moduleSites]);
 
   // —— 站点级 + 模块级可见性: 直接作用于 webview 元素自身 (容器/中间 div 的 visibility
   //   会被内部标签 div 显式 visible 覆盖, 必须操作 webview 本体)。激活模块的激活站点组
@@ -482,6 +515,46 @@ export default function SiteBrowser({
     }
   };
 
+  // —— 站点管理动作 ——
+  const handleAddSite = async () => {
+    const url = siteUrl.trim();
+    if (!url) return;
+    const full = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) ? url : `https://${url}`;
+    const id = await addSite(moduleKey, full, siteLabel.trim());
+    if (id) {
+      setSiteUrl("");
+      setSiteLabel("");
+      setAddSiteOpen(false);
+      selectSite(id);
+      setSiteNotice("站点已添加");
+    } else {
+      setSiteNotice("添加失败，请重试");
+    }
+  };
+  const handleRemoveSite = async (siteId: string) => {
+    if (moduleSites.length <= 1) {
+      setSiteNotice("至少保留一个站点");
+      return;
+    }
+    const target = moduleSites.find((s) => s.id === siteId);
+    if (!window.confirm(`移除站点「${target?.label ?? siteId}」？该站点的标签与历史将一并清除。`)) return;
+    await removeSite(moduleKey, siteId);
+    if (activeSite === siteId) {
+      const next = moduleSites.find((s) => s.id !== siteId);
+      if (next) selectSite(next.id);
+    }
+  };
+  const handleAddToTopic = async (topicId: string) => {
+    const url = currentUrl || moduleSites[0]?.url || "";
+    if (!url || !/^https?:\/\//.test(url)) {
+      setSiteNotice("当前页面地址无效");
+      return;
+    }
+    const ok = await addSite(topicId, url, "");
+    setAddToTopicOpen(false);
+    setSiteNotice(ok ? "已添加到主题" : "添加失败");
+  };
+
   // —— 非 Electron 兜底 (Web 版不再维护, 仅保证不白屏) ——
   if (desktopState === "unknown" || !loaded) {
     return <div className="flex h-full w-full items-center justify-center bg-surface text-[13px] text-ink-faint">加载中…</div>;
@@ -545,15 +618,67 @@ export default function SiteBrowser({
                 type="button"
                 onClick={() => selectSite(s.id)}
                 className={[
-                  "shrink-0 px-3 text-[13px] transition-colors",
+                  "group relative shrink-0 px-3 text-[13px] transition-colors",
                   active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
                 ].join(" ")}
               >
                 {s.label}
                 {active ? <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" /> : null}
+                {moduleSites.length > 1 ? (
+                  <span
+                    role="button"
+                    aria-label={`移除站点 ${s.label}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleRemoveSite(s.id);
+                    }}
+                    className="ml-1.5 hidden h-3.5 w-3.5 items-center justify-center rounded text-ink-faint hover:bg-black/10 hover:text-red-500 group-hover:inline-flex"
+                  >
+                    <IconX className="h-3 w-3" />
+                  </span>
+                ) : null}
               </button>
             );
           })}
+          <div className="relative ml-1 flex shrink-0 items-center">
+            <button
+              type="button"
+              title="添加站点"
+              onClick={() => setAddSiteOpen((v) => !v)}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+            >
+              <IconAdd className="h-4 w-4" />
+            </button>
+            {addSiteOpen ? (
+              <div className="absolute left-0 top-[34px] z-50 flex w-[340px] items-center gap-1.5 rounded-lg border border-line bg-white p-2 shadow-xl">
+                <input
+                  autoFocus
+                  value={siteUrl}
+                  onChange={(e) => setSiteUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && void handleAddSite()}
+                  placeholder="站点地址，如 https://example.com"
+                  className="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
+                />
+                <input
+                  value={siteLabel}
+                  onChange={(e) => setSiteLabel(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && void handleAddSite()}
+                  placeholder="名称（可选）"
+                  className="w-[92px] shrink-0 rounded-md border border-line bg-surface px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleAddSite()}
+                  className="shrink-0 rounded-md bg-accent px-2.5 py-1.5 text-[12.5px] font-medium text-white hover:opacity-90"
+                >
+                  添加
+                </button>
+              </div>
+            ) : null}
+          </div>
+          {siteNotice ? (
+            <span className="mr-1 flex shrink-0 items-center text-[11.5px] text-ink-faint">{siteNotice}</span>
+          ) : null}
         </div>
       )}
 
@@ -610,6 +735,32 @@ export default function SiteBrowser({
           <ToolButton label="刷新" onClick={() => nav("reload")} disabled={!activeTabDef}>
             <IconReload />
           </ToolButton>
+          {addressMode ? (
+            <div className="relative">
+              <ToolButton label="添加到主题" onClick={() => setAddToTopicOpen((v) => !v)}>
+                <IconAdd />
+              </ToolButton>
+              {addToTopicOpen ? (
+                <div className="absolute right-0 top-[36px] z-50 max-h-[260px] w-[220px] overflow-auto rounded-lg border border-line bg-white p-1.5 shadow-xl">
+                  <div className="px-2 py-1 text-[11.5px] font-semibold text-ink-muted">添加到主题</div>
+                  {topics && topics.length > 0 ? (
+                    topics.map((t) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => void handleAddToTopic(t.id)}
+                        className="block w-full truncate rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-black/5"
+                      >
+                        {t.name}
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-2.5 py-2 text-[12px] text-ink-faint">暂无主题，请先在左侧创建</div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <InfoButton tab={activeTabDef} />
           <div className="relative">
             <ToolButton
