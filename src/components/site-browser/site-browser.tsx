@@ -137,7 +137,6 @@ export default function SiteBrowser({
   const [currentUrl, setCurrentUrl] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const guestIdMapRef = useRef<Record<number, TabView>>({});
   /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
   /** tabId → siteId: 站点级可见性按归属站点判断 (webview 实例常驻后, 可见性必须知道它属于哪个站点组) */
@@ -246,12 +245,24 @@ export default function SiteBrowser({
     const onPopup = (e: Event) => {
       const detail = (e as CustomEvent<{ url?: string; guestId?: number }>).detail;
       if (!detail?.url) return;
-      // 模块常驻后多个 SiteBrowser 同时监听 window 事件: guestId 必须在本模块
-      // 的 webview 注册表里, 否则是其他常驻模块的 popup, 忽略 (避免误开标签)
+      // 模块常驻后多个 SiteBrowser 同时监听 window 事件: 用实时枚举匹配归属,
+      // 不再依赖 did-attach 注册表 —— guest 重建后 webContentsId 变化, 事件驱动
+      // 注册会漏 (微信后台实测 gid 4→5 后 map 未跟上 → popup 反查失败 → 标签不开)。
+      // 发起 window.open 的 guest 必然已 attach, 枚举 getWebContentsId 必命中。
       if (typeof detail.guestId !== "number") return;
-      const host = guestIdMapRef.current[detail.guestId];
-      if (!host) return;
-      openTabRef.current?.(host.siteId, detail.url);
+      let hit: Element | null = null;
+      const wvs = document.querySelectorAll<Element>("webview");
+      for (const w of wvs) {
+        const wv = w as unknown as { getWebContentsId?: () => number };
+        if (typeof wv.getWebContentsId === "function" && wv.getWebContentsId() === detail.guestId) {
+          hit = w;
+          break;
+        }
+      }
+      if (!hit) return;
+      const siteId = hit.getAttribute("data-site-id");
+      if (!siteId) return;
+      openTabRef.current?.(siteId, detail.url);
     };
     window.addEventListener("snuby-webview-popup", onPopup);
     return () => window.removeEventListener("snuby-webview-popup", onPopup);
@@ -415,12 +426,6 @@ export default function SiteBrowser({
       delete tabSiteRef.current[tabId];
       return;
     }
-    const onAttach = () => {
-      const gid = (el as unknown as { getWebContentsId?: () => number }).getWebContentsId?.();
-      if (typeof gid === "number") {
-        guestIdMapRef.current[gid] = { siteId, tabId };
-      }
-    };
     const updateTabUrl = (url: string) => {
       setCurrentUrl(url);
       setTabsBySite((prev) => ({
@@ -459,7 +464,6 @@ export default function SiteBrowser({
     };
     if (!el.getAttribute("data-snuby-bound")) {
       el.setAttribute("data-snuby-bound", "1");
-      el.addEventListener("did-attach", onAttach);
       el.addEventListener("did-navigate", onNavigateFull);
       el.addEventListener("did-navigate-in-page", onNavigateInPage);
       el.addEventListener("page-title-updated", onTitle);
@@ -722,6 +726,8 @@ function SiteWebview({
       src: initialSrc,
       partition,
       allowpopups: "true",
+      "data-site-id": siteId,
+      "data-tab-id": tabId,
       className: "h-full w-full border-0",
       style: { width: "100%", height: "100%" },
     }),
