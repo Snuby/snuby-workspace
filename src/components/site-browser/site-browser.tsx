@@ -140,6 +140,8 @@ export default function SiteBrowser({
   const guestIdMapRef = useRef<Record<number, TabView>>({});
   /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
+  /** tabId → siteId: 站点级可见性按归属站点判断 (webview 实例常驻后, 可见性必须知道它属于哪个站点组) */
+  const tabSiteRef = useRef<Record<string, string>>({});
   const activeTabIdRef = useRef<string | null>(null);
   /** 同 URL 短时幂等: 站点对一次点击可能触发多次 window.open (双 popup) → 只开一个标签 */
   const pendingOpenRef = useRef<Record<string, number>>({});
@@ -163,17 +165,26 @@ export default function SiteBrowser({
   }, []);
   const groupId = addressMode ? "default" : activeSite;
 
-  // —— 模块级可见性: active=false 时强制隐藏全部 webview (容器 visibility 挡不住
-  //   内部标签 div 的显式 visible, 必须直接操作 webview 元素自身); active=true 时
-  //   清空 inline, 交还标签级 div 继承控制 → 激活标签立即恢复可见 (切回秒回) ——
+  // —— 站点级懒挂载 + 常驻: 访问过的站点组全量渲染 (切回不重建、不重载); 首个站点随组件初始化 ——
+  const [visitedSites, setVisitedSites] = useState<Set<string>>(() => new Set([groupId]));
+  useEffect(() => {
+    setVisitedSites((prev) => (prev.has(groupId) ? prev : new Set(prev).add(groupId)));
+  }, [groupId]);
+
+  // —— 站点级 + 模块级可见性: 直接作用于 webview 元素自身 (容器/中间 div 的 visibility
+  //   会被内部标签 div 显式 visible 覆盖, 必须操作 webview 本体)。激活模块的激活站点组
+  //   交还标签级 div 控制 (激活标签 visible 其余 hidden), 非激活站点/非激活模块强制
+  //   hidden → 切选项卡/切标签/切模块都不销毁实例: 无重载无白屏, 页面运行态全保留 ——
   useEffect(() => {
     if (!isElectronEnv() || desktopState !== "yes") return;
-    for (const el of Object.values(webviewRefs.current)) {
+    for (const [tabId, el] of Object.entries(webviewRefs.current)) {
       if (!el) continue;
-      el.style.visibility = active ? "" : "hidden";
+      const siteId = tabSiteRef.current[tabId];
+      if (!siteId) continue;
+      el.style.visibility = active && siteId === groupId ? "" : "hidden";
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, desktopState, tabsBySite, activeTab]);
+  }, [active, groupId, tabsBySite, desktopState]);
 
   // —— 数据加载 (SQLite, 每模块) ——
   useEffect(() => {
@@ -387,8 +398,10 @@ export default function SiteBrowser({
   const registerGuest = useCallback((el: HTMLElement | null, siteId: string, tabId: string) => {
     if (el) {
       webviewRefs.current[tabId] = el;
+      tabSiteRef.current[tabId] = siteId;
     } else {
       delete webviewRefs.current[tabId];
+      delete tabSiteRef.current[tabId];
       return;
     }
     const onAttach = () => {
@@ -621,25 +634,40 @@ export default function SiteBrowser({
         </div>
       </div>
 
-      {/* 内容区: 每个标签一个常驻 webview, 绝对叠放, 激活用 visibility 切换 —
-          不销毁/不重载/不重挂载, 浏览状态与滚动位置全保留, 切换秒回 (display:none 会触发
-          Electron 暂停渲染+重挂载闪烁, 是之前白屏卡顿的来源) */}
+      {/* 内容区: 站点级 + 标签级全量常驻渲染, 所有 webview 实例不销毁 —
+          可见性由上方 effect 直接作用于 webview 元素: 激活模块的激活站点组交还标签级
+          div 控制 (激活标签 visible 其余 hidden), 非激活站点/模块强制 hidden。
+          切选项卡/切标签/切模块都只是切可见性 → 无重载无白屏, 页面运行态全保留 */}
       <div className="relative min-h-0 flex-1">
-        {groupTabs.map((t) => (
-          <div
-            key={t.id}
-            className="absolute inset-0 h-full w-full"
-            style={{ visibility: t.id === activeTabDef.id ? "visible" : "hidden" }}
-          >
-            <SiteWebview
-              src={t.url}
-              siteId={groupId}
-              tabId={t.id}
-              partition={activeSiteDef?.partition}
-              onRef={registerGuest}
-            />
-          </div>
-        ))}
+        {[...visitedSites].map((siteId) => {
+          const siteDef = moduleSites.find((s) => s.id === siteId);
+          if (!siteDef) return null;
+          const tabs = tabsOf(siteId);
+          const isActiveSite = siteId === groupId;
+          return (
+            <div
+              key={siteId}
+              className="absolute inset-0 h-full w-full"
+              style={{ visibility: isActiveSite ? "visible" : "hidden" }}
+            >
+              {tabs.map((t) => (
+                <div
+                  key={t.id}
+                  className="absolute inset-0 h-full w-full"
+                  style={{ visibility: isActiveSite && t.id === activeTabDef.id ? "visible" : "hidden" }}
+                >
+                  <SiteWebview
+                    src={t.url}
+                    siteId={siteId}
+                    tabId={t.id}
+                    partition={siteDef.partition}
+                    onRef={registerGuest}
+                  />
+                </div>
+              ))}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
