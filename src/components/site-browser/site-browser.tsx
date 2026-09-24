@@ -173,15 +173,21 @@ export default function SiteBrowser({
 
   // —— 站点级 + 模块级可见性: 直接作用于 webview 元素自身 (容器/中间 div 的 visibility
   //   会被内部标签 div 显式 visible 覆盖, 必须操作 webview 本体)。激活模块的激活站点组
-  //   交还标签级 div 控制 (激活标签 visible 其余 hidden), 非激活站点/非激活模块强制
-  //   hidden → 切选项卡/切标签/切模块都不销毁实例: 无重载无白屏, 页面运行态全保留 ——
+  //   交还标签级 div 控制, 非激活站点/非激活模块强制隐藏 → 切选项卡/切标签/切模块都
+  //   不销毁实例: 无重载无白屏, 页面运行态全保留。
+  //   ★ 可见性一律用 opacity + pointer-events, 绝不用 visibility:
+  //   Electron 对 visibility:hidden 的 webview 会分离 guest, 恢复 visible 后画面渲染回来
+  //   但真实鼠标输入通道不再路由 (点击无反应, 实测复现); opacity 不触发分离, guest 一直
+  //   渲染, 输入通道永不中断, 切换零闪烁。隐藏层 pointer-events:none 不拦截下层点击。 ——
   useEffect(() => {
     if (!isElectronEnv() || desktopState !== "yes") return;
     for (const [tabId, el] of Object.entries(webviewRefs.current)) {
       if (!el) continue;
       const siteId = tabSiteRef.current[tabId];
       if (!siteId) continue;
-      el.style.visibility = active && siteId === groupId ? "" : "hidden";
+      const show = active && siteId === groupId;
+      el.style.opacity = show ? "1" : "0";
+      el.style.pointerEvents = show ? "auto" : "none";
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, groupId, tabsBySite, desktopState]);
@@ -636,8 +642,11 @@ export default function SiteBrowser({
 
       {/* 内容区: 站点级 + 标签级全量常驻渲染, 所有 webview 实例不销毁 —
           可见性由上方 effect 直接作用于 webview 元素: 激活模块的激活站点组交还标签级
-          div 控制 (激活标签 visible 其余 hidden), 非激活站点/模块强制 hidden。
-          切选项卡/切标签/切模块都只是切可见性 → 无重载无白屏, 页面运行态全保留 */}
+          div 控制 (激活标签显示其余隐藏), 非激活站点/模块强制隐藏。
+          切选项卡/切标签/切模块都只是切可见性 → 无重载无白屏, 页面运行态全保留。
+          ★ 所有层统一 opacity + pointer-events (绝不用 visibility): visibility 会触发
+          Electron 分离 guest, 恢复后真实鼠标输入失效 (实测复现); opacity 保持 guest
+          常驻渲染, 输入通道永不中断。隐藏层 pointer-events:none 不拦截下层点击。 */}
       <div className="relative min-h-0 flex-1">
         {[...visitedSites].map((siteId) => {
           const siteDef = moduleSites.find((s) => s.id === siteId);
@@ -648,13 +657,16 @@ export default function SiteBrowser({
             <div
               key={siteId}
               className="absolute inset-0 h-full w-full"
-              style={{ visibility: isActiveSite ? "visible" : "hidden" }}
+              style={{ opacity: isActiveSite ? 1 : 0, pointerEvents: isActiveSite ? "auto" : "none" }}
             >
               {tabs.map((t) => (
                 <div
                   key={t.id}
                   className="absolute inset-0 h-full w-full"
-                  style={{ visibility: isActiveSite && t.id === activeTabDef.id ? "visible" : "hidden" }}
+                  style={{
+                    opacity: isActiveSite && t.id === activeTabDef.id ? 1 : 0,
+                    pointerEvents: isActiveSite && t.id === activeTabDef.id ? "auto" : "none",
+                  }}
                 >
                   <SiteWebview
                     src={t.url}
@@ -675,7 +687,7 @@ export default function SiteBrowser({
 
 /** 标签 webview: React 直接管理的独立实例 (无缓存池)
  * - 挂载创建、卸载销毁, 生命周期随标签 DOM
- * - 标签切换不改动实例 (父容器 visibility 切换) → 状态保留、无重载
+ * - 标签切换不改动实例 (父容器 opacity + pointer-events 切换) → 状态保留、无重载
  * - src 只在挂载时取一次: 标签 url 后续变化 (did-navigate 回写) 不触发重载, 避免 SPA 无限刷新
  */
 function SiteWebview({
