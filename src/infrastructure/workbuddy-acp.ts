@@ -294,6 +294,8 @@ export async function connect(): Promise<AgentStatus> {
     } catch (e) {
       lastError = `会话创建失败: ${(e as Error).message}`;
     }
+    // 补偿拉取会话配置 (模型/模式等), 保证 UI 有模型列表与当前值
+    await refreshConfigFromGateway();
     return status();
   } catch (e) {
     lastError = `建连异常: ${(e as Error).message}`;
@@ -323,7 +325,11 @@ export function status(): AgentStatus {
     authMethods: conn.authMethods,
     acpSessionId: acpSessionId ?? undefined,
     connectedAt: Date.now(),
-    models: availableModels,
+    models: availableModels.length
+      ? availableModels
+      : Object.values(sessionConfig)
+          .find((o) => o.id === "model" && Array.isArray(o.options))
+          ?.options?.map((opt) => ({ modelId: opt.value, name: opt.name || opt.value })) ?? FALLBACK_MODELS,
     sessionConfig,
     usage: usage ?? undefined,
   };
@@ -340,6 +346,52 @@ export async function ensureConnected(): Promise<AgentStatus> {
 
 /** session/new (默认开独立新会话 cwd=/tmp, 避免挂到 WorkBuddy 已运行会话导致历史回放噪声;
  *  传入 cwd 且该目录对应已运行会话时网关会挂载并回放, 需容忍乱序) */
+/** 内置兜底模型列表: 网关 config 拉取失败时保证面板可选 (ID 来自 WorkBuddy 配置实测) */
+const FALLBACK_MODELS: ModelInfo[] = [
+  { modelId: "fast-model", name: "快速" },
+  { modelId: "balanced-model", name: "均衡" },
+  { modelId: "deep-model", name: "极致" },
+  { modelId: "hy4-preview-f", name: "Hy4 preview" },
+  { modelId: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+  { modelId: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+  { modelId: "glm-5.2", name: "GLM-5.2" },
+  { modelId: "kimi-k2.6", name: "Kimi K2.6" },
+];
+
+/** 补偿拉取网关会话配置 (sessionConfig/availableModels)。
+ *  网关仅对「新连接后首次 session/new」推送 config_option_update;
+ *  用一次性 text() 解析 (独立进程探测验证可靠)。会多建一个空会话, 可接受。 */
+async function refreshConfigFromGateway(): Promise<void> {
+  try {
+    const res = await acpPost(conn!.base, {
+      jsonrpc: "2.0",
+      id: 99,
+      method: "session/new",
+      params: { cwd: "/tmp", mcpServers: [] },
+    });
+    const text = await res.text();
+    for (const l of text.split("\n").filter((x) => x.startsWith("data:"))) {
+      try {
+        const d = JSON.parse(l.slice(5)) as {
+          params?: { update?: { sessionUpdate?: string; configOptions?: ConfigOptionInfo[] } };
+        };
+        if (d.params?.update?.sessionUpdate === "config_option_update" && Array.isArray(d.params.update.configOptions)) {
+          for (const o of d.params.update.configOptions) {
+            sessionConfig[o.id] = o;
+            if (o.id === "model" && Array.isArray(o.options)) {
+              availableModels = o.options.map((opt) => ({ modelId: opt.value, name: opt.name || opt.value }));
+            }
+          }
+        }
+      } catch {
+        // 坏行忽略
+      }
+    }
+  } catch {
+    // 配置拉取失败不影响连接
+  }
+}
+
 export async function ensureSession(cwd?: string, opts: { force?: boolean } = {}): Promise<string> {
   if (acpSessionId && !opts.force) return acpSessionId;
   const st = await ensureConnected();
@@ -366,7 +418,16 @@ export async function ensureSession(cwd?: string, opts: { force?: boolean } = {}
         // 实测: session/new 流内会先推 config_option_update (权限/模型/思考/沙箱) 与 usage_update
         const up = r.params.update as { sessionUpdate?: string; configOptions?: ConfigOptionInfo[]; used?: number; size?: number };
         if (up.sessionUpdate === "config_option_update" && Array.isArray(up.configOptions)) {
-          for (const o of up.configOptions) sessionConfig[o.id] = o;
+          for (const o of up.configOptions) {
+            sessionConfig[o.id] = o;
+            // 新网关: 模型清单在 model 配置的 options 里 (result.models 已不再返回)
+            if (o.id === "model" && Array.isArray(o.options)) {
+              availableModels = o.options.map((opt) => ({
+                modelId: opt.value,
+                name: opt.name || opt.value,
+              }));
+            }
+          }
         } else if (up.sessionUpdate === "usage_update" && typeof up.used === "number" && typeof up.size === "number") {
           usage = { used: up.used, size: up.size };
         }
@@ -433,7 +494,16 @@ export async function loadSession(sessionId: string, cwd?: string): Promise<stri
       } else if (r?.method === "session/update" && r.params?.update) {
         const up = r.params.update as { sessionUpdate?: string; configOptions?: ConfigOptionInfo[]; used?: number; size?: number };
         if (up.sessionUpdate === "config_option_update" && Array.isArray(up.configOptions)) {
-          for (const o of up.configOptions) sessionConfig[o.id] = o;
+          for (const o of up.configOptions) {
+            sessionConfig[o.id] = o;
+            // 新网关: 模型清单在 model 配置的 options 里 (result.models 已不再返回)
+            if (o.id === "model" && Array.isArray(o.options)) {
+              availableModels = o.options.map((opt) => ({
+                modelId: opt.value,
+                name: opt.name || opt.value,
+              }));
+            }
+          }
         } else if (up.sessionUpdate === "usage_update" && typeof up.used === "number" && typeof up.size === "number") {
           usage = { used: up.used, size: up.size };
         }
