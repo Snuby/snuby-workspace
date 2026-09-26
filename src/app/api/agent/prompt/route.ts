@@ -2,19 +2,22 @@
 // 每行: {type:"chunk"|"thought"|"tool"|"done"|"error", ...}; 前端按行流式渲染
 import { prompt } from "@/infrastructure/workbuddy-acp";
 import { getSession } from "@/infrastructure/agent-session-store";
+import { activateLocalSession } from "@/infrastructure/agent-session-activate";
 
 export async function POST(req: Request) {
   let text = "";
   let timeoutMs = 300_000;
   let acpSessionId: string | undefined;
   let cwd: string | undefined;
+  let localSessionId: string | undefined;
   try {
     const body = (await req.json()) as { text?: string; timeoutMs?: number; localSessionId?: string };
     text = (body.text ?? "").trim();
     if (typeof body.timeoutMs === "number" && body.timeoutMs > 0) timeoutMs = body.timeoutMs;
+    localSessionId = body.localSessionId;
     // 本地会话 → 网关会话映射: 发送前对齐到该会话绑定的网关上下文
-    if (body.localSessionId) {
-      const meta = getSession(body.localSessionId);
+    if (localSessionId) {
+      const meta = getSession(localSessionId);
       if (meta) {
         acpSessionId = meta.acpSessionId;
         cwd = meta.acpCwd;
@@ -38,6 +41,11 @@ export async function POST(req: Request) {
         }
       };
       try {
+        // 本地会话: 发送前激活 (关联网关会话 + 工作约定注入), 保证直接提问也有约定锚定
+        if (localSessionId) {
+          const act = await activateLocalSession(localSessionId);
+          acpSessionId = act.acpSessionId;
+        }
         await prompt(
           text,
           (e) => push(e),
