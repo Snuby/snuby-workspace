@@ -66,6 +66,11 @@ function storedToMsg(m: StoredMsg): Msg {
 }
 
 /** 本地 markdown 文档预览状态 */
+/** 链接/文件预览弹窗: url → 内嵌 webview; file → 拉取文本渲染 */
+type LinkView =
+  | { kind: "url"; url: string; title: string }
+  | { kind: "file"; path: string; title: string; text?: string; loading?: boolean; error?: string };
+
 type DocPreview = {
   path: string;
   title: string;
@@ -123,6 +128,7 @@ export default function LocalAgentPanel() {
   const [running, setRunning] = useState(false);
   /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
   const [preview, setPreview] = useState<DocPreview | null>(null);
+  const [linkView, setLinkView] = useState<LinkView | null>(null);
   /** 本地会话: 列表 / 当前会话 / 历史加载中 */
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
@@ -176,21 +182,21 @@ export default function LocalAgentPanel() {
   useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
 
   /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
-  const openDoc = useCallback(async (path: string, title: string) => {
-    setPreview({ path, title, text: "", loading: true });
-    try {
-      const r = await fetch(`/api/local-file?path=${encodeURIComponent(path)}`, { cache: "no-store" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const text = await r.text();
-      setPreview({ path, title, text, loading: false, error: undefined });
-    } catch (e) {
-      setPreview({
-        path,
-        title,
-        text: "",
-        loading: false,
-        error: e instanceof Error ? e.message : String(e),
-      });
+  const openDoc = useCallback((path: string, title: string) => {
+    // 文件预览: 弹窗展示 (不再在消息流末尾插入卡片)
+    setLinkView({ kind: "file", path, title, loading: true });
+  }, []);
+
+  /** 链接点击: http(s) → webview 弹窗; 本地路径 → 文件弹窗 */
+  const openLink = useCallback((raw: string) => {
+    const url = raw.replace(/^file:\/\//, "");
+    if (/^https?:\/\//i.test(url)) {
+      setLinkView({ kind: "url", url, title: url });
+    } else if (/^(\/Users\/|\/home\/|\/private\/|\/tmp\/)/.test(url)) {
+      const name = url.split("/").pop() ?? url;
+      setLinkView({ kind: "file", path: url, title: name, loading: true });
+    } else {
+      window.open(url, "_blank", "noopener");
     }
   }, []);
 
@@ -798,7 +804,7 @@ export default function LocalAgentPanel() {
                         m.text
                       ) : m.text ? (
                         <>
-                          {renderMd(m.text, openDoc, docHints)}
+                          {renderMd(m.text, openDoc, docHints, openLink)}
                           {m.streaming ? <span className="animate-pulse">▍</span> : null}
                         </>
                       ) : m.streaming ? (
@@ -807,15 +813,7 @@ export default function LocalAgentPanel() {
                         "…"
                       )}
                     </div>
-                    {/* 文档预览卡 (点击 📄 后展开) */}
-                    {preview ? (
-                      <DocPreviewCard
-                        preview={preview}
-                        onClose={() => setPreview(null)}
-                        onOpenDoc={openDoc}
-                        docHints={docHints}
-                      />
-                    ) : null}
+
                   </div>
                 )}
               </div>
@@ -932,6 +930,15 @@ export default function LocalAgentPanel() {
           </div>
         </div>
       )}
+      {linkView ? (
+        <LinkPreviewModal
+          view={linkView}
+          onClose={() => setLinkView(null)}
+          onOpenDoc={openDoc}
+          docHints={docHints}
+          onOpenLink={openLink}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1024,6 +1031,130 @@ function DocPreviewCard({
         ) : (
           renderMd(preview.text, onOpenDoc, docHints)
         )}
+      </div>
+    </div>
+  );
+}
+
+/** 弹窗内嵌 webview (动态创建 Electron guest) */
+function WebviewBox({ src }: { src: string }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const wv = document.createElement("webview") as unknown as HTMLElement & { style: CSSStyleDeclaration };
+    wv.setAttribute("src", src);
+    wv.setAttribute("partition", "default");
+    wv.style.cssText = "width:100%;height:100%;border:none;display:flex;";
+    host.appendChild(wv);
+    return () => {
+      try {
+        host.removeChild(wv);
+      } catch {
+        // 已移除
+      }
+    };
+  }, [src]);
+  return <div ref={hostRef} className="h-full w-full overflow-hidden bg-white" />;
+}
+
+/** 链接/文件预览弹窗: url → 内嵌 webview; file → 拉取文本渲染 (不再插入消息流) */
+function LinkPreviewModal({
+  view,
+  onClose,
+  onOpenDoc,
+  docHints,
+  onOpenLink,
+}: {
+  view: LinkView;
+  onClose: () => void;
+  onOpenDoc: (path: string, title: string) => void;
+  docHints: string[];
+  onOpenLink: (raw: string) => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    if (view.kind !== "file") return;
+    let dead = false;
+    setText(null);
+    setErr(null);
+    void (async () => {
+      try {
+        const r = await fetch(`/api/local-file?path=${encodeURIComponent(view.path)}`, { cache: "no-store" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const t = await r.text();
+        if (!dead) setText(t);
+      } catch (e) {
+        if (!dead) setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [view]);
+
+  // ESC 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="flex h-[82vh] w-[min(1100px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+        <div className="flex items-center gap-2 border-b border-line bg-page px-3.5 py-2">
+          <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
+            {view.kind === "url" ? "🔗 " : "📄 "}
+            {view.title}
+          </span>
+          {view.kind === "url" ? (
+            <span className="max-w-[280px] truncate font-mono text-[10.5px] text-ink-faint" title={view.url}>
+              {view.url}
+            </span>
+          ) : (
+            <span className="max-w-[280px] truncate font-mono text-[10.5px] text-ink-faint" title={view.path}>
+              {view.path}
+            </span>
+          )}
+          <button
+            type="button"
+            title="关闭"
+            aria-label="关闭预览"
+            onClick={onClose}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
+              <path d="M6 6l12 12" />
+              <path d="M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 bg-white">
+          {view.kind === "url" ? (
+            <WebviewBox src={view.url} />
+          ) : err ? (
+            <div className="p-4">
+              <div className="rounded bg-up-soft px-2.5 py-2 text-[12px] leading-snug text-up">打开失败: {err}</div>
+            </div>
+          ) : text === null ? (
+            <div className="flex h-full items-center justify-center text-[12px] text-ink-faint">
+              <span className="animate-pulse">加载中…</span>
+            </div>
+          ) : (
+            <div className="h-full overflow-y-auto px-4 py-3 text-[13px] leading-relaxed text-ink">
+              {renderMd(text, onOpenDoc, docHints, onOpenLink)}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1211,10 +1342,12 @@ function Inline({
   text,
   onOpenDoc,
   docHints,
+  onOpenLink,
 }: {
   text: string;
   onOpenDoc?: (path: string, title: string) => void;
   docHints?: string[];
+  onOpenLink?: (raw: string) => void;
 }) {
   const parts = text.split(
     /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|https?:\/\/[^\s<]+)/g,
@@ -1343,6 +1476,12 @@ function Inline({
         <a
           key={i}
           href={toSrc(m[2])}
+          onClick={(e) => {
+            if (onOpenLink) {
+              e.preventDefault();
+              onOpenLink(m[2]);
+            }
+          }}
           target="_blank"
           rel="noreferrer"
           className="text-accent underline decoration-accent/40 underline-offset-2"
@@ -1378,6 +1517,12 @@ function Inline({
         <a
           key={i}
           href={p}
+          onClick={(e) => {
+            if (onOpenLink) {
+              e.preventDefault();
+              onOpenLink(p);
+            }
+          }}
           target="_blank"
           rel="noreferrer"
           className="text-accent underline decoration-accent/40 underline-offset-2"
@@ -1402,6 +1547,7 @@ function renderMd(
   md: string,
   onOpenDoc?: (path: string, title: string) => void,
   docHints?: string[],
+  onOpenLink?: (raw: string) => void,
 ): ReactNode[] {
   const lines = md.replace(/\r/g, "").split("\n");
   const out: ReactNode[] = [];
@@ -1440,7 +1586,7 @@ function renderMd(
               <tr>
                 {header.map((h, hi) => (
                   <th key={hi} className="border border-line bg-black/[0.03] px-2.5 py-1.5 text-left font-medium">
-                    <Inline text={h} onOpenDoc={onOpenDoc} docHints={docHints} />
+                    <Inline text={h} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
                   </th>
                 ))}
               </tr>
@@ -1450,7 +1596,7 @@ function renderMd(
                 <tr key={ri}>
                   {r.map((c, ci) => (
                     <td key={ci} className="border border-line px-2.5 py-1.5 align-top leading-relaxed">
-                      <Inline text={c} onOpenDoc={onOpenDoc} docHints={docHints} />
+                      <Inline text={c} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
                     </td>
                   ))}
                 </tr>
@@ -1469,11 +1615,11 @@ function renderMd(
         level <= 2 ? (
           <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[14px] font-bold text-ink">
             <span className="h-3 w-[3px] rounded-full bg-accent" />
-            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} />
+            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
           </h4>
         ) : (
           <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[13px] font-semibold text-ink">
-            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} />
+            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
           </h5>
         ),
       );
@@ -1490,7 +1636,7 @@ function renderMd(
         <ul key={`ul-${i}`} className="my-1 list-disc space-y-0.5 pl-4">
           {items.map((it, ii) => (
             <li key={ii}>
-              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} />
+              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
             </li>
           ))}
         </ul>,
@@ -1507,7 +1653,7 @@ function renderMd(
         <ol key={`ol-${i}`} className="my-1 list-decimal space-y-0.5 pl-4">
           {items.map((it, ii) => (
             <li key={ii}>
-              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} />
+              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
             </li>
           ))}
         </ol>,
@@ -1524,7 +1670,7 @@ function renderMd(
         <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[12.5px] text-ink-muted">
           {quote.map((q, qi) => (
             <div key={qi}>
-              <Inline text={q} onOpenDoc={onOpenDoc} docHints={docHints} />
+              <Inline text={q} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
             </div>
           ))}
         </blockquote>,
@@ -1545,7 +1691,7 @@ function renderMd(
     }
     out.push(
       <p key={`p-${i}`} className="my-1 leading-relaxed">
-        <Inline text={para.join("\n")} onOpenDoc={onOpenDoc} docHints={docHints} />
+        <Inline text={para.join("\n")} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
       </p>,
     );
     i = j;
