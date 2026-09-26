@@ -267,7 +267,6 @@ export default function LocalAgentPanel() {
                   网关 <b className="font-semibold text-ink">{status.discovered.pid}</b> ·{" "}
                   <b className="font-semibold text-ink">127.0.0.1:{status.discovered.port}</b>
                 </span>
-                <span>会话 {status.discovered.sessionId.slice(0, 8)}…</span>
                 <span>心跳 {Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前</span>
               </>
             ) : (
