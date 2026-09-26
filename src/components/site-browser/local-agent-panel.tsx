@@ -325,13 +325,17 @@ export default function LocalAgentPanel() {
                         m.error ? "border-up/40 text-up" : "text-ink"
                       }`}
                     >
-                      {m.streaming ? (
+                      {m.error ? (
+                        m.text
+                      ) : m.text ? (
                         <>
-                          {m.text}
-                          <span className="animate-pulse">▍</span>
+                          {renderMd(m.text)}
+                          {m.streaming ? <span className="animate-pulse">▍</span> : null}
                         </>
+                      ) : m.streaming ? (
+                        <span className="animate-pulse">▍</span>
                       ) : (
-                        m.text ? renderMd(m.text) : "…"
+                        "…"
                       )}
                     </div>
                   </div>
