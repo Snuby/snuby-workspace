@@ -51,6 +51,11 @@ const PRESET_TASKS = [
   "列出你最擅长处理的 5 类任务",
 ];
 
+// 输入框自动撑开: 最多 MAX_ROWS 行, 超出才滚动
+const INPUT_MAX_ROWS = 6;
+const INPUT_LINE_H = 20; // 13px 字号 + line-height
+const INPUT_MAX_H = INPUT_MAX_ROWS * INPUT_LINE_H + 16; // 上下 padding py-2 = 16px
+
 export default function LocalAgentPanel() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -59,6 +64,7 @@ export default function LocalAgentPanel() {
   const [running, setRunning] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
 
   const phase = status?.phase ?? "idle";
 
@@ -176,6 +182,14 @@ export default function LocalAgentPanel() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs]);
+
+  // 输入框自动撑高: 内容增高 → 高度跟随, 达到上限后滚动
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, INPUT_MAX_H)}px`;
+  }, [input]);
 
   const pm = PHASE_META[phase];
   const caps = status?.capabilities;
@@ -333,6 +347,7 @@ export default function LocalAgentPanel() {
       <div className="border-t border-line bg-surface px-4 py-3">
         <div className="mx-auto flex max-w-[820px] items-center gap-2">
           <textarea
+            ref={taRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -344,7 +359,8 @@ export default function LocalAgentPanel() {
             placeholder={phase === "connected" ? "给本地 Agent 派个任务… (Enter 发送, Shift+Enter 换行)" : "请先连接 WorkBuddy 网关"}
             disabled={phase !== "connected" || running}
             rows={1}
-            className="max-h-[120px] min-h-[38px] flex-1 resize-none rounded-lg border border-line bg-page px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
+            style={{ maxHeight: INPUT_MAX_H }}
+            className="min-h-[38px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-page px-3 py-2 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
           />
           {running ? (
             <button
