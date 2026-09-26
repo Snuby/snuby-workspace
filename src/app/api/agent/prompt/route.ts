@@ -1,14 +1,25 @@
 // 本地 Agent: 流式任务 (POST) — 转发 WorkBuddy 网关 SSE 为 NDJSON 行
 // 每行: {type:"chunk"|"thought"|"tool"|"done"|"error", ...}; 前端按行流式渲染
 import { prompt } from "@/infrastructure/workbuddy-acp";
+import { getSession } from "@/infrastructure/agent-session-store";
 
 export async function POST(req: Request) {
   let text = "";
   let timeoutMs = 300_000;
+  let acpSessionId: string | undefined;
+  let cwd: string | undefined;
   try {
-    const body = (await req.json()) as { text?: string; timeoutMs?: number };
+    const body = (await req.json()) as { text?: string; timeoutMs?: number; localSessionId?: string };
     text = (body.text ?? "").trim();
     if (typeof body.timeoutMs === "number" && body.timeoutMs > 0) timeoutMs = body.timeoutMs;
+    // 本地会话 → 网关会话映射: 发送前对齐到该会话绑定的网关上下文
+    if (body.localSessionId) {
+      const meta = getSession(body.localSessionId);
+      if (meta) {
+        acpSessionId = meta.acpSessionId;
+        cwd = meta.acpCwd;
+      }
+    }
   } catch {
     // 空 body
   }
@@ -30,7 +41,7 @@ export async function POST(req: Request) {
         await prompt(
           text,
           (e) => push(e),
-          { timeoutMs },
+          { timeoutMs, acpSessionId, cwd },
         );
       } catch (e) {
         push({ type: "error", error: (e as Error).message });

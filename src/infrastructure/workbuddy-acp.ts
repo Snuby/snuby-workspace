@@ -337,8 +337,8 @@ export async function ensureConnected(): Promise<AgentStatus> {
 
 /** session/new (默认开独立新会话 cwd=/tmp, 避免挂到 WorkBuddy 已运行会话导致历史回放噪声;
  *  传入 cwd 且该目录对应已运行会话时网关会挂载并回放, 需容忍乱序) */
-export async function ensureSession(cwd?: string): Promise<string> {
-  if (acpSessionId) return acpSessionId;
+export async function ensureSession(cwd?: string, opts: { force?: boolean } = {}): Promise<string> {
+  if (acpSessionId && !opts.force) return acpSessionId;
   const st = await ensureConnected();
   if (!st.discovered) throw new Error("网关信息缺失");
   const res = await acpPost(conn!.base, {
@@ -388,6 +388,75 @@ export async function ensureSession(cwd?: string): Promise<string> {
   return acpSessionId;
 }
 
+/** session/load: 恢复既有网关会话上下文 (实测需 cwd+mcpServers; 成功返回含 models 的 result)。
+ *  返回 null 表示网关拒绝/作废, 调用方应重建新会话。 */
+export async function loadSession(sessionId: string, cwd?: string): Promise<string | null> {
+  const st = await ensureConnected();
+  if (!st.discovered) throw new Error("网关信息缺失");
+  const res = await acpPost(conn!.base, {
+    jsonrpc: "2.0",
+    id: 3,
+    method: "session/load",
+    params: { sessionId, cwd: cwd ?? "/tmp", mcpServers: [] },
+  });
+  if (!res.ok) {
+    lastError = `session/load HTTP ${res.status}`;
+    return null;
+  }
+  const result = await new Promise<{ sessionId?: string; models?: { availableModels?: ModelInfo[] } } | null>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("session/load 超时")), 12000);
+    readSse(res, (json) => {
+      const r = json as {
+        result?: { sessionId?: string; models?: { availableModels?: ModelInfo[] } };
+        error?: { code?: string | number; message?: string };
+        method?: string;
+        params?: { update?: Record<string, unknown> };
+      };
+      if (r?.error) {
+        clearTimeout(timer);
+        reject(new Error(`session/load RPC error: ${r.error.code} ${r.error.message}`));
+      } else if (r?.method === "session/update" && r.params?.update) {
+        const up = r.params.update as { sessionUpdate?: string; configOptions?: ConfigOptionInfo[]; used?: number; size?: number };
+        if (up.sessionUpdate === "config_option_update" && Array.isArray(up.configOptions)) {
+          for (const o of up.configOptions) sessionConfig[o.id] = o;
+        } else if (up.sessionUpdate === "usage_update" && typeof up.used === "number" && typeof up.size === "number") {
+          usage = { used: up.used, size: up.size };
+        }
+      } else if (r?.result) {
+        // 实测: load 成功 result 直接含 models.availableModels
+        if (Array.isArray(r.result.models?.availableModels)) {
+          availableModels = r.result.models!.availableModels!;
+        }
+        clearTimeout(timer);
+        resolve(r.result);
+      }
+    }).catch(reject);
+  }).catch((e: Error) => {
+    lastError = `session/load: ${e.message}`;
+    return null;
+  });
+  if (!result) return null;
+  acpSessionId = sessionId;
+  await drainReplay();
+  return sessionId;
+}
+
+/** 把网关会话对齐到指定本地会话: 有 acpSessionId → load 恢复 (失败则新建);
+ *  无 → session/new 新建。返回当前网关会话 id。 */
+export async function ensureSessionFor(acpSid?: string, cwd?: string): Promise<string> {
+  if (acpSid) {
+    if (acpSid === acpSessionId) return acpSid;
+    const loaded = await loadSession(acpSid, cwd);
+    if (loaded) return loaded;
+    // 网关拒绝/作废: 重建新会话
+    acpSessionId = null;
+    return ensureSession(cwd, { force: true });
+  }
+  // 本地会话无绑定: 必须新建独立网关会话 (即使当前已有别的会话), 保证上下文隔离
+  acpSessionId = null;
+  return ensureSession(cwd, { force: true });
+}
+
 export type PromptEvent =
   | { type: "chunk"; text: string }
   | { type: "thought"; text: string }
@@ -431,9 +500,9 @@ async function drainReplay(): Promise<void> {
 export async function prompt(
   text: string,
   onEvent: (e: PromptEvent) => void,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; acpSessionId?: string; cwd?: string } = {},
 ): Promise<void> {
-  const sessionId = await ensureSession();
+  const sessionId = await ensureSessionFor(opts.acpSessionId, opts.cwd);
   const timeoutMs = opts.timeoutMs ?? 300_000;
   const id = Date.now();
   // 实测: rawInput.url 为增量片段, 需按 toolCallId 累积

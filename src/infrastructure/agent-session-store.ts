@@ -40,6 +40,8 @@ export type AgentSessionMeta = {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** 关联的网关会话 (WorkBuddy ACP sessionId); 无则首次发送时创建并回写 */
+  acpSessionId?: string;
   acpCwd?: string;
   model?: string;
 };
@@ -139,6 +141,20 @@ export function appendMessage(id: string, msg: AgentMessage): void {
     if (t) meta.title = t.length > 24 ? `${t.slice(0, 24)}…` : t;
   }
   writeMeta(meta);
+}
+
+/** 回写网关会话绑定 (acpSessionId/acpCwd) */
+export function updateSessionGateway(
+  id: string,
+  gateway: { acpSessionId?: string; acpCwd?: string },
+): AgentSessionMeta | null {
+  const meta = getSession(id);
+  if (!meta) return null;
+  if (gateway.acpSessionId) meta.acpSessionId = gateway.acpSessionId;
+  if (gateway.acpCwd) meta.acpCwd = gateway.acpCwd;
+  meta.updatedAt = Date.now();
+  writeMeta(meta);
+  return meta;
 }
 
 export function renameSession(id: string, title: string): AgentSessionMeta | null {

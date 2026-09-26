@@ -34,7 +34,7 @@ type AgentStatus = {
 
 type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
 /** 本地会话元信息 (磁盘持久化) */
-type SessionInfo = { id: string; title: string; createdAt: number; updatedAt: number };
+type SessionInfo = { id: string; title: string; createdAt: number; updatedAt: number; acpSessionId?: string };
 
 /** 磁盘存储的消息形态 (messages.jsonl 单行) */
 type StoredMsg = {
@@ -215,7 +215,7 @@ export default function LocalAgentPanel() {
     }
   };
 
-  /** 切换本地会话 (加载该会话历史) */
+  /** 切换本地会话 (加载历史 + 恢复网关上下文) */
   const switchSession = async (id: string) => {
     if (id === currentId) return;
     setCurrentId(id);
@@ -226,6 +226,15 @@ export default function LocalAgentPanel() {
       setMsgs((j.messages ?? []).map(storedToMsg));
     } catch {
       // 忽略
+    }
+    // 已连接时激活该会话绑定的网关会话 (session/load 恢复上下文, 使 WorkBuddy 记得之前对话)
+    if (phase === "connected") {
+      try {
+        await fetch(`/api/agent/sessions/${id}/activate`, { method: "POST" });
+      } catch {
+        // 激活失败不阻塞; 下次发送时 prompt 内部会再对齐
+      }
+      void refresh();
     }
   };
 
@@ -309,7 +318,7 @@ export default function LocalAgentPanel() {
       const res = await fetch("/api/agent/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: task }),
+        body: JSON.stringify({ text: task, localSessionId: currentId ?? undefined }),
         signal: ac.signal,
       });
       if (!res.ok || !res.body) throw new Error("任务启动失败");
