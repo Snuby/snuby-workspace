@@ -5,7 +5,7 @@
 // 数据契约: MACRO_DB_PATH / MARKET_DB_PATH / FETCH_PYTHON_BIN (与 Web 版同组 env),
 // fetch 脚本相对 cwd (process.chdir 到资源根, 含 scripts/)。
 
-const { app, BrowserWindow, dialog, session, utilityProcess } = require("electron");
+const { app, BrowserWindow, dialog, session, utilityProcess, Menu, clipboard } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 
@@ -39,6 +39,74 @@ app.on("web-contents-created", (_event, contents) => {
       }
     }
     return { action: "deny" };
+  });
+
+  // 浏览器风格默认右键菜单 (宿主页面与 webview guest 统一生效):
+  // Electron 默认不显示任何右键菜单, 这里补齐 Chrome 效果:
+  // 导航(后退/前进/重新加载) / 编辑(撤销/重做/剪切/复制/粘贴/全选) /
+  // 链接(站内新标签打开/复制链接) / 页面(打印/另存为/检查元素)
+  contents.on("context-menu", (_e, params) => {
+    const template = [];
+    const nav = contents.navigationHistory;
+    if (nav && nav.canGoBack()) template.push({ label: "后退", click: () => nav.goBack() });
+    if (nav && nav.canGoForward()) template.push({ label: "前进", click: () => nav.goForward() });
+    if (template.length) template.push({ type: "separator" });
+    if (params.isEditable) {
+      template.push(
+        { label: "撤销", enabled: !!params.editFlags.canUndo, click: () => contents.undo() },
+        { label: "重做", enabled: !!params.editFlags.canRedo, click: () => contents.redo() },
+        { type: "separator" },
+      );
+      template.push(
+        { label: "剪切", enabled: !!params.editFlags.canCut, click: () => contents.cut() },
+        { label: "复制", enabled: !!params.editFlags.canCopy, click: () => contents.copy() },
+        { label: "粘贴", enabled: !!params.editFlags.canPaste, click: () => contents.paste() },
+        { label: "全选", enabled: !!params.editFlags.canSelectAll, click: () => contents.selectAll() },
+      );
+    } else if (params.selectionText) {
+      template.push({ label: "复制", click: () => contents.copy() });
+      template.push({ label: "全选", click: () => contents.selectAll() });
+    }
+    if (template.length) template.push({ type: "separator" });
+    if (params.linkURL) {
+      if (contents.getType() === "webview") {
+        // 站内新标签打开: 与 target=_blank 同一通道 (宿主按 guestId 枚举匹配 → openTab)
+        template.push({
+          label: "在新标签打开",
+          click: () => {
+            const host = contents.hostWebContents;
+            if (host && !host.isDestroyed()) {
+              try {
+                host.executeJavaScript(
+                  `window.dispatchEvent(new CustomEvent("snuby-webview-popup", { detail: { url: ${JSON.stringify(params.linkURL)}, guestId: ${contents.id} } }))`,
+                );
+              } catch {}
+            }
+          },
+        });
+      }
+      template.push({ label: "复制链接地址", click: () => clipboard.writeText(params.linkURL) });
+      template.push({ type: "separator" });
+    }
+    template.push({ label: "重新加载", click: () => contents.reload() });
+    template.push({ label: "打印…", click: () => contents.print() });
+    template.push({
+      label: "页面另存为…",
+      click: async () => {
+        const win = BrowserWindow.fromWebContents(contents);
+        const { canceled, filePath } = await dialog.showSaveDialog(win, {
+          title: "页面另存为",
+          defaultPath: "page.html",
+          filters: [{ name: "HTML", extensions: ["html"] }],
+        });
+        if (!canceled && filePath) contents.savePage(filePath, "HTMLOnly");
+      },
+    });
+    template.push({ type: "separator" });
+    template.push({ label: "检查元素", click: () => contents.inspectElement(params.x, params.y) });
+    if (template.length > 0) {
+      Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(contents) });
+    }
   });
 });
 
