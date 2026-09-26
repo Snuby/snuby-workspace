@@ -487,69 +487,147 @@ function ToolStrip({ m }: { m: Msg }) {
   );
 }
 
-/** 行内解析: **粗体** `代码` [链接](url) ![图片/视频](url) 与换行 */
+/** 行内解析: **粗体** `代码` [链接](url) ![图片/视频](url "title")
+ *  + HTML 白名单直通: <video> / <img> (属性+协议双重校验)
+ *  + 裸 http(s) URL 自动转可点击链接 */
 function Inline({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\))/g);
+  const parts = text.split(
+    /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|https?:\/\/[^\s<]+)/g,
+  );
   const out: ReactNode[] = [];
   parts.forEach((p, i) => {
+    // 安全: 协议白名单 + 标签/属性白名单
+    const safeUrl = (u: string) => /^(https?:\/\/|data:image\/)/i.test(u);
+
+    const vtag = p.match(/^<video([^>]*)>[\s\S]*?<\/video>$/i);
+    if (vtag) {
+      const attrs = vtag[1];
+      const src = attrs.match(/src="([^"]+)"/)?.[1] ?? "";
+      const width = attrs.match(/width="?(\d+)"?/)?.[1];
+      const height = attrs.match(/height="?(\d+)"?/)?.[1];
+      const controls = /\bcontrols\b/i.test(attrs);
+      if (src && safeUrl(src)) {
+        out.push(
+          <video
+            key={i}
+            src={src}
+            controls={controls || true}
+            playsInline
+            style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 320 }}
+            className="my-1 rounded-lg border border-line bg-black/5"
+          />,
+        );
+        return;
+      }
+      out.push(<span key={i}>{p}</span>);
+      return;
+    }
+
+    const htag = p.match(/^<img([^>]*)\/?>$/i);
+    if (htag) {
+      const attrs = htag[1];
+      const src = attrs.match(/src="([^"]+)"/)?.[1] ?? "";
+      const width = attrs.match(/width="?(\d+)"?/)?.[1];
+      const height = attrs.match(/height="?(\d+)"?/)?.[1];
+      const alt = attrs.match(/alt="([^"]*)"/)?.[1] ?? "";
+      if (src && safeUrl(src)) {
+        out.push(
+          <img
+            key={i}
+            src={src}
+            alt={alt}
+            loading="lazy"
+            style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 360 }}
+            className="my-1 rounded-lg border border-line object-contain bg-black/[0.02]"
+          />,
+        );
+        return;
+      }
+      out.push(<span key={i}>{p}</span>);
+      return;
+    }
+
     if (p.startsWith("**") && p.endsWith("**") && p.length > 4) {
       out.push(<strong key={i}>{p.slice(2, -2)}</strong>);
-    } else if (p.startsWith("`") && p.endsWith("`") && p.length > 2) {
+      return;
+    }
+    if (p.startsWith("`") && p.endsWith("`") && p.length > 2) {
       out.push(
         <code key={i} className="rounded bg-black/[0.06] px-1 py-0.5 text-[12px]">
           {p.slice(1, -1)}
         </code>,
       );
-    } else {
-      const img = p.match(/^!\[([^\]]+)\]\(([^)]+)\)$/);
-      if (img) {
-        const alt = img[1];
-        const src = img[2].trim();
-        // 协议白名单: http/https/data:image, 防 javascript: 等
-        if (/^(https?:\/\/|data:image\/)/.test(src)) {
-          if (/\.(mp4|webm|mov|m3u8)(\?|#|$)/i.test(src)) {
-            out.push(
-              <video key={i} src={src} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
-                <p className="px-2 py-1 text-[11.5px] text-ink-muted">视频无法预览: {alt || src}</p>
-              </video>,
-            );
-          } else {
-            out.push(
-              <img
-                key={i}
-                src={src}
-                alt={alt}
-                loading="lazy"
-                className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
-              />,
-            );
-          }
+      return;
+    }
+
+    // 图片语法: ![alt](url) / ![alt](url "title")
+    const img = p.match(/^!\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)$/);
+    if (img) {
+      const alt = img[1];
+      const src = img[2].trim();
+      const title = img[3] ?? "";
+      if (safeUrl(src)) {
+        if (/\.(mp4|webm|mov|m3u8)(\?|#|$)/i.test(src)) {
+          out.push(
+            <video key={i} src={src} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
+              <p className="px-2 py-1 text-[11.5px] text-ink-muted">视频无法预览: {alt || src}</p>
+            </video>,
+          );
         } else {
-          out.push(<span key={i}>{alt}</span>);
+          out.push(
+            <img
+              key={i}
+              src={src}
+              alt={alt}
+              title={title || undefined}
+              loading="lazy"
+              className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
+            />,
+          );
         }
         return;
       }
-      const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      if (m && /^https?:\/\//.test(m[2])) {
-        out.push(
-          <a
-            key={i}
-            href={m[2]}
-            target="_blank"
-            rel="noreferrer"
-            className="text-accent underline decoration-accent/40 underline-offset-2"
-          >
-            {m[1]}
-          </a>,
-        );
-      } else {
-        const lines = p.split("\n");
-        lines.forEach((ln, li) => {
-          if (li > 0) out.push(<br key={`br-${i}-${li}`} />);
-          out.push(<span key={`${i}-${li}`}>{ln}</span>);
-        });
-      }
+      out.push(<span key={i}>{alt}</span>);
+      return;
     }
+
+    const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (m && safeUrl(m[2])) {
+      out.push(
+        <a
+          key={i}
+          href={m[2]}
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent underline decoration-accent/40 underline-offset-2"
+        >
+          {m[1]}
+        </a>,
+      );
+      return;
+    }
+
+    // 裸 URL: 自动可点击
+    if (/^https?:\/\//i.test(p)) {
+      out.push(
+        <a
+          key={i}
+          href={p}
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent underline decoration-accent/40 underline-offset-2"
+        >
+          {p}
+        </a>,
+      );
+      return;
+    }
+
+    const lines = p.split("\n");
+    lines.forEach((ln, li) => {
+      if (li > 0) out.push(<br key={`br-${i}-${li}`} />);
+      out.push(<span key={`${i}-${li}`}>{ln}</span>);
+    });
   });
   return <>{out}</>;
 }
