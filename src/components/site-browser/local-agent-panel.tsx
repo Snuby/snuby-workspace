@@ -303,14 +303,15 @@ export default function LocalAgentPanel() {
             {msgs.map((m) => (
               <div key={m.id}>
                 {m.role === "user" ? (
-                  <div className="flex justify-end">
+                  <div className="group flex items-end justify-end gap-1.5">
+                    <CopyBtn text={m.text} />
                     <div className="max-w-[70%] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[13px] leading-relaxed text-white">
                       {m.text}
                     </div>
                   </div>
                 ) : (
                   <div className="max-w-[90%]">
-                    <div className="mb-1 flex items-center gap-1.5">
+                    <div className="group mb-1 flex items-center gap-1.5">
                       <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                       <span className="text-[11px] font-medium text-ink-muted">本地 Agent</span>
                       {m.streaming && (
@@ -318,6 +319,9 @@ export default function LocalAgentPanel() {
                           {m.thinking ? "思考中…" : "正在生成…"}
                         </span>
                       )}
+                      <span className="ml-auto">
+                        <CopyBtn text={m.text} />
+                      </span>
                     </div>
                     <ToolStrip m={m} />
                     <div
@@ -388,6 +392,49 @@ export default function LocalAgentPanel() {
         </div>
       </div>
     </div>
+  );
+}
+
+const IconCopy = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+  </svg>
+);
+
+const IconCheck = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="m5 13 4 4L19 7" />
+  </svg>
+);
+
+/** 复制按钮: hover 显示, 点击复制消息原文 (Markdown) */
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      title="复制原文"
+      aria-label="复制原文"
+      onClick={() => void copy()}
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-all hover:bg-black/5 hover:text-ink group-hover:opacity-100"
+    >
+      {copied ? <IconCheck className="h-3.5 w-3.5 text-down" /> : <IconCopy className="h-3.5 w-3.5" />}
+    </button>
   );
 }
 
@@ -497,7 +544,12 @@ function Inline({ text }: { text: string }) {
   const out: ReactNode[] = [];
   parts.forEach((p, i) => {
     // 安全: 协议白名单 + 标签/属性白名单
-    const safeUrl = (u: string) => /^(https?:\/\/|data:image\/)/i.test(u);
+    const LOCAL_RE = /^(\/Users\/|\/home\/|\/private\/|\/tmp\/|file:\/\/)/;
+    const safeUrl = (u: string) => /^(https?:\/\/|data:image\/)/i.test(u) || LOCAL_RE.test(u);
+    const toSrc = (u: string) => {
+      const cleaned = u.replace(/^file:\/\//, "");
+      return LOCAL_RE.test(u) ? `/api/local-file?path=${encodeURIComponent(cleaned)}` : u;
+    };
 
     const vtag = p.match(/^<video([^>]*)>[\s\S]*?<\/video>$/i);
     if (vtag) {
@@ -510,7 +562,7 @@ function Inline({ text }: { text: string }) {
         out.push(
           <video
             key={i}
-            src={src}
+            src={toSrc(src)}
             controls={controls || true}
             playsInline
             style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 320 }}
@@ -534,7 +586,7 @@ function Inline({ text }: { text: string }) {
         out.push(
           <img
             key={i}
-            src={src}
+            src={toSrc(src)}
             alt={alt}
             loading="lazy"
             style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 360 }}
@@ -569,7 +621,7 @@ function Inline({ text }: { text: string }) {
       if (safeUrl(src)) {
         if (/\.(mp4|webm|mov|m3u8)(\?|#|$)/i.test(src)) {
           out.push(
-            <video key={i} src={src} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
+            <video key={i} src={toSrc(src)} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
               <p className="px-2 py-1 text-[11.5px] text-ink-muted">视频无法预览: {alt || src}</p>
             </video>,
           );
@@ -577,7 +629,7 @@ function Inline({ text }: { text: string }) {
           out.push(
             <img
               key={i}
-              src={src}
+              src={toSrc(src)}
               alt={alt}
               title={title || undefined}
               loading="lazy"
@@ -596,7 +648,7 @@ function Inline({ text }: { text: string }) {
       out.push(
         <a
           key={i}
-          href={m[2]}
+          href={toSrc(m[2])}
           target="_blank"
           rel="noreferrer"
           className="text-accent underline decoration-accent/40 underline-offset-2"
