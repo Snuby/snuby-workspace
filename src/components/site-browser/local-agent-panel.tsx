@@ -440,66 +440,7 @@ export default function LocalAgentPanel() {
   const caps = status?.capabilities;
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-page">
-      {/* ── 会话侧栏 (磁盘持久化的本地会话) ── */}
-      <aside className="flex h-full w-[216px] shrink-0 flex-col border-r border-line bg-surface">
-        <div className="flex items-center justify-between px-3 pb-2 pt-3">
-          <span className="text-[11.5px] font-semibold uppercase tracking-wider text-ink-faint">会话</span>
-          <button
-            type="button"
-            title="新建会话"
-            aria-label="新建会话"
-            onClick={() => void createLocalSession()}
-            className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
-              <path d="M12 5v14" />
-              <path d="M5 12h14" />
-            </svg>
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto px-2 pb-3">
-          {!histLoaded ? (
-            <div className="px-2 py-2 text-[11.5px] text-ink-faint">加载中…</div>
-          ) : sessions.length === 0 ? (
-            <div className="px-2 py-2 text-[11.5px] text-ink-faint">暂无会话，点 + 新建</div>
-          ) : (
-            sessions.map((sd) => (
-              <div
-                key={sd.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => void switchSession(sd.id)}
-                onKeyDown={(e) => e.key === "Enter" && void switchSession(sd.id)}
-                className={`group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] ${
-                  sd.id === currentId ? "bg-accent-soft font-medium text-accent-deep" : "text-ink hover:bg-black/5"
-                }`}
-                title={sd.title}
-              >
-                <span className="min-w-0 flex-1 truncate">{sd.title}</span>
-                <span className="shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtRel(sd.updatedAt)}</span>
-                <button
-                  type="button"
-                  aria-label={`删除会话 ${sd.title}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void removeSession(sd.id);
-                  }}
-                  className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-red-500 group-hover:flex"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3 w-3">
-                    <path d="M6 6l12 12" />
-                    <path d="M18 6L6 18" />
-                  </svg>
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      </aside>
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* ── 连接状态条 ── */}
+    <div className="flex h-full w-full flex-col overflow-hidden bg-page">
       <div className="relative flex items-center gap-3 border-b border-line bg-surface px-4 py-3">
         <div
           className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
@@ -626,7 +567,6 @@ export default function LocalAgentPanel() {
           )}
         </div>
       </div>
-
       {/* ── 会话设置条 (模型 + 动态配置项 + 用量) ── */}
       {phase === "connected" && status?.sessionConfig && (
         <div className="border-b border-line bg-surface px-4 py-2">
@@ -670,6 +610,65 @@ export default function LocalAgentPanel() {
         </div>
       )}
 
+      <div className="flex min-h-0 flex-1">
+
+      {/* ── 会话侧栏 (磁盘持久化的本地会话) ── */}
+      <aside className="flex h-full w-[216px] shrink-0 flex-col border-r border-line bg-surface">
+        <div className="flex items-center justify-between px-3 pb-2 pt-3">
+          <span className="text-[11.5px] font-semibold uppercase tracking-wider text-ink-faint">会话</span>
+          <button
+            type="button"
+            title="新建会话"
+            aria-label="新建会话"
+            onClick={() => void createLocalSession()}
+            className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 pb-3">
+          {!histLoaded ? (
+            <div className="px-2 py-2 text-[11.5px] text-ink-faint">加载中…</div>
+          ) : sessions.length === 0 ? (
+            <div className="px-2 py-2 text-[11.5px] text-ink-faint">暂无会话，点 + 新建</div>
+          ) : (
+            sessions.map((sd) => (
+              <div
+                key={sd.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => void switchSession(sd.id)}
+                onKeyDown={(e) => e.key === "Enter" && void switchSession(sd.id)}
+                className={`group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] ${
+                  sd.id === currentId ? "bg-accent-soft font-medium text-accent-deep" : "text-ink hover:bg-black/5"
+                }`}
+                title={sd.title}
+              >
+                <span className="min-w-0 flex-1 truncate">{sd.title}</span>
+                <span className="shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtRel(sd.updatedAt)}</span>
+                <button
+                  type="button"
+                  aria-label={`删除会话 ${sd.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void removeSession(sd.id);
+                  }}
+                  className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-red-500 group-hover:flex"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3 w-3">
+                    <path d="M6 6l12 12" />
+                    <path d="M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </aside>
+        <div className="flex min-w-0 flex-1 flex-col">
       {/* ── 协作演示区 ── */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {msgs.length === 0 ? (
@@ -795,6 +794,7 @@ export default function LocalAgentPanel() {
           ACP over HTTP+SSE · 连接令牌仅保存在本机内存 · 权限请求默认拒绝
         </div>
       </div>
+        </div>
       </div>
     </div>
   );
