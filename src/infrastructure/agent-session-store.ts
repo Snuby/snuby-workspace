@@ -213,7 +213,7 @@ export function updateSessionGateway(
   if (gateway.acpCwd) meta.acpCwd = gateway.acpCwd;
   if (gateway.sysPromptFp !== undefined) meta.sysPromptFp = gateway.sysPromptFp;
   if (gateway.sysPromptFailed !== undefined) meta.sysPromptFailed = gateway.sysPromptFailed;
-  meta.updatedAt = Date.now();
+  // 注意: 不更新 updatedAt — 列表时间 = 最近一条消息时间, 激活/绑定不算消息活动
   writeMeta(meta);
   return meta;
 }
@@ -222,7 +222,7 @@ export function renameSession(id: string, title: string): AgentSessionMeta | nul
   const meta = getSession(id);
   if (!meta) return null;
   meta.title = title.trim() || meta.title;
-  meta.updatedAt = Date.now();
+  // 不更新 updatedAt — 重命名不算消息活动
   writeMeta(meta);
   return meta;
 }

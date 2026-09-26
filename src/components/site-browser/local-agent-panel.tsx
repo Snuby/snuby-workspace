@@ -61,6 +61,7 @@ function storedToMsg(m: StoredMsg): Msg {
     error: m.error,
     streaming: false,
     finishedAt: m.ts,
+    ts: m.ts,
   };
 }
 
@@ -83,6 +84,7 @@ type Msg = {
   error?: boolean;
   startedAt?: number;
   finishedAt?: number;
+  ts?: number;
 };
 
 const PHASE_META: Record<Phase, { label: string; color: string; dot: string }> = {
@@ -316,6 +318,16 @@ export default function LocalAgentPanel() {
     return `${Math.floor(d / 86_400_000)}d`;
   };
 
+  /** 消息时间: 跨天显示 日期+时分, 当天显示 时分秒 */
+  const fmtClock = (ts?: number) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    const now = new Date();
+    const hm = d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === now.toDateString()) return hm;
+    return `${d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })} ${hm}`;
+  };
+
   const connect = async () => {
     setBusy(true);
     setStatus((s) => ({ ...(s ?? {}), phase: "connecting" }) as AgentStatus);
@@ -336,9 +348,9 @@ export default function LocalAgentPanel() {
     setInput("");
     setRunning(true);
     const id = Date.now();
-    setMsgs((m) => [...m, { id, role: "user", text: task }]);
+    setMsgs((m) => [...m, { id, role: "user", text: task, ts: id }]);
     persist("user", { text: task });
-    const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true, startedAt: Date.now() };
+    const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true, startedAt: Date.now(), ts: Date.now() };
     agentLatestRef.current = agentMsg;
     setMsgs((m) => [...m, agentMsg]);
     const ac = new AbortController();
@@ -755,12 +767,14 @@ export default function LocalAgentPanel() {
                     <div className="max-w-[70%] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[13px] leading-relaxed text-white">
                       {m.text}
                     </div>
+                    <span className="mb-0.5 shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
                   </div>
                 ) : (
                   <div className="max-w-[90%]">
                     <div className="group mb-1 flex items-center gap-1.5">
                       <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                       <span className="text-[11px] font-medium text-ink-muted">本地 Agent</span>
+                      <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
                       {m.streaming && (
                         <span className="text-[11px] text-accent">
                           {m.thinking ? "思考中…" : "正在生成…"}
