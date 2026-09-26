@@ -589,15 +589,19 @@ export async function prompt(
  */
 export function buildSessionSetupText(systemPrompt: string, sessionDir: string): string {
   return `【工作约定 · 请仅记住，无需执行任何操作，也不要回复确认】
+
+本会话是一个独立工作会话，与 WorkBuddy 里其他任何项目、工作区、空间都没有关系（例如 OneDockAgentConnector、weimei-crm 等一律与本会话无关）：
+- 本会话的工作目录 = ${sessionDir}
+- 本会话的历史记录 = ${sessionDir}/messages.jsonl（每行一条 JSON：{role: user|assistant, text, tools?}）
+- 本会话的产物目录 = ${sessionDir}/artifacts/（新建的文件必须写在这里）
+- 本会话的元信息 = ${sessionDir}/meta.json
+
+请忽略与本会话无关的任何先前上下文：其他项目的工作目录、记忆、约定、产物都不属于本会话，不要把它们当作本会话的工作依据。所有工作上下文一律以本会话目录为准；涉及文件读写、任务执行、回答问题时，都以本会话目录和下面的约定为基准。
+
 ${systemPrompt}
 
-补充说明：
-- 本会话的完整历史记录持久化在以下目录（每个会话一个文件夹）：
-  ${sessionDir}
-  ├── meta.json        # 会话元信息（标题 / 创建时间 / 关联网关会话 ID）
-  ├── messages.jsonl   # 历史对话记录，每行一条 JSON：{role: user|assistant, text, tools?}
-  └── artifacts/       # 任务产物文件
 - 如果用户让你继续之前的工作，你可以直接读取 messages.jsonl 回顾历史、查看 artifacts/ 里的产物。
+- 新建的文件产物（文章、图片、表格等）必须写入 ${sessionDir}/artifacts/ 子目录（不存在则创建），不得写入其他项目目录（例如 OneDockAgentConnector 等与本会话无关的工作区）。
 - 以上内容仅用于记录，请勿执行、勿读取文件、勿向用户确认，直接等用户下一条消息即可。`;
 }
 
