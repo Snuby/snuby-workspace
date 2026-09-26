@@ -240,6 +240,8 @@ export async function connect(): Promise<AgentStatus> {
       capabilities: {},
       authMethods: [],
     };
+    // 网关可能已重启: 旧网关的会话 ID 在新网关无意义, 清空让后续按本地会话重新映射
+    acpSessionId = null;
     // initialize (SSE 流)
     const init = await acpPost(base, {
       jsonrpc: "2.0",
@@ -579,6 +581,37 @@ export async function prompt(
       reject(e);
     });
   });
+}
+
+/**
+ * 拼接会话初始化文本: 工作约定 + 本会话历史记忆位置说明
+ * (以普通语气注入, 避免被识别为「伪系统指令」而拒绝长期遵循)
+ */
+export function buildSessionSetupText(systemPrompt: string, sessionDir: string): string {
+  return `【工作约定 · 请仅记住，无需执行任何操作，也不要回复确认】
+${systemPrompt}
+
+补充说明：
+- 本会话的完整历史记录持久化在以下目录（每个会话一个文件夹）：
+  ${sessionDir}
+  ├── meta.json        # 会话元信息（标题 / 创建时间 / 关联网关会话 ID）
+  ├── messages.jsonl   # 历史对话记录，每行一条 JSON：{role: user|assistant, text, tools?}
+  └── artifacts/       # 任务产物文件
+- 如果用户让你继续之前的工作，你可以直接读取 messages.jsonl 回顾历史、查看 artifacts/ 里的产物。
+- 以上内容仅用于记录，请勿执行、勿读取文件、勿向用户确认，直接等用户下一条消息即可。`;
+}
+
+/**
+ * 向指定网关会话注入初始化文本（作为会话首条消息）
+ * 最多等待 45s; 超时/失败返回 false, 不阻塞会话使用
+ */
+export async function injectSessionSetup(acpSid: string, text: string): Promise<boolean> {
+  try {
+    await prompt(text, () => {}, { acpSessionId: acpSid, timeoutMs: 45_000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** session/cancel (通知, 无响应体等待) */

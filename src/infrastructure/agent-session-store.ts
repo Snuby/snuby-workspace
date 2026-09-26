@@ -44,9 +44,40 @@ export type AgentSessionMeta = {
   acpSessionId?: string;
   acpCwd?: string;
   model?: string;
+  /** 已注入的工作约定指纹 (sha1); 约定编辑后指纹变化, 下次激活重新注入 */
+  sysPromptFp?: string;
+  /** 最近一次约定注入是否失败 */
+  sysPromptFailed?: boolean;
 };
 
 const ROOT = process.env.AGENT_SESSIONS_PATH ?? path.join(process.cwd(), "data", "agent-sessions");
+export const SESSIONS_ROOT = ROOT;
+const SYSTEM_PROMPT_PATH = path.join(ROOT, "system-prompt.txt");
+
+/** 默认工作约定 (可编辑; 以普通「工作约定」语气注入, 不自称系统级约束以免被拒) */
+export const DEFAULT_SYSTEM_PROMPT = `我们之间的工作约定（请在每次回复时遵守）：
+1. 所有回复一律使用 Markdown 格式输出。
+2. 图片使用标准 Markdown 图片语法：![描述](URL)。
+3. 引用或创建的本地文件，给出文件的绝对路径，并用 Markdown 链接格式 [文件名](绝对路径) 引用，方便直接打开。
+4. 视频、音频等媒体资源，提供可访问的 URL 或本地绝对路径链接。
+5. 默认使用简体中文回复。`;
+
+export function getSystemPrompt(): string {
+  try {
+    if (existsSync(SYSTEM_PROMPT_PATH)) {
+      const t = readFileSync(SYSTEM_PROMPT_PATH, "utf8").trim();
+      if (t) return t;
+    }
+  } catch {
+    // 读失败用默认
+  }
+  return DEFAULT_SYSTEM_PROMPT;
+}
+
+export function setSystemPrompt(text: string): void {
+  mkdirSync(ROOT, { recursive: true });
+  writeFileSync(SYSTEM_PROMPT_PATH, text.trim(), "utf8");
+}
 
 function ensureRoot(): string {
   mkdirSync(ROOT, { recursive: true });
@@ -146,12 +177,14 @@ export function appendMessage(id: string, msg: AgentMessage): void {
 /** 回写网关会话绑定 (acpSessionId/acpCwd) */
 export function updateSessionGateway(
   id: string,
-  gateway: { acpSessionId?: string; acpCwd?: string },
+  gateway: { acpSessionId?: string; acpCwd?: string; sysPromptFp?: string; sysPromptFailed?: boolean },
 ): AgentSessionMeta | null {
   const meta = getSession(id);
   if (!meta) return null;
   if (gateway.acpSessionId) meta.acpSessionId = gateway.acpSessionId;
   if (gateway.acpCwd) meta.acpCwd = gateway.acpCwd;
+  if (gateway.sysPromptFp !== undefined) meta.sysPromptFp = gateway.sysPromptFp;
+  if (gateway.sysPromptFailed !== undefined) meta.sysPromptFailed = gateway.sysPromptFailed;
   meta.updatedAt = Date.now();
   writeMeta(meta);
   return meta;
