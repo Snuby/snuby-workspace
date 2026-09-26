@@ -33,6 +33,37 @@ type AgentStatus = {
 };
 
 type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
+/** 本地会话元信息 (磁盘持久化) */
+type SessionInfo = { id: string; title: string; createdAt: number; updatedAt: number };
+
+/** 磁盘存储的消息形态 (messages.jsonl 单行) */
+type StoredMsg = {
+  role: "user" | "assistant";
+  text: string;
+  tools?: { tool: string; detail?: string; toolCallId?: string; ts?: number }[];
+  error?: boolean;
+  ts: number;
+};
+
+/** 磁盘消息 → 面板消息 */
+function storedToMsg(m: StoredMsg): Msg {
+  return {
+    id: m.ts,
+    role: m.role === "user" ? "user" : "agent",
+    text: m.text,
+    tools: (m.tools ?? []).map((t) => ({
+      tool: t.tool,
+      state: "",
+      detail: t.detail ?? "",
+      toolCallId: t.toolCallId ?? "",
+      ts: t.ts ?? 0,
+    })),
+    error: m.error,
+    streaming: false,
+    finishedAt: m.ts,
+  };
+}
+
 /** 本地 markdown 文档预览状态 */
 type DocPreview = {
   path: string;
@@ -89,6 +120,12 @@ export default function LocalAgentPanel() {
   const [running, setRunning] = useState(false);
   /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
   const [preview, setPreview] = useState<DocPreview | null>(null);
+  /** 本地会话: 列表 / 当前会话 / 历史加载中 */
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [histLoaded, setHistLoaded] = useState(false);
+  /** 流式中的最新 agent 消息 (供结束落盘) */
+  const agentLatestRef = useRef<Msg | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
@@ -141,6 +178,97 @@ export default function LocalAgentPanel() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  // 会话列表 + 最近会话历史 (磁盘持久化)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/api/agent/sessions", { cache: "no-store" });
+        const j = (await r.json()) as { sessions: SessionInfo[] };
+        const list = j.sessions ?? [];
+        setSessions(list);
+        if (list.length) {
+          setCurrentId(list[0].id);
+          const mr = await fetch(`/api/agent/sessions/${list[0].id}/messages`, { cache: "no-store" });
+          const mj = (await mr.json()) as { messages: StoredMsg[] };
+          setMsgs((mj.messages ?? []).map(storedToMsg));
+        } else {
+          await createLocalSession();
+        }
+      } catch {
+        // 网络失败忽略, 面板仍可连接后新建
+      }
+      setHistLoaded(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 新建本地会话 */
+  const createLocalSession = async () => {
+    try {
+      const r = await fetch("/api/agent/sessions", { method: "POST" });
+      const j = (await r.json()) as { session: SessionInfo };
+      setSessions((x) => [j.session, ...x]);
+      setCurrentId(j.session.id);
+      setMsgs([]);
+    } catch {
+      // 落盘失败不阻塞本地会话
+    }
+  };
+
+  /** 切换本地会话 (加载该会话历史) */
+  const switchSession = async (id: string) => {
+    if (id === currentId) return;
+    setCurrentId(id);
+    setMsgs([]);
+    try {
+      const r = await fetch(`/api/agent/sessions/${id}/messages`, { cache: "no-store" });
+      const j = (await r.json()) as { messages: StoredMsg[] };
+      setMsgs((j.messages ?? []).map(storedToMsg));
+    } catch {
+      // 忽略
+    }
+  };
+
+  /** 删除本地会话 (磁盘+列表); 删当前则切到最近会话 */
+  const removeSession = async (id: string) => {
+    try {
+      await fetch(`/api/agent/sessions/${id}`, { method: "DELETE" });
+    } catch {
+      // 忽略
+    }
+    const rest = sessions.filter((x) => x.id !== id);
+    setSessions(rest);
+    if (id === currentId) {
+      if (rest.length) void switchSession(rest[0].id);
+      else void createLocalSession();
+    }
+  };
+
+  /** 落盘一条消息到当前会话 */
+  const persist = (role: "user" | "assistant", msg: Partial<Msg>) => {
+    if (!currentId) return;
+    void fetch(`/api/agent/sessions/${currentId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role,
+        text: msg.text ?? "",
+        tools: msg.tools,
+        error: msg.error,
+        ts: Date.now(),
+      }),
+    });
+  };
+
+  /** 相对时间 */
+  const fmtRel = (ts: number) => {
+    const d = Date.now() - ts;
+    if (d < 60_000) return "刚刚";
+    if (d < 3_600_000) return `${Math.floor(d / 60_000)}m`;
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h`;
+    return `${Math.floor(d / 86_400_000)}d`;
+  };
+
   const connect = async () => {
     setBusy(true);
     setStatus((s) => ({ ...(s ?? {}), phase: "connecting" }) as AgentStatus);
@@ -162,12 +290,21 @@ export default function LocalAgentPanel() {
     setRunning(true);
     const id = Date.now();
     setMsgs((m) => [...m, { id, role: "user", text: task }]);
+    persist("user", { text: task });
     const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true, startedAt: Date.now() };
+    agentLatestRef.current = agentMsg;
     setMsgs((m) => [...m, agentMsg]);
     const ac = new AbortController();
     abortRef.current = ac;
     const update = (fn: (m: Msg) => Msg) =>
-      setMsgs((all) => all.map((m) => (m.id === agentMsg.id ? fn(m) : m)));
+      setMsgs((all) =>
+        all.map((m) => {
+          if (m.id !== agentMsg.id) return m;
+          const next = fn(m);
+          agentLatestRef.current = next;
+          return next;
+        }),
+      );
     try {
       const res = await fetch("/api/agent/prompt", {
         method: "POST",
@@ -222,6 +359,9 @@ export default function LocalAgentPanel() {
     } finally {
       setRunning(false);
       abortRef.current = null;
+      const last = agentLatestRef.current;
+      agentLatestRef.current = null;
+      if (last) persist("assistant", { text: last.text, tools: last.tools, error: last.error });
     }
   };
 
@@ -291,8 +431,66 @@ export default function LocalAgentPanel() {
   const caps = status?.capabilities;
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-page">
-      {/* ── 连接状态条 ── */}
+    <div className="flex h-full w-full overflow-hidden bg-page">
+      {/* ── 会话侧栏 (磁盘持久化的本地会话) ── */}
+      <aside className="flex w-[216px] shrink-0 flex-col border-r border-line bg-surface">
+        <div className="flex items-center justify-between px-3 pb-2 pt-3">
+          <span className="text-[11.5px] font-semibold uppercase tracking-wider text-ink-faint">会话</span>
+          <button
+            type="button"
+            title="新建会话"
+            aria-label="新建会话"
+            onClick={() => void createLocalSession()}
+            className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 pb-3">
+          {!histLoaded ? (
+            <div className="px-2 py-2 text-[11.5px] text-ink-faint">加载中…</div>
+          ) : sessions.length === 0 ? (
+            <div className="px-2 py-2 text-[11.5px] text-ink-faint">暂无会话，点 + 新建</div>
+          ) : (
+            sessions.map((sd) => (
+              <div
+                key={sd.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => void switchSession(sd.id)}
+                onKeyDown={(e) => e.key === "Enter" && void switchSession(sd.id)}
+                className={`group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] ${
+                  sd.id === currentId ? "bg-accent-soft font-medium text-accent-deep" : "text-ink hover:bg-black/5"
+                }`}
+                title={sd.title}
+              >
+                <span className="min-w-0 flex-1 truncate">{sd.title}</span>
+                <span className="shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtRel(sd.updatedAt)}</span>
+                <button
+                  type="button"
+                  aria-label={`删除会话 ${sd.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void removeSession(sd.id);
+                  }}
+                  className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-red-500 group-hover:flex"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3 w-3">
+                    <path d="M6 6l12 12" />
+                    <path d="M18 6L6 18" />
+                  </svg>
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* ── 连接状态条 ── */}
       <div className="relative flex items-start gap-3 border-b border-line bg-surface px-4 py-3">
         <div
           className={`mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
@@ -584,6 +782,7 @@ export default function LocalAgentPanel() {
         <div className="mx-auto mt-1.5 text-[10.5px] text-ink-faint" style={{ width: "min(max(820px, 80vw), 100%)" }}>
           ACP over HTTP+SSE · 连接令牌仅保存在本机内存 · 权限请求默认拒绝
         </div>
+      </div>
       </div>
     </div>
   );

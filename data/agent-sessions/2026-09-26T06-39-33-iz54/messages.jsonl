@@ -1,0 +1,2 @@
+{"role":"user","text":"帮我写一篇关于 RSS 的文章","ts":1234567890000}
+{"role":"assistant","text":"好的，文章如下…","tools":[{"tool":"web_search","detail":"query=RSS","toolCallId":"t1","ts":1234567891000}],"ts":1234567892000}
