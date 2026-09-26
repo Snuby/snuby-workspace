@@ -117,6 +117,7 @@ const INPUT_MAX_H = INPUT_MAX_ROWS * INPUT_LINE_H + 16; // 上下 padding py-2 =
 export default function LocalAgentPanel() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [input, setInput] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [running, setRunning] = useState(false);
@@ -260,6 +261,8 @@ export default function LocalAgentPanel() {
     if (id === currentId) return;
     setCurrentId(id);
     setMsgs([]);
+    // 恢复会话上下文期间禁止发送, 避免「首问卡 …」: 切会话后的第一次发送要付 loadSession 成本
+    setRestoring(true);
     try {
       const r = await fetch(`/api/agent/sessions/${id}/messages`, { cache: "no-store" });
       const j = (await r.json()) as { messages: StoredMsg[] };
@@ -276,6 +279,7 @@ export default function LocalAgentPanel() {
       }
       void refresh();
     }
+    setRestoring(false);
   };
 
   /** 删除本地会话 (磁盘+列表); 删当前则切到最近会话 */
@@ -344,7 +348,7 @@ export default function LocalAgentPanel() {
 
   const send = async (text?: string) => {
     const task = (text ?? input).trim();
-    if (!task || running) return;
+    if (!task || running || restoring) return;
     setInput("");
     setRunning(true);
     const id = Date.now();
@@ -834,8 +838,14 @@ export default function LocalAgentPanel() {
                 void send();
               }
             }}
-            placeholder={phase === "connected" ? "给本地 Agent 派个任务… (Enter 发送, Shift+Enter 换行)" : "请先连接 WorkBuddy 网关"}
-            disabled={phase !== "connected" || running}
+            placeholder={
+              phase !== "connected"
+                ? "请先连接 WorkBuddy 网关"
+                : restoring
+                  ? "正在恢复会话上下文…"
+                  : "给本地 Agent 派个任务… (Enter 发送, Shift+Enter 换行)"
+            }
+            disabled={phase !== "connected" || running || restoring}
             rows={1}
             style={{ maxHeight: INPUT_MAX_H }}
             className="min-h-[38px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-page px-3 py-2 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
@@ -850,7 +860,7 @@ export default function LocalAgentPanel() {
           ) : (
             <button
               onClick={() => void send()}
-              disabled={phase !== "connected" || !input.trim()}
+              disabled={phase !== "connected" || restoring || !input.trim()}
               className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-medium text-white hover:bg-accent-deep disabled:opacity-40"
             >
               发送
