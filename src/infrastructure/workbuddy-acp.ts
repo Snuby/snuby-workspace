@@ -9,6 +9,7 @@ import { execSync } from "node:child_process";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { getPreferredModel } from "./agent-session-store";
 
 // —— 类型 ——
 export type AgentCapabilities = {
@@ -387,6 +388,18 @@ export async function ensureSession(cwd?: string, opts: { force?: boolean } = {}
   // session/new 挂载会话后, 网关会把历史回放推给首个流通道;
   // 先开 GET 订阅吃掉回放, 保证后续 prompt 流干净 (幂等, 无回放快速退出)
   await drainReplay();
+  // 应用保存的模型偏好 (新会话统一恢复用户上次选择; 不可用/失败静默, 不阻断会话)
+  try {
+    const prefer = getPreferredModel();
+    if (prefer?.modelId) {
+      const cur = sessionConfig.model?.currentValue;
+      if (cur !== prefer.modelId) {
+        await setModel(prefer.modelId);
+      }
+    }
+  } catch {
+    // 模型偏好应用失败不影响会话使用
+  }
   return acpSessionId;
 }
 

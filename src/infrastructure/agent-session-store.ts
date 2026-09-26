@@ -75,6 +75,33 @@ export function getSystemPrompt(): string {
   return DEFAULT_SYSTEM_PROMPT;
 }
 
+const MODEL_PREF_PATH = path.join(ROOT, "model-preference.json");
+
+export interface ModelPreference {
+  modelId: string;
+  name?: string;
+  updatedAt: number;
+}
+
+/** 读取用户保存的模型偏好 (全局, 新会话恢复用) */
+export function getPreferredModel(): ModelPreference | null {
+  try {
+    if (!existsSync(MODEL_PREF_PATH)) return null;
+    const d = JSON.parse(readFileSync(MODEL_PREF_PATH, "utf8")) as ModelPreference;
+    if (!d?.modelId) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+
+/** 保存模型偏好 (切换模型时写入) */
+export function setPreferredModel(modelId: string, name?: string): void {
+  mkdirSync(ROOT, { recursive: true });
+  const d: ModelPreference = { modelId, name, updatedAt: Date.now() };
+  writeFileSync(MODEL_PREF_PATH, JSON.stringify(d, null, 2), "utf8");
+}
+
 export function setSystemPrompt(text: string): void {
   mkdirSync(ROOT, { recursive: true });
   writeFileSync(SYSTEM_PROMPT_PATH, text.trim(), "utf8");
