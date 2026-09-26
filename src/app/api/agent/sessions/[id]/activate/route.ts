@@ -23,8 +23,11 @@ export async function POST(
   const meta = getSession(id);
   if (!meta) return Response.json({ error: "会话不存在" }, { status: 404 });
   try {
-    const sid = await ensureSessionFor(meta.acpSessionId, meta.acpCwd);
-    updateSessionGateway(id, { acpSessionId: sid });
+    // 每个本地会话绑定唯一工作目录 (会话目录), 避免网关侧按 cwd 复用会话导致上下文串扰
+    // (实测: 探测脚本与生产都默认 /tmp, WorkBuddy 持久化了含测试暗号的 /tmp 会话并被新会话加载)
+    const cwd = meta.acpCwd ?? path.join(SESSIONS_ROOT, id);
+    const sid = await ensureSessionFor(meta.acpSessionId, cwd);
+    updateSessionGateway(id, { acpSessionId: sid, acpCwd: cwd });
 
     // 工作约定注入: 指纹不匹配才注入 (约定未变不重复注入)
     const sysPrompt = getSystemPrompt();
