@@ -4,7 +4,7 @@
 // 连接可视化: 网关发现 → 建连 → initialize → 会话, 分阶段可见状态
 // 协作演示: 发送任务, WorkBuddy 回复经 ACP SSE 流式渲染 (打字机效果)
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
 
@@ -25,7 +25,7 @@ type AgentStatus = {
   lastError?: string;
 };
 
-type ToolEv = { tool: string; state: string };
+type ToolEv = { tool: string; state: string; detail?: string };
 type Msg = {
   id: number;
   role: "user" | "agent";
@@ -34,6 +34,8 @@ type Msg = {
   thinking?: boolean;
   tools?: ToolEv[];
   error?: boolean;
+  startedAt?: number;
+  finishedAt?: number;
 };
 
 const PHASE_META: Record<Phase, { label: string; color: string; dot: string }> = {
@@ -98,7 +100,7 @@ export default function LocalAgentPanel() {
     setRunning(true);
     const id = Date.now();
     setMsgs((m) => [...m, { id, role: "user", text: task }]);
-    const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true };
+    const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true, startedAt: Date.now() };
     setMsgs((m) => [...m, agentMsg]);
     const ac = new AbortController();
     abortRef.current = ac;
@@ -124,7 +126,7 @@ export default function LocalAgentPanel() {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           if (!line.trim()) continue;
-          let ev: { type: string; text?: string; tool?: string; state?: string; error?: string };
+          let ev: { type: string; text?: string; tool?: string; state?: string; detail?: string; error?: string };
           try {
             ev = JSON.parse(line);
           } catch {
@@ -137,10 +139,10 @@ export default function LocalAgentPanel() {
           } else if (ev.type === "tool") {
             update((m) => ({
               ...m,
-              tools: [...(m.tools ?? []), { tool: ev.tool ?? "", state: ev.state ?? "" }],
+              tools: [...(m.tools ?? []), { tool: ev.tool ?? "", state: ev.state ?? "", detail: ev.detail ?? "" }],
             }));
           } else if (ev.type === "done") {
-            update((m) => ({ ...m, streaming: false, thinking: false }));
+            update((m) => ({ ...m, streaming: false, thinking: false, finishedAt: Date.now() }));
           } else if (ev.type === "error") {
             update((m) => ({ ...m, streaming: false, error: true, text: ev.error ?? "任务执行失败" }));
           }
@@ -300,25 +302,9 @@ export default function LocalAgentPanel() {
                         </span>
                       )}
                     </div>
-                    {!!m.tools?.length && (
-                      <div className="mb-1.5 flex flex-wrap gap-1">
-                        {m.tools.map((t, i) => (
-                          <span
-                            key={i}
-                            className="flex items-center gap-1 rounded border border-line bg-surface px-1.5 py-0.5 text-[10.5px] text-ink-muted"
-                          >
-                            <span
-                              className={`h-1 w-1 rounded-full ${
-                                t.state === "pending" ? "bg-ink-faint" : "bg-down"
-                              }`}
-                            />
-                            {t.tool}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <ToolStrip m={m} />
                     <div
-                      className={`rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2 text-[13px] leading-relaxed ${
+                      className={`rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed ${
                         m.error ? "border-up/40 text-up" : "text-ink"
                       }`}
                     >
@@ -328,7 +314,7 @@ export default function LocalAgentPanel() {
                           <span className="animate-pulse">▍</span>
                         </>
                       ) : (
-                        m.text || "…"
+                        m.text ? renderMd(m.text) : "…"
                       )}
                     </div>
                   </div>
@@ -380,4 +366,222 @@ export default function LocalAgentPanel() {
       </div>
     </div>
   );
+}
+
+/** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 不逐个刷卡片 */
+function ToolStrip({ m }: { m: Msg }) {
+  const tools = m.tools ?? [];
+  if (!tools.length && !m.streaming) return null;
+  const last = tools[tools.length - 1];
+  const unique = [...new Set(tools.map((t) => t.tool))].join("、") || "任务";
+  const elapsed = m.finishedAt && m.startedAt
+    ? Math.round((m.finishedAt - m.startedAt) / 1000)
+    : Math.max(0, Math.round((Date.now() - (m.startedAt ?? Date.now())) / 1000));
+  const detail = last?.detail ? ` · ${last.detail}` : "";
+  return (
+    <div className="mb-1.5 flex min-h-[22px] items-center gap-2 rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted">
+      <span
+        className={`shrink-0 rounded px-1.5 py-px font-medium ${
+          m.streaming ? "bg-accent-soft text-accent-deep" : "bg-black/[0.04] text-ink-muted"
+        }`}
+      >
+        {m.streaming ? "正在执行" : "已处理"}
+      </span>
+      <span className="min-w-0 flex-1 truncate">
+        {m.streaming ? (last ? `${last.tool}${detail ? ` · ${detail}` : ""}` : "任务运行中…") : `${unique}${detail ? ` · ${detail}` : ""}`}
+      </span>
+      <span className="shrink-0 tabular-nums">{elapsed}s</span>
+    </div>
+  );
+}
+
+/** 行内解析: **粗体** `代码` [链接](url) 与换行 */
+function Inline({ text }: { text: string }) {
+  const parts = text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\))/g);
+  const out: ReactNode[] = [];
+  parts.forEach((p, i) => {
+    if (p.startsWith("**") && p.endsWith("**") && p.length > 4) {
+      out.push(<strong key={i}>{p.slice(2, -2)}</strong>);
+    } else if (p.startsWith("`") && p.endsWith("`") && p.length > 2) {
+      out.push(
+        <code key={i} className="rounded bg-black/[0.06] px-1 py-0.5 text-[12px]">
+          {p.slice(1, -1)}
+        </code>,
+      );
+    } else {
+      const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (m && /^https?:\/\//.test(m[2])) {
+        out.push(
+          <a
+            key={i}
+            href={m[2]}
+            target="_blank"
+            rel="noreferrer"
+            className="text-accent underline decoration-accent/40 underline-offset-2"
+          >
+            {m[1]}
+          </a>,
+        );
+      } else {
+        const lines = p.split("\n");
+        lines.forEach((ln, li) => {
+          if (li > 0) out.push(<br key={`br-${i}-${li}`} />);
+          out.push(<span key={`${i}-${li}`}>{ln}</span>);
+        });
+      }
+    }
+  });
+  return <>{out}</>;
+}
+
+/** 轻量 Markdown 渲染: 标题/表格/列表/引用/代码块/段落/行内格式 (WorkBuddy 风格) */
+function renderMd(md: string): ReactNode[] {
+  const lines = md.replace(/\r/g, "").split("\n");
+  const out: ReactNode[] = [];
+  let i = 0;
+  const parseRow = (r: string) => r.split("|").slice(1, -1).map((x) => x.trim());
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) {
+        code.push(lines[i]);
+        i++;
+      }
+      i++;
+      out.push(
+        <pre key={`pre-${i}`} className="my-1 overflow-x-auto rounded-lg bg-black/[0.05] p-2.5 text-[12px] leading-relaxed">
+          {code.join("\n")}
+        </pre>,
+      );
+      continue;
+    }
+    if (trimmed.startsWith("|") && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      const header = parseRow(lines[i]);
+      let j = i + 2;
+      const rows: string[][] = [];
+      while (j < lines.length && lines[j].trim().startsWith("|")) {
+        rows.push(parseRow(lines[j]));
+        j++;
+      }
+      out.push(
+        <div key={`tbl-${i}`} className="my-1 overflow-x-auto">
+          <table className="w-full border-collapse text-[12.5px]">
+            <thead>
+              <tr>
+                {header.map((h, hi) => (
+                  <th key={hi} className="border border-line bg-black/[0.03] px-2.5 py-1.5 text-left font-medium">
+                    <Inline text={h} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri}>
+                  {r.map((c, ci) => (
+                    <td key={ci} className="border border-line px-2.5 py-1.5 align-top leading-relaxed">
+                      <Inline text={c} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      i = j;
+      continue;
+    }
+    if (/^#{1,3} /.test(trimmed)) {
+      const level = trimmed.match(/^#+/)![0].length;
+      const text = trimmed.replace(/^#+\s*/, "");
+      out.push(
+        level <= 2 ? (
+          <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[14px] font-bold text-ink">
+            <span className="h-3 w-[3px] rounded-full bg-accent" />
+            <Inline text={text} />
+          </h4>
+        ) : (
+          <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[13px] font-semibold text-ink">
+            <Inline text={text} />
+          </h5>
+        ),
+      );
+      i++;
+      continue;
+    }
+    if (/^\s*[-*] /.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*[-*] /.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*] /, ""));
+        i++;
+      }
+      out.push(
+        <ul key={`ul-${i}`} className="my-1 list-disc space-y-0.5 pl-4">
+          {items.map((it, ii) => (
+            <li key={ii}>
+              <Inline text={it} />
+            </li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+    if (/^\s*\d+\. /.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*\d+\. /.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+\. /, ""));
+        i++;
+      }
+      out.push(
+        <ol key={`ol-${i}`} className="my-1 list-decimal space-y-0.5 pl-4">
+          {items.map((it, ii) => (
+            <li key={ii}>
+              <Inline text={it} />
+            </li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+    if (trimmed.startsWith(">")) {
+      const quote: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        quote.push(lines[i].trim().replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(
+        <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[12.5px] text-ink-muted">
+          {quote.map((q, qi) => (
+            <div key={qi}>
+              <Inline text={q} />
+            </div>
+          ))}
+        </blockquote>,
+      );
+      continue;
+    }
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+    const para: string[] = [line];
+    let j = i + 1;
+    while (j < lines.length) {
+      const t = lines[j].trim();
+      if (!t || t.startsWith("|") || t.startsWith("```") || /^#{1,3} /.test(t) || /^\s*[-*] /.test(t) || /^\s*\d+\. /.test(t) || t.startsWith(">")) break;
+      para.push(lines[j]);
+      j++;
+    }
+    out.push(
+      <p key={`p-${i}`} className="my-1 leading-relaxed">
+        <Inline text={para.join("\n")} />
+      </p>,
+    );
+    i = j;
+  }
+  return out;
 }

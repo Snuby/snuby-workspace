@@ -378,6 +378,8 @@ export async function prompt(
   const sessionId = await ensureSession();
   const timeoutMs = opts.timeoutMs ?? 300_000;
   const id = Date.now();
+  // 实测: rawInput.url 为增量片段, 需按 toolCallId 累积
+  const toolUrlAcc = new Map<string, string>();
   const res = await acpPost(conn!.base, {
     jsonrpc: "2.0",
     id,
@@ -393,7 +395,7 @@ export async function prompt(
     readSse(res, (json) => {
       const r = json as {
         result?: { stopReason?: string };
-        params?: { update?: { sessionUpdate?: string; content?: { content?: { text?: string }; text?: string }; _meta?: Record<string, unknown>; toolCallId?: string; status?: string } };
+        params?: { update?: { sessionUpdate?: string; content?: { content?: { text?: string }; text?: string }; _meta?: Record<string, unknown>; toolCallId?: string; status?: string; rawInput?: { url?: string; query?: string; prompt?: string }; title?: string } };
       };
       // 实测: params.update.sessionUpdate 为字符串 (如 "agent_message_chunk"),
       // content.content.text 为增量文本, _meta["codebuddy.ai/toolName"] 为工具名
@@ -408,10 +410,23 @@ export async function prompt(
       } else if (type === "agent_thought_chunk") {
         if (text) onEvent({ type: "thought", text });
       } else if (type === "tool_call" || type === "tool_call_update") {
+        // 实测: rawInput.url 是增量片段 (https → https:// → https://www), 同 toolCallId 内累积拼接
+        const k = up.toolCallId ?? toolName;
+        if (k) {
+          const prev = toolUrlAcc.get(k) ?? "";
+          const cur = up.rawInput?.url ?? "";
+          toolUrlAcc.set(k, cur.length >= prev.length ? cur : prev);
+        }
+        const acc = k ? (toolUrlAcc.get(k) ?? "") : "";
+        // 不同工具参数结构不同 (WebFetch.url 增量 / read_me.filePath 等): 动态取第一个非空字符串参数
+        const rawAny =
+          (up.rawInput && Object.values(up.rawInput).find((v) => typeof v === "string" && v.length > 0)) ?? "";
+        const detail = acc || (typeof rawAny === "string" ? rawAny : "") || up.title || "";
         onEvent({
           type: "tool",
           tool: toolName || up.toolCallId || "tool",
           state: type === "tool_call" ? (up.status ?? "pending") : (up.status ?? "completed"),
+          detail,
         });
       }
         return;
