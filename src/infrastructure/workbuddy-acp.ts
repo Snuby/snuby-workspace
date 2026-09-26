@@ -20,6 +20,26 @@ export type AgentCapabilities = {
   mainAgentSupport?: boolean;
 };
 
+export type ModelInfo = {
+  modelId: string;
+  name: string;
+  description?: string;
+  supportsImages?: boolean;
+  supportsReasoning?: boolean;
+  credits?: string;
+  maxInputTokens?: number;
+};
+
+export type ConfigOptionInfo = {
+  type?: string;
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  currentValue?: string;
+  options?: { value: string; name: string; description?: string }[];
+};
+
 export type AgentStatus = {
   phase: "idle" | "discovering" | "connecting" | "connected" | "error";
   discovered?: {
@@ -36,6 +56,9 @@ export type AgentStatus = {
   acpSessionId?: string;
   connectedAt?: number;
   lastError?: string | null;
+  models?: ModelInfo[];
+  sessionConfig?: Record<string, ConfigOptionInfo>;
+  usage?: { used: number; size: number };
 };
 
 type SessionRecord = {
@@ -60,6 +83,10 @@ let conn: {
 let acpSessionId: string | null = null;
 let lastError: string | null = null;
 let discovering = false;
+// —— 会话级能力缓存 (session/new / config 通知填充, 用于 UI 展示与设置) ——
+let availableModels: ModelInfo[] = [];
+let sessionConfig: Record<string, ConfigOptionInfo> = {};
+let usage: { used: number; size: number } | null = null;
 
 const SESSIONS_DIR = path.join(os.homedir(), ".workbuddy", "sessions");
 const HEARTBEAT_FRESH_MS = 60_000;
@@ -253,6 +280,9 @@ export async function connect(): Promise<AgentStatus> {
     conn.authMethods = (r.authMethods ?? []).map((a) => a.id);
 
     acpSessionId = null; // 新连接重置会话
+    availableModels = [];
+    sessionConfig = {};
+    usage = null;
     return status();
   } catch (e) {
     lastError = `建连异常: ${(e as Error).message}`;
@@ -282,6 +312,9 @@ export function status(): AgentStatus {
     authMethods: conn.authMethods,
     acpSessionId: acpSessionId ?? undefined,
     connectedAt: Date.now(),
+    models: availableModels,
+    sessionConfig,
+    usage: usage ?? undefined,
   };
 }
 
@@ -306,14 +339,31 @@ export async function ensureSession(cwd?: string): Promise<string> {
     method: "session/new",
     params: { cwd: cwd ?? "/tmp", mcpServers: [] },
   });
-  const result = await new Promise<{ sessionId?: string } | null>((resolve, reject) => {
+  const result = await new Promise<{ sessionId?: string; models?: { availableModels?: ModelInfo[] } } | null>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("session/new 超时")), 15000);
     readSse(res, (json) => {
-      const r = json as { result?: { sessionId?: string }; error?: { code?: string | number; message?: string } };
+      const r = json as {
+        result?: { sessionId?: string; models?: { availableModels?: ModelInfo[] } };
+        error?: { code?: string | number; message?: string };
+        method?: string;
+        params?: { update?: Record<string, unknown> };
+      };
       if (r?.error) {
         clearTimeout(timer);
         reject(new Error(`session/new RPC error: ${r.error.code} ${r.error.message}`));
+      } else if (r?.method === "session/update" && r.params?.update) {
+        // 实测: session/new 流内会先推 config_option_update (权限/模型/思考/沙箱) 与 usage_update
+        const up = r.params.update as { sessionUpdate?: string; configOptions?: ConfigOptionInfo[]; used?: number; size?: number };
+        if (up.sessionUpdate === "config_option_update" && Array.isArray(up.configOptions)) {
+          for (const o of up.configOptions) sessionConfig[o.id] = o;
+        } else if (up.sessionUpdate === "usage_update" && typeof up.used === "number" && typeof up.size === "number") {
+          usage = { used: up.used, size: up.size };
+        }
       } else if (r?.result?.sessionId) {
+        // 实测: result 直接带 models.availableModels (模型清单)
+        if (Array.isArray(r.result.models?.availableModels)) {
+          availableModels = r.result.models!.availableModels!;
+        }
         clearTimeout(timer);
         resolve(r.result);
       }
@@ -395,7 +445,7 @@ export async function prompt(
     readSse(res, (json) => {
       const r = json as {
         result?: { stopReason?: string };
-        params?: { update?: { sessionUpdate?: string; content?: { content?: { text?: string }; text?: string }; _meta?: Record<string, unknown>; toolCallId?: string; status?: string; rawInput?: { url?: string; query?: string; prompt?: string }; title?: string } };
+        params?: { update?: { sessionUpdate?: string; content?: { content?: { text?: string }; text?: string }; _meta?: Record<string, unknown>; toolCallId?: string; status?: string; rawInput?: { url?: string; query?: string; prompt?: string }; title?: string; configOptions?: ConfigOptionInfo[]; used?: number; size?: number } };
       };
       // 实测: params.update.sessionUpdate 为字符串 (如 "agent_message_chunk"),
       // content.content.text 为增量文本, _meta["codebuddy.ai/toolName"] 为工具名
@@ -429,6 +479,16 @@ export async function prompt(
           detail,
           toolCallId: up.toolCallId ?? undefined,
         });
+      } else if (type === "usage_update") {
+        // 实测: 会话 token 用量统计 (used/size)
+        if (typeof up.used === "number" && typeof up.size === "number") {
+          usage = { used: up.used, size: up.size };
+        }
+      } else if (type === "config_option_update") {
+        // 会话配置选项 (mode/model/thought_level/sandbox) 刷新
+        if (Array.isArray(up.configOptions)) {
+          for (const o of up.configOptions) sessionConfig[o.id] = o;
+        }
       }
         return;
       }
@@ -453,6 +513,53 @@ export async function cancel(sessionId?: string): Promise<void> {
   } catch {
     // 取消失败静默
   }
+}
+
+/** 通用 RPC 封装: 等首个 result 或 error (通知忽略) */
+async function acpCall(
+  method: string,
+  params: unknown,
+  id: number,
+  timeoutMs = 8000,
+): Promise<{ result?: unknown; configOptions?: ConfigOptionInfo[] }> {
+  if (!conn) throw new Error("未连接网关");
+  const res = await acpPost(conn.base, { jsonrpc: "2.0", id, method, params });
+  if (!res.ok) throw new Error(`${method} HTTP ${res.status}`);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${method} 超时`)), timeoutMs);
+    readSse(res, (json) => {
+      const r = json as {
+        result?: { configOptions?: ConfigOptionInfo[] };
+        error?: { code?: string | number; message?: string };
+      };
+      if (r?.error) {
+        clearTimeout(timer);
+        reject(new Error(`${method}: ${r.error.code} ${r.error.message}`));
+      } else if (r?.result) {
+        clearTimeout(timer);
+        resolve({ result: r.result, configOptions: r.result.configOptions });
+      }
+    }).catch(reject);
+  });
+}
+
+/** session/set_model: 切换会话模型 (实测可用, result 为空对象) */
+export async function setModel(modelId: string): Promise<AgentStatus> {
+  const sessionId = await ensureSession();
+  await acpCall("session/set_model", { sessionId, model: modelId }, 11);
+  if (sessionConfig.model) sessionConfig.model.currentValue = modelId;
+  return status();
+}
+
+/** session/set_config_option: 通用会话配置 (mode/model/thought_level/sandbox);
+ *  实测返回全量 configOptions, 用于刷新本地缓存 */
+export async function setConfigOption(configId: string, value: string): Promise<AgentStatus> {
+  const sessionId = await ensureSession();
+  const { configOptions } = await acpCall("session/set_config_option", { sessionId, configId, value }, 12);
+  if (Array.isArray(configOptions)) {
+    for (const o of configOptions) sessionConfig[o.id] = o;
+  }
+  return status();
 }
 
 /** 诊断信息 (不含 token), 用于 UI 展示 */

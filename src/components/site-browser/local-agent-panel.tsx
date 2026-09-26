@@ -23,6 +23,12 @@ type AgentStatus = {
   authMethods?: string[];
   acpSessionId?: string;
   lastError?: string;
+  models?: { modelId: string; name: string; description?: string }[];
+  sessionConfig?: Record<
+    string,
+    { id: string; name: string; currentValue?: string; options?: { value: string; name: string; description?: string }[] }
+  >;
+  usage?: { used: number; size: number };
 };
 
 type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
@@ -178,6 +184,46 @@ export default function LocalAgentPanel() {
     }
   };
 
+  /** 切换模型: POST /api/agent/set-model, 成功用返回 status 刷新 */
+  const applyModel = async (modelId: string) => {
+    if (!modelId) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/agent/set-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelId }),
+      });
+      const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
+      if (j.ok && j.status) setStatus(j.status);
+      else alert(j.error ?? "切换模型失败");
+    } catch {
+      alert("切换模型失败: 本地服务无响应");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 通用配置项: POST /api/agent/set-config (权限模式/思考深度/沙箱) */
+  const applyConfig = async (configId: string, value: string) => {
+    if (!value) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/agent/set-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ configId, value }),
+      });
+      const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
+      if (j.ok && j.status) setStatus(j.status);
+      else alert(j.error ?? "设置失败");
+    } catch {
+      alert("设置失败: 本地服务无响应");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // 流式自动滚底
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -274,6 +320,63 @@ export default function LocalAgentPanel() {
           </button>
         )}
       </div>
+
+      {/* ── 会话设置条 (模型/权限/思考深度/沙箱/用量) ── */}
+      {phase === "connected" && status?.sessionConfig && (
+        <div className="border-b border-line bg-surface px-4 py-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px]">
+            <CtlSelect
+              label="模型"
+              value={status.sessionConfig.model?.currentValue ?? ""}
+              options={
+                status.models?.map((m) => ({
+                  value: m.modelId,
+                  label: `${m.name}${m.description ? ` · ${m.description}` : ""}`,
+                })) ?? []
+              }
+              disabled={busy}
+              onChange={(v) => void applyModel(v)}
+              title="切换会话模型 (session/set_model)"
+            />
+            <CtlSelect
+              label="权限模式"
+              value={status.sessionConfig.mode?.currentValue ?? ""}
+              options={
+                status.sessionConfig.mode?.options?.map((o) => ({ value: o.value, label: `${o.name} · ${o.description ?? ""}` })) ?? []
+              }
+              disabled={busy}
+              onChange={(v) => void applyConfig("mode", v)}
+              title="会话权限模式 (session/set_config_option)"
+            />
+            <CtlSelect
+              label="思考深度"
+              value={status.sessionConfig.thought_level?.currentValue ?? ""}
+              options={status.sessionConfig.thought_level?.options?.map((o) => ({ value: o.value, label: o.name })) ?? []}
+              disabled={busy}
+              onChange={(v) => void applyConfig("thought_level", v)}
+              title="Deep Thinking 深度"
+            />
+            <CtlSelect
+              label="沙箱"
+              value={String(status.sessionConfig.sandbox?.currentValue ?? "true")}
+              options={
+                status.sessionConfig.sandbox?.options?.map((o) => ({ value: o.value, label: o.name })) ?? [
+                  { value: "true", label: "沙箱环境" },
+                  { value: "false", label: "本地环境" },
+                ]
+              }
+              disabled={busy}
+              onChange={(v) => void applyConfig("sandbox", v)}
+              title="沙箱/本地执行环境"
+            />
+            {status.usage ? (
+              <span className="ml-auto tabular-nums text-ink-faint" title={`token 用量 ${status.usage.used} / ${status.usage.size}`}>
+                用量 {(status.usage.used / 1000).toFixed(1)}k / {(status.usage.size / 1000).toFixed(0)}k
+              </span>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* ── 协作演示区 ── */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
@@ -443,6 +546,41 @@ const IconChevron = ({ open }: { open: boolean }) => (
     <path d="m6 9 6 6 6-6" />
   </svg>
 );
+
+/** 会话配置下拉: label + select (WorkBuddy 会话设置入口) */
+function CtlSelect({
+  label,
+  value,
+  options,
+  onChange,
+  disabled,
+  title,
+}: {
+  label: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  return (
+    <label className="flex items-center gap-1.5" title={title}>
+      <span className="text-ink-faint">{label}</span>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        className="max-w-[220px] cursor-pointer rounded-md border border-line bg-page px-1.5 py-0.5 text-[11.5px] text-ink outline-none hover:border-accent focus:border-accent disabled:opacity-50"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 /** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 可点击展开明细列表 */
 function ToolStrip({ m }: { m: Msg }) {
