@@ -333,7 +333,7 @@ export async function ensureSession(cwd?: string): Promise<string> {
 export type PromptEvent =
   | { type: "chunk"; text: string }
   | { type: "thought"; text: string }
-  | { type: "tool"; tool: string; state: string; detail?: string }
+  | { type: "tool"; tool: string; state: string; detail?: string; toolCallId?: string }
   | { type: "done"; stopReason?: string; id?: unknown };
 
 /** 消费连接级历史回放: 挂载已运行会话时网关会重放其历史 (session/update 事件流)。
@@ -427,6 +427,7 @@ export async function prompt(
           tool: toolName || up.toolCallId || "tool",
           state: type === "tool_call" ? (up.status ?? "pending") : (up.status ?? "completed"),
           detail,
+          toolCallId: up.toolCallId ?? undefined,
         });
       }
         return;

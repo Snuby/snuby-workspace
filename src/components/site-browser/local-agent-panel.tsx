@@ -4,7 +4,7 @@
 // 连接可视化: 网关发现 → 建连 → initialize → 会话, 分阶段可见状态
 // 协作演示: 发送任务, WorkBuddy 回复经 ACP SSE 流式渲染 (打字机效果)
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
 
@@ -25,7 +25,7 @@ type AgentStatus = {
   lastError?: string;
 };
 
-type ToolEv = { tool: string; state: string; detail?: string };
+type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
 type Msg = {
   id: number;
   role: "user" | "agent";
@@ -126,7 +126,7 @@ export default function LocalAgentPanel() {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           if (!line.trim()) continue;
-          let ev: { type: string; text?: string; tool?: string; state?: string; detail?: string; error?: string };
+          let ev: { type: string; text?: string; tool?: string; state?: string; detail?: string; toolCallId?: string; error?: string };
           try {
             ev = JSON.parse(line);
           } catch {
@@ -139,7 +139,10 @@ export default function LocalAgentPanel() {
           } else if (ev.type === "tool") {
             update((m) => ({
               ...m,
-              tools: [...(m.tools ?? []), { tool: ev.tool ?? "", state: ev.state ?? "", detail: ev.detail ?? "" }],
+              tools: [
+                ...(m.tools ?? []),
+                { tool: ev.tool ?? "", state: ev.state ?? "", detail: ev.detail ?? "", toolCallId: ev.toolCallId ?? "", ts: Date.now() },
+              ],
             }));
           } else if (ev.type === "done") {
             update((m) => ({ ...m, streaming: false, thinking: false, finishedAt: Date.now() }));
@@ -368,9 +371,36 @@ export default function LocalAgentPanel() {
   );
 }
 
-/** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 不逐个刷卡片 */
+const IconChevron = ({ open }: { open: boolean }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`h-3 w-3 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
+    <path d="m6 9 6 6 6-6" />
+  </svg>
+);
+
+/** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 可点击展开明细列表 */
 function ToolStrip({ m }: { m: Msg }) {
+  const [open, setOpen] = useState(false);
   const tools = m.tools ?? [];
+
+  // 按 toolCallId 聚合: 起始时间/结束时间/工具/参数, 按开始时间排序
+  // 依赖 m.tools (引用稳定), 内部再 ?? [] 兜底, 避免每次渲染新数组
+  const rows = useMemo(() => {
+    const arr = m.tools ?? [];
+    const map = new Map<string, { tool: string; detail: string; start: number; end: number }>();
+    arr.forEach((t, i) => {
+      const k = t.toolCallId || `${t.tool}-${i}`;
+      const ts = t.ts ?? 0;
+      const r = map.get(k) ?? { tool: t.tool, detail: "", start: ts, end: ts };
+      if (!r.start || (ts && ts < r.start)) r.start = ts;
+      if (ts > r.end) r.end = ts;
+      if (t.detail) r.detail = t.detail;
+      map.set(k, r);
+    });
+    return [...map.values()]
+      .sort((a, b) => a.start - b.start)
+      .map((r) => ({ ...r, ms: r.end - r.start }));
+  }, [m.tools]);
+
   if (!tools.length && !m.streaming) return null;
   const last = tools[tools.length - 1];
   const unique = [...new Set(tools.map((t) => t.tool))].join("、") || "任务";
@@ -378,19 +408,61 @@ function ToolStrip({ m }: { m: Msg }) {
     ? Math.round((m.finishedAt - m.startedAt) / 1000)
     : Math.max(0, Math.round((Date.now() - (m.startedAt ?? Date.now())) / 1000));
   const detail = last?.detail ? ` · ${last.detail}` : "";
+
+  const fmtTime = (n: number) =>
+    n ? new Date(n).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
+
   return (
-    <div className="mb-1.5 flex min-h-[22px] items-center gap-2 rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted">
-      <span
-        className={`shrink-0 rounded px-1.5 py-px font-medium ${
-          m.streaming ? "bg-accent-soft text-accent-deep" : "bg-black/[0.04] text-ink-muted"
-        }`}
+    <div className="mb-1.5">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => e.key === "Enter" && setOpen((v) => !v)}
+        title={rows.length ? "点击展开/收起工具明细" : undefined}
+        className="flex min-h-[22px] cursor-pointer select-none items-center gap-2 rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted hover:bg-black/[0.05]"
       >
-        {m.streaming ? "正在执行" : "已处理"}
-      </span>
-      <span className="min-w-0 flex-1 truncate">
-        {m.streaming ? (last ? `${last.tool}${detail ? ` · ${detail}` : ""}` : "任务运行中…") : `${unique}${detail ? ` · ${detail}` : ""}`}
-      </span>
-      <span className="shrink-0 tabular-nums">{elapsed}s</span>
+        <span
+          className={`shrink-0 rounded px-1.5 py-px font-medium ${
+            m.streaming ? "bg-accent-soft text-accent-deep" : "bg-black/[0.04] text-ink-muted"
+          }`}
+        >
+          {m.streaming ? "正在执行" : "已处理"}
+        </span>
+        <span className="min-w-0 flex-1 truncate">
+          {m.streaming ? (last ? `${last.tool}${detail ? ` · ${detail}` : ""}` : "任务运行中…") : `${unique}${detail ? ` · ${detail}` : ""}`}
+        </span>
+        <span className="shrink-0 tabular-nums">{elapsed}s</span>
+        {rows.length > 0 ? <IconChevron open={open} /> : null}
+      </div>
+      {open && rows.length > 0 ? (
+        <div className="mt-1 max-h-[200px] overflow-y-auto rounded-md border border-line bg-white/60">
+          <table className="w-full border-collapse text-[11px]">
+            <thead className="sticky top-0 bg-surface">
+              <tr className="text-ink-faint">
+                <th className="whitespace-nowrap px-2 py-1 text-left font-medium">时间</th>
+                <th className="px-2 py-1 text-left font-medium">工具</th>
+                <th className="px-2 py-1 text-left font-medium">参数</th>
+                <th className="whitespace-nowrap px-2 py-1 text-right font-medium">耗时</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className="border-t border-line/60">
+                  <td className="whitespace-nowrap px-2 py-1 tabular-nums">{fmtTime(r.start)}</td>
+                  <td className="whitespace-nowrap px-2 py-1 font-medium text-ink">{r.tool}</td>
+                  <td className="max-w-[260px] truncate px-2 py-1" title={r.detail}>
+                    {r.detail || "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-2 py-1 text-right tabular-nums">
+                    {r.ms > 0 ? `${(r.ms / 1000).toFixed(1)}s` : "…"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </div>
   );
 }
