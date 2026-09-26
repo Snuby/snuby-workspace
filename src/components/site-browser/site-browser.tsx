@@ -8,6 +8,7 @@
 
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTopics } from "@/components/workbench/topics-context";
+import LocalAgentPanel from "@/components/site-browser/local-agent-panel";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -878,13 +879,18 @@ export default function SiteBrowser({
                     zIndex: isActiveSite && t.id === activeTabDef.id ? 10 : 0,
                   }}
                 >
-                  <SiteWebview
-                    src={t.url}
-                    siteId={siteId}
-                    tabId={t.id}
-                    partition={siteDef.partition}
-                    onRef={registerGuest}
-                  />
+                  {t.url.startsWith("snuby://") ? (
+                    // 内置站点 (实验室等): 渲染本地组件而非 webview
+                    <LocalAgentPanel />
+                  ) : (
+                    <SiteWebview
+                      src={t.url}
+                      siteId={siteId}
+                      tabId={t.id}
+                      partition={siteDef.partition}
+                      onRef={registerGuest}
+                    />
+                  )}
                 </div>
               ))}
             </div>

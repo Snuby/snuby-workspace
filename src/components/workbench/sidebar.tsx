@@ -82,6 +82,13 @@ const ICONS = {
       <path d="m2 14 10 6 10-6" />
     </svg>
   ),
+  flask: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
+      <path d="M9 3h6" />
+      <path d="M10 3v6.3L4.7 19a2 2 0 0 0 1.8 3h11a2 2 0 0 0 1.8-3L14 9.3V3" />
+      <path d="M7 15h10" />
+    </svg>
+  ),
 };
 
 /** 「宏观经济」一级菜单对应的全部子页路径 */
@@ -294,6 +301,15 @@ export default function Sidebar() {
             );
           })
         )}
+
+        {/* 实验室区 (与主题同级的大板块): 内置实验性子板块, 独立新模式 */}
+        <div className="mb-1 mt-4 px-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">实验室</span>
+        </div>
+        <Link href="/lab/local-agent" className={itemClass(pathname.startsWith("/lab"))}>
+          {ICONS.flask}
+          本地 Agent
+        </Link>
       </nav>
 
       <div className="border-t border-line px-4 py-3.5 text-[11px] text-ink-faint">
