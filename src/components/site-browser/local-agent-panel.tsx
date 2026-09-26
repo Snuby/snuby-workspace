@@ -26,7 +26,7 @@ type AgentStatus = {
   models?: { modelId: string; name: string; description?: string }[];
   sessionConfig?: Record<
     string,
-    { id: string; name: string; currentValue?: string; options?: { value: string; name: string; description?: string }[] }
+    { id: string; name: string; description?: string; currentValue?: string; options?: { value: string; name: string; description?: string }[] }
   >;
   usage?: { used: number; size: number };
 };
