@@ -283,6 +283,14 @@ export async function connect(): Promise<AgentStatus> {
     availableModels = [];
     sessionConfig = {};
     usage = null;
+    // 建会话拉取模型/配置 (models/sessionConfig 在 session/new 时才有),
+    // 失败不阻塞连接本身, 记入 lastError
+    try {
+      await ensureSession();
+      lastError = null;
+    } catch (e) {
+      lastError = `会话创建失败: ${(e as Error).message}`;
+    }
     return status();
   } catch (e) {
     lastError = `建连异常: ${(e as Error).message}`;

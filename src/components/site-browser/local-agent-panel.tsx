@@ -57,6 +57,15 @@ const PRESET_TASKS = [
   "列出你最擅长处理的 5 类任务",
 ];
 
+/** 网关配置项的中文 label 映射; 未知配置项回退网关给的 name */
+const CONFIG_LABEL: Record<string, string> = {
+  mode: "权限模式",
+  thought_level: "思考深度",
+  sandbox: "沙箱",
+  context_window: "上下文窗口",
+  multitask: "多任务",
+};
+
 // 输入框自动撑开: 最多 MAX_ROWS 行, 超出才滚动
 const INPUT_MAX_ROWS = 6;
 const INPUT_LINE_H = 20; // 13px 字号 + line-height
@@ -321,7 +330,7 @@ export default function LocalAgentPanel() {
         )}
       </div>
 
-      {/* ── 会话设置条 (模型/权限/思考深度/沙箱/用量) ── */}
+      {/* ── 会话设置条 (模型 + 动态配置项 + 用量) ── */}
       {phase === "connected" && status?.sessionConfig && (
         <div className="border-b border-line bg-surface px-4 py-2">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px]">
@@ -338,37 +347,23 @@ export default function LocalAgentPanel() {
               onChange={(v) => void applyModel(v)}
               title="切换会话模型 (session/set_model)"
             />
-            <CtlSelect
-              label="权限模式"
-              value={status.sessionConfig.mode?.currentValue ?? ""}
-              options={
-                status.sessionConfig.mode?.options?.map((o) => ({ value: o.value, label: `${o.name} · ${o.description ?? ""}` })) ?? []
-              }
-              disabled={busy}
-              onChange={(v) => void applyConfig("mode", v)}
-              title="会话权限模式 (session/set_config_option)"
-            />
-            <CtlSelect
-              label="思考深度"
-              value={status.sessionConfig.thought_level?.currentValue ?? ""}
-              options={status.sessionConfig.thought_level?.options?.map((o) => ({ value: o.value, label: o.name })) ?? []}
-              disabled={busy}
-              onChange={(v) => void applyConfig("thought_level", v)}
-              title="Deep Thinking 深度"
-            />
-            <CtlSelect
-              label="沙箱"
-              value={String(status.sessionConfig.sandbox?.currentValue ?? "true")}
-              options={
-                status.sessionConfig.sandbox?.options?.map((o) => ({ value: o.value, label: o.name })) ?? [
-                  { value: "true", label: "沙箱环境" },
-                  { value: "false", label: "本地环境" },
-                ]
-              }
-              disabled={busy}
-              onChange={(v) => void applyConfig("sandbox", v)}
-              title="沙箱/本地执行环境"
-            />
+            {/* 动态渲染网关暴露的其他 select 配置项 (options 非空), 新增项自动出现 */}
+            {Object.entries(status.sessionConfig)
+              .filter(([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0)
+              .map(([id, c]) => (
+                <CtlSelect
+                  key={id}
+                  label={CONFIG_LABEL[id] ?? c.name}
+                  value={c.currentValue ?? ""}
+                  options={(c.options ?? []).map((o) => ({
+                    value: o.value,
+                    label: `${o.name}${o.description ? ` · ${o.description}` : ""}`,
+                  }))}
+                  disabled={busy}
+                  onChange={(v) => void applyConfig(id, v)}
+                  title={c.description ?? undefined}
+                />
+              ))}
             {status.usage ? (
               <span className="ml-auto tabular-nums text-ink-faint" title={`token 用量 ${status.usage.used} / ${status.usage.size}`}>
                 用量 {(status.usage.used / 1000).toFixed(1)}k / {(status.usage.size / 1000).toFixed(0)}k
@@ -402,7 +397,7 @@ export default function LocalAgentPanel() {
             </div>
           </div>
         ) : (
-          <div className="mx-auto max-w-[820px] space-y-3">
+          <div className="mx-auto space-y-3" style={{ width: "min(max(820px, 80vw), 100%)" }}>
             {msgs.map((m) => (
               <div key={m.id}>
                 {m.role === "user" ? (
@@ -456,7 +451,7 @@ export default function LocalAgentPanel() {
 
       {/* ── 输入区 ── */}
       <div className="border-t border-line bg-surface px-4 py-3">
-        <div className="mx-auto flex max-w-[820px] items-center gap-2">
+        <div className="mx-auto flex items-center gap-2" style={{ width: "min(max(820px, 80vw), 100%)" }}>
           <textarea
             ref={taRef}
             value={input}
@@ -490,7 +485,7 @@ export default function LocalAgentPanel() {
             </button>
           )}
         </div>
-        <div className="mx-auto mt-1.5 max-w-[820px] text-[10.5px] text-ink-faint">
+        <div className="mx-auto mt-1.5 text-[10.5px] text-ink-faint" style={{ width: "min(max(820px, 80vw), 100%)" }}>
           ACP over HTTP+SSE · 连接令牌仅保存在本机内存 · 权限请求默认拒绝
         </div>
       </div>
