@@ -74,6 +74,19 @@ const IconReload = ({ className }: { className?: string }) => (
     <path d="M21 3v5h-5" />
   </Icon>
 );
+const IconCopy = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+  </svg>
+);
+
+const IconCheck = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="m5 13 4 4L19 7" />
+  </svg>
+);
+
 const IconInfo = ({ className }: { className?: string }) => (
   <Icon className={className}>
     <circle cx="12" cy="12" r="10" />
@@ -615,7 +628,7 @@ export default function SiteBrowser({
           }}
         />
       ) : (
-        <div className="flex h-[42px] shrink-0 items-stretch gap-1 overflow-x-auto border-b border-line bg-surface px-4">
+        <div className="flex h-[42px] shrink-0 items-stretch gap-1 overflow-x-auto overflow-y-hidden border-b border-line bg-surface px-4">
           {title ? (
             <span className="mr-2 flex shrink-0 items-center whitespace-nowrap text-[14px] font-bold text-ink">
               {title}
@@ -729,7 +742,7 @@ export default function SiteBrowser({
 
       {/* 站内标签页栏 + 工具栏 (Chrome 页签风格) */}
       <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-black/[0.03]">
-        <div className="flex min-w-0 flex-1 items-end gap-[3px] overflow-x-auto px-1.5">
+        <div className="flex min-w-0 flex-1 items-end gap-[3px] overflow-x-auto overflow-y-hidden px-1.5">
           {groupTabs.map((t) => {
             const active = t.id === activeTabDef.id;
             const isHome = t.id.endsWith(HOME_SUFFIX);
@@ -965,17 +978,63 @@ function ToolButton({
   );
 }
 
-/** 信息按钮: hover 展示当前标签基本信息 */
+/** 信息按钮: 点击切换下拉信息框, 链接可一键复制 */
 function InfoButton({ tab }: { tab: SiteTab | null }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // 点击外部关闭
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const copyUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
-    <div className="group relative">
-      <div className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink">
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        aria-label="标签页信息"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+      >
         <IconInfo />
-      </div>
-      {tab ? (
-        <div className="invisible absolute right-0 top-[36px] z-50 w-[300px] rounded-lg border border-line bg-white p-3 shadow-xl group-hover:visible">
-          <div className="mb-1 truncate text-[12.5px] font-medium text-ink">{tab.title}</div>
-          <div className="break-all text-[11.5px] leading-relaxed text-ink-muted">{tab.url}</div>
+      </button>
+      {open && tab ? (
+        <div className="absolute right-0 top-[36px] z-50 w-[320px] rounded-lg border border-line bg-white p-3 shadow-xl">
+          <div className="mb-1.5 truncate text-[12.5px] font-medium text-ink">{tab.title || "当前标签页"}</div>
+          <div className="flex items-start gap-1.5">
+            <div className="min-w-0 flex-1 break-all text-[11.5px] leading-relaxed text-ink-muted">{tab.url}</div>
+            <button
+              type="button"
+              title="复制链接"
+              aria-label="复制链接"
+              onClick={() => void copyUrl(tab.url)}
+              className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-accent"
+            >
+              {copied ? <IconCheck className="h-3.5 w-3.5" /> : <IconCopy className="h-3.5 w-3.5" />}
+            </button>
+          </div>
         </div>
       ) : null}
     </div>
