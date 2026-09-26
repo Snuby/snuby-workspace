@@ -487,9 +487,9 @@ function ToolStrip({ m }: { m: Msg }) {
   );
 }
 
-/** 行内解析: **粗体** `代码` [链接](url) 与换行 */
+/** 行内解析: **粗体** `代码` [链接](url) ![图片/视频](url) 与换行 */
 function Inline({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)\n]+\))/g);
+  const parts = text.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\))/g);
   const out: ReactNode[] = [];
   parts.forEach((p, i) => {
     if (p.startsWith("**") && p.endsWith("**") && p.length > 4) {
@@ -501,6 +501,34 @@ function Inline({ text }: { text: string }) {
         </code>,
       );
     } else {
+      const img = p.match(/^!\[([^\]]+)\]\(([^)]+)\)$/);
+      if (img) {
+        const alt = img[1];
+        const src = img[2].trim();
+        // 协议白名单: http/https/data:image, 防 javascript: 等
+        if (/^(https?:\/\/|data:image\/)/.test(src)) {
+          if (/\.(mp4|webm|mov|m3u8)(\?|#|$)/i.test(src)) {
+            out.push(
+              <video key={i} src={src} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
+                <p className="px-2 py-1 text-[11.5px] text-ink-muted">视频无法预览: {alt || src}</p>
+              </video>,
+            );
+          } else {
+            out.push(
+              <img
+                key={i}
+                src={src}
+                alt={alt}
+                loading="lazy"
+                className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
+              />,
+            );
+          }
+        } else {
+          out.push(<span key={i}>{alt}</span>);
+        }
+        return;
+      }
       const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (m && /^https?:\/\//.test(m[2])) {
         out.push(
