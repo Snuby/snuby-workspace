@@ -132,6 +132,44 @@ export default function LocalAgentPanel() {
   /** 状态信息下拉 */
   const infoRef = useRef<HTMLDivElement | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [sysOpen, setSysOpen] = useState(false);
+  const [sysText, setSysText] = useState("");
+  const [sysDraft, setSysDraft] = useState("");
+  const [sysSaving, setSysSaving] = useState(false);
+  const sysLoadedRef = useRef(false);
+
+  /** 打开约定编辑对话框: 首次加载当前约定 */
+  const openSysEditor = async () => {
+    setSysOpen(true);
+    if (!sysLoadedRef.current) {
+      try {
+        const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
+        const j = (await r.json()) as { prompt?: string };
+        setSysText(j.prompt ?? "");
+        setSysDraft(j.prompt ?? "");
+        sysLoadedRef.current = true;
+      } catch {
+        // 读取失败, 空白
+      }
+    }
+  };
+  /** 保存约定 (下次激活会话时注入) */
+  const saveSysPrompt = async () => {
+    setSysSaving(true);
+    try {
+      const r = await fetch("/api/agent/system-prompt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: sysDraft }),
+      });
+      if (r.ok) {
+        setSysText(sysDraft);
+        setSysOpen(false);
+      }
+    } finally {
+      setSysSaving(false);
+    }
+  };
   useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
 
   /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
@@ -472,6 +510,21 @@ export default function LocalAgentPanel() {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* 工作约定按钮: 查看/编辑全局工作约定 (激活会话时注入给 WorkBuddy) */}
+          <button
+            type="button"
+            aria-label="工作约定"
+            title="工作约定（激活会话时注入给 WorkBuddy）"
+            onClick={() => void openSysEditor()}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+              <path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+              <path d="M9 8h6" />
+              <path d="M9 12h6" />
+              <path d="M9 16h4" />
+            </svg>
+          </button>
           {/* 状态信息按钮: 点击展示连接/会话/能力详情 */}
           <div className="relative">
             <button
@@ -796,6 +849,65 @@ export default function LocalAgentPanel() {
       </div>
         </div>
       </div>
+      {/* ── 工作约定编辑对话框 ── */}
+      {sysOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setSysOpen(false);
+          }}
+        >
+          <div className="flex w-[560px] max-w-[90vw] flex-col rounded-xl border border-line bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <span className="text-[13px] font-semibold text-ink">工作约定（系统提示词）</span>
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setSysOpen(false)}
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-4 py-3">
+              <textarea
+                value={sysDraft}
+                onChange={(e) => setSysDraft(e.target.value)}
+                spellCheck={false}
+                className="h-[260px] w-full resize-none rounded-lg border border-line bg-page px-3 py-2 font-mono text-[12px] leading-relaxed text-ink outline-none focus:border-accent"
+                placeholder="在此编辑工作约定…（激活会话时作为首条消息注入给 WorkBuddy）"
+              />
+              <div className="mt-2 text-[10.5px] leading-relaxed text-ink-faint">
+                此约定会在<u>切换或重新进入会话</u>时作为首条消息注入 WorkBuddy；之后每次回复都会遵守。包括 Markdown
+                格式、图片/文件引用方式等。
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setSysDraft(sysText);
+                  setSysOpen(false);
+                }}
+                className="rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveSysPrompt()}
+                disabled={sysSaving}
+                className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+              >
+                {sysSaving ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
