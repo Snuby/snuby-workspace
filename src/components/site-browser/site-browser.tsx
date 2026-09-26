@@ -632,7 +632,8 @@ export default function SiteBrowser({
                       e.stopPropagation();
                       void handleRemoveSite(s.id);
                     }}
-                    className="ml-1.5 hidden h-3.5 w-3.5 items-center justify-center rounded text-ink-faint hover:bg-black/10 hover:text-red-500 group-hover:inline-flex"
+                    // X 常驻占位 (inline-flex + opacity 控制显隐): hover 出现但不撑开宽度, 选项卡不跳变
+                    className="ml-1.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-red-500 group-hover:opacity-100"
                   >
                     <IconX className="h-3 w-3" />
                   </span>
@@ -817,7 +818,12 @@ export default function SiteBrowser({
             <div
               key={siteId}
               className="absolute inset-0 h-full w-full"
-              style={{ opacity: isActiveSite ? 1 : 0, pointerEvents: isActiveSite ? "auto" : "none" }}
+              style={{
+                opacity: isActiveSite ? 1 : 0,
+                pointerEvents: isActiveSite ? "auto" : "none",
+                // 激活站点容器置顶: Electron webview 命中测试不完全遵循 pe, 隐藏层沉底防拦截
+                zIndex: isActiveSite ? 5 : 0,
+              }}
             >
               {tabs.map((t) => (
                 <div
@@ -826,6 +832,7 @@ export default function SiteBrowser({
                   style={{
                     opacity: isActiveSite && t.id === activeTabDef.id ? 1 : 0,
                     pointerEvents: isActiveSite && t.id === activeTabDef.id ? "auto" : "none",
+                    zIndex: isActiveSite && t.id === activeTabDef.id ? 10 : 0,
                   }}
                 >
                   <SiteWebview

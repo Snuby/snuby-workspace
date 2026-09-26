@@ -54,7 +54,14 @@ export default function TopicHost({ children }: { children: React.ReactNode }) {
           return (
             <div
               key={id}
-              style={{ opacity: active ? 1 : 0, pointerEvents: active ? "auto" : "none" }}
+              style={{
+                opacity: active ? 1 : 0,
+                pointerEvents: active ? "auto" : "none",
+                // 激活主题容器显式置顶: Electron webview 命中测试不完全遵循
+                // pointer-events, 隐藏层即使 opacity:0 也可能拦截真实鼠标 →
+                // 激活层 z-index 提升, 命中从最顶层开始, 隐藏层全部沉底
+                zIndex: active ? 10 : 0,
+              }}
               className="absolute inset-0 z-0 overflow-hidden"
             >
               <SiteBrowser
@@ -77,7 +84,11 @@ export default function TopicHost({ children }: { children: React.ReactNode }) {
         return (
           <div
             key={id}
-            style={{ opacity: active ? 1 : 0, pointerEvents: active ? "auto" : "none" }}
+            style={{
+              opacity: active ? 1 : 0,
+              pointerEvents: active ? "auto" : "none",
+              zIndex: active ? 10 : 0,
+            }}
             className="absolute inset-0 z-0 overflow-hidden"
           >
             <SiteBrowser moduleKey={id} sites={sites} title={name} active={active} />
@@ -89,6 +100,7 @@ export default function TopicHost({ children }: { children: React.ReactNode }) {
         style={{
           opacity: isSitePage ? 0 : 1,
           pointerEvents: isSitePage ? "none" : "auto",
+          zIndex: isSitePage ? 0 : 10,
         }}
         className="absolute inset-0 z-0 overflow-auto"
       >
