@@ -3,10 +3,11 @@
 // 灵活工作台: 左侧菜单 = 固定区 (工作台/宏观经济/资产行情/Web访问/设置)
 // + 主题区 (用户动态创建的主题, 来自 /api/topics; 主题 = 可配置的站点集合)
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTopics, type Topic } from "@/components/workbench/topics-context";
+import { useClickOutside } from "@/lib/use-click-outside";
 
 type NavLeaf = {
   href: string;
@@ -134,6 +135,9 @@ export default function Sidebar() {
   /** 正在重命名的主题 id (null = 无) */
   const [renameFor, setRenameFor] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  /** ⋯ 菜单容器 ref (点击外部关闭) */
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useClickOutside(menuRef, menuFor !== null, () => setMenuFor(null));
 
   async function handleCreate() {
     const name = newName.trim();
@@ -253,7 +257,7 @@ export default function Sidebar() {
                   </svg>
                 </button>
                 {menuFor === t.id ? (
-                  <div className="absolute right-0 top-full z-50 mt-1 w-[150px] rounded-lg border border-line bg-white p-1 shadow-xl">
+                  <div ref={menuRef} className="absolute right-0 top-full z-50 mt-1 w-[150px] rounded-lg border border-line bg-white p-1 shadow-xl">
                     {renameFor === t.id ? (
                       <div className="flex items-center gap-1 p-1">
                         <input

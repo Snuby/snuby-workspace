@@ -5,6 +5,7 @@
 // 协作演示: 发送任务, WorkBuddy 回复经 ACP SSE 流式渲染 (打字机效果)
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useClickOutside } from "@/lib/use-click-outside";
 
 type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
 
@@ -32,6 +33,15 @@ type AgentStatus = {
 };
 
 type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
+/** 本地 markdown 文档预览状态 */
+type DocPreview = {
+  path: string;
+  title: string;
+  text: string;
+  loading: boolean;
+  error?: string;
+};
+
 type Msg = {
   id: number;
   role: "user" | "agent";
@@ -77,9 +87,40 @@ export default function LocalAgentPanel() {
   const [input, setInput] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [running, setRunning] = useState(false);
+  /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
+  const [preview, setPreview] = useState<DocPreview | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 状态信息下拉 */
+  const infoRef = useRef<HTMLDivElement | null>(null);
+  const [infoOpen, setInfoOpen] = useState(false);
+  useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
+
+  /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
+  const openDoc = useCallback(async (path: string, title: string) => {
+    setPreview({ path, title, text: "", loading: true });
+    try {
+      const r = await fetch(`/api/local-file?path=${encodeURIComponent(path)}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const text = await r.text();
+      setPreview({ path, title, text, loading: false, error: undefined });
+    } catch (e) {
+      setPreview({
+        path,
+        title,
+        text: "",
+        loading: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, []);
+
+  /** 「📄 文件名」补偿定位: 用会话工作目录做候选 */
+  const docHints = useMemo(
+    () => (status?.discovered?.cwd ? [status.discovered.cwd] : []),
+    [status?.discovered?.cwd],
+  );
 
   const phase = status?.phase ?? "idle";
 
@@ -252,7 +293,7 @@ export default function LocalAgentPanel() {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-page">
       {/* ── 连接状态条 ── */}
-      <div className="flex items-start gap-3 border-b border-line bg-surface px-4 py-3">
+      <div className="relative flex items-start gap-3 border-b border-line bg-surface px-4 py-3">
         <div
           className={`mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
         >
@@ -260,7 +301,7 @@ export default function LocalAgentPanel() {
           {pm.label}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-ink-muted">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-ink-muted">
             {status?.discovered ? (
               <>
                 <span>
@@ -272,61 +313,108 @@ export default function LocalAgentPanel() {
             ) : (
               <span>未发现 ~/.workbuddy/sessions 存活网关，请先启动 WorkBuddy</span>
             )}
-            {status?.connectionIdMasked && (
-              <>
-                <span>
-                  连接 <b className="font-semibold text-ink">{status.connectionIdMasked}</b>
-                </span>
-                <span>ACP 协议 v{status.protocolVersion}</span>
-                {status.acpSessionId && <span>会话 {status.acpSessionId.slice(0, 8)}…</span>}
-              </>
-            )}
           </div>
-          {/* 能力徽章 */}
-          {caps && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {[
-                caps.loadSession && "loadSession",
-                caps.multitaskSupport && "multitask",
-                caps.promptCapabilities?.image && "image",
-                caps.promptCapabilities?.embeddedContext && "embeddedContext",
-                caps.mcpCapabilities?.http && "MCP·HTTP",
-                caps.mcpCapabilities?.sse && "MCP·SSE",
-                ...(status.authMethods ?? []).map((a) => `auth:${a}`),
-              ]
-                .filter(Boolean)
-                .map((c) => (
-                  <span
-                    key={String(c)}
-                    className="rounded border border-line bg-page px-1.5 py-0.5 text-[10.5px] text-ink-muted"
-                  >
-                    {c}
-                  </span>
-                ))}
-            </div>
-          )}
           {status?.lastError && (
             <div className="mt-1.5 rounded bg-up-soft px-2 py-1.5 text-[11.5px] leading-snug text-up">
               {status.lastError}
             </div>
           )}
         </div>
-        {phase !== "connected" ? (
-          <button
-            onClick={connect}
-            disabled={busy}
-            className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
-          >
-            {busy ? "连接中…" : "连接"}
-          </button>
-        ) : (
-          <button
-            onClick={connect}
-            className="shrink-0 rounded-md border border-line px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page"
-          >
-            重连
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* 状态信息按钮: 点击展示连接/会话/能力详情 */}
+          <div className="relative">
+            <button
+              type="button"
+              aria-label="网关状态信息"
+              aria-expanded={infoOpen}
+              onClick={() => setInfoOpen((v) => !v)}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+            >
+              <IconInfo />
+            </button>
+            {infoOpen && phase === "connected" && status ? (
+              <div
+                ref={infoRef}
+                className="absolute right-0 top-[36px] z-50 w-[360px] rounded-lg border border-line bg-white p-3.5 shadow-xl"
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[12.5px] font-semibold text-ink">网关连接信息</span>
+                  <button
+                    type="button"
+                    aria-label="关闭信息"
+                    onClick={() => setInfoOpen(false)}
+                    className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+                      <path d="M6 6l12 12" />
+                      <path d="M18 6L6 18" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="space-y-1.5 text-[11.5px]">
+                  {status.discovered ? (
+                    <>
+                      <InfoRow label="网关进程" value={`${status.discovered.pid} · 127.0.0.1:${status.discovered.port}`} mono />
+                      <InfoRow label="心跳" value={`${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`} />
+                    </>
+                  ) : null}
+                  {status.connectionIdMasked ? (
+                    <InfoRow label="连接 ID" value={status.connectionIdMasked} mono />
+                  ) : null}
+                  {status.protocolVersion ? (
+                    <InfoRow label="协议版本" value={`v${status.protocolVersion}`} />
+                  ) : null}
+                  {status.acpSessionId ? (
+                    <InfoRow label="ACP 会话" value={`${status.acpSessionId.slice(0, 8)}…${status.acpSessionId.slice(-4)}`} mono />
+                  ) : null}
+                </div>
+                {caps ? (
+                  <div className="mt-2.5 border-t border-line pt-2">
+                    <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-wider text-ink-faint">
+                      网关能力
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        caps.loadSession && "loadSession",
+                        caps.multitaskSupport && "multitask",
+                        caps.promptCapabilities?.image && "image",
+                        caps.promptCapabilities?.embeddedContext && "embeddedContext",
+                        caps.mcpCapabilities?.http && "MCP·HTTP",
+                        caps.mcpCapabilities?.sse && "MCP·SSE",
+                        ...(status.authMethods ?? []).map((a) => `auth:${a}`),
+                      ]
+                        .filter(Boolean)
+                        .map((c) => (
+                          <span
+                            key={String(c)}
+                            className="rounded border border-line bg-page px-1.5 py-0.5 text-[10.5px] text-ink-muted"
+                          >
+                            {c}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {phase !== "connected" ? (
+            <button
+              onClick={connect}
+              disabled={busy}
+              className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+            >
+              {busy ? "连接中…" : "连接"}
+            </button>
+          ) : (
+            <button
+              onClick={connect}
+              className="shrink-0 rounded-md border border-line px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page"
+            >
+              重连
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── 会话设置条 (模型 + 动态配置项 + 用量) ── */}
@@ -430,7 +518,7 @@ export default function LocalAgentPanel() {
                         m.text
                       ) : m.text ? (
                         <>
-                          {renderMd(m.text)}
+                          {renderMd(m.text, openDoc, docHints)}
                           {m.streaming ? <span className="animate-pulse">▍</span> : null}
                         </>
                       ) : m.streaming ? (
@@ -439,6 +527,15 @@ export default function LocalAgentPanel() {
                         "…"
                       )}
                     </div>
+                    {/* 文档预览卡 (点击 📄 后展开) */}
+                    {preview ? (
+                      <DocPreviewCard
+                        preview={preview}
+                        onClose={() => setPreview(null)}
+                        onOpenDoc={openDoc}
+                        docHints={docHints}
+                      />
+                    ) : null}
                   </div>
                 )}
               </div>
@@ -504,6 +601,95 @@ const IconCheck = ({ className }: { className?: string }) => (
     <path d="m5 13 4 4L19 7" />
   </svg>
 );
+
+const IconInfo = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 16v-4" />
+    <path d="M12 8h.01" />
+  </svg>
+);
+
+/** 文档预览卡: 渲染本地 markdown 内容, 支持复制路径/关闭 */
+function DocPreviewCard({
+  preview,
+  onClose,
+  onOpenDoc,
+  docHints,
+}: {
+  preview: DocPreview;
+  onClose: () => void;
+  onOpenDoc: (path: string, title: string) => void;
+  docHints: string[];
+}) {
+  const [copied, setCopied] = useState(false);
+  const copyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(preview.path);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = preview.path;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="mt-2 overflow-hidden rounded-xl border border-line bg-surface">
+      <div className="flex items-center gap-2 border-b border-line bg-page px-3 py-2">
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">📄 {preview.title}</span>
+        <span className="max-w-[220px] truncate font-mono text-[10.5px] text-ink-faint" title={preview.path}>
+          {preview.path}
+        </span>
+        <button
+          type="button"
+          title="复制路径"
+          aria-label="复制文档路径"
+          onClick={() => void copyPath()}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+        >
+          {copied ? <IconCheck className="h-3.5 w-3.5 text-down" /> : <IconCopy className="h-3.5 w-3.5" />}
+        </button>
+        <button
+          type="button"
+          title="关闭预览"
+          aria-label="关闭文档预览"
+          onClick={onClose}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+            <path d="M6 6l12 12" />
+            <path d="M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <div className="max-h-[420px] overflow-y-auto px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
+        {preview.loading ? (
+          <span className="animate-pulse text-ink-faint">加载中…</span>
+        ) : preview.error ? (
+          <div className="rounded bg-up-soft px-2.5 py-2 text-[12px] leading-snug text-up">
+            打开失败: {preview.error}
+          </div>
+        ) : (
+          renderMd(preview.text, onOpenDoc, docHints)
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 信息下拉中的键值行 */
+function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="shrink-0 text-ink-faint">{label}</span>
+      <span className={`min-w-0 truncate text-right ${mono ? "font-mono text-[10.5px]" : ""} text-ink`}>{value}</span>
+    </div>
+  );
+}
 
 /** 复制按钮: hover 显示, 点击复制消息原文 (Markdown) */
 function CopyBtn({ text }: { text: string }) {
@@ -579,6 +765,8 @@ function CtlSelect({
 /** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 可点击展开明细列表 */
 function ToolStrip({ m }: { m: Msg }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  useClickOutside(wrapRef, open, () => setOpen(false));
   const tools = m.tools ?? [];
 
   // 按 toolCallId 聚合: 起始时间/结束时间/工具/参数, 按开始时间排序
@@ -612,7 +800,7 @@ function ToolStrip({ m }: { m: Msg }) {
     n ? new Date(n).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
 
   return (
-    <div className="mb-1.5">
+    <div ref={wrapRef} className="mb-1.5">
       <div
         role="button"
         tabIndex={0}
@@ -668,8 +856,18 @@ function ToolStrip({ m }: { m: Msg }) {
 
 /** 行内解析: **粗体** `代码` [链接](url) ![图片/视频](url "title")
  *  + HTML 白名单直通: <video> / <img> (属性+协议双重校验)
- *  + 裸 http(s) URL 自动转可点击链接 */
-function Inline({ text }: { text: string }) {
+ *  + 裸 http(s) URL 自动转可点击链接
+ *  + 本地 markdown 路径 → 可点击按钮 (点击内联预览)
+ *  + 「📄 文件名.md」纯文本 → 用 docHints (会话工作目录) 尝试定位并预览 */
+function Inline({
+  text,
+  onOpenDoc,
+  docHints,
+}: {
+  text: string;
+  onOpenDoc?: (path: string, title: string) => void;
+  docHints?: string[];
+}) {
   const parts = text.split(
     /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|https?:\/\/[^\s<]+)/g,
   );
@@ -777,6 +975,22 @@ function Inline({ text }: { text: string }) {
 
     const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
     if (m && safeUrl(m[2])) {
+      const target = m[2].trim();
+      // 本地 markdown 文档: 不跳转, 点击内联预览
+      if (LOCAL_RE.test(target) && /\.(md|markdown)(\?|#|$)/i.test(target)) {
+        out.push(
+          <button
+            key={i}
+            type="button"
+            onClick={() => onOpenDoc?.(target.replace(/^file:\/\//, ""), m[1])}
+            title={target}
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[12px] font-medium text-accent-deep transition-colors hover:bg-accent/15"
+          >
+            <span className="truncate">📄 {m[1]}</span>
+          </button>,
+        );
+        return;
+      }
       out.push(
         <a
           key={i}
@@ -787,6 +1001,25 @@ function Inline({ text }: { text: string }) {
         >
           {m[1]}
         </a>,
+      );
+      return;
+    }
+
+    // 「📄 文件名.md」纯文本: 结合 docHints (会话工作目录) 尝试定位
+    const docHint = p.match(/^📄\s*([^\s「」()]+\.md|\.markdown)$/i);
+    if (docHint && onOpenDoc && docHints?.length) {
+      const name = docHint[1];
+      const full = `${docHints[0].replace(/\/$/, "")}/${name}`;
+      out.push(
+        <button
+          key={i}
+          type="button"
+          onClick={() => onOpenDoc(full, name)}
+          title={`点击预览 ${full}`}
+          className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[12px] font-medium text-accent-deep transition-colors hover:bg-accent/15"
+        >
+          <span className="truncate">{p}</span>
+        </button>,
       );
       return;
     }
@@ -817,7 +1050,11 @@ function Inline({ text }: { text: string }) {
 }
 
 /** 轻量 Markdown 渲染: 标题/表格/列表/引用/代码块/段落/行内格式 (WorkBuddy 风格) */
-function renderMd(md: string): ReactNode[] {
+function renderMd(
+  md: string,
+  onOpenDoc?: (path: string, title: string) => void,
+  docHints?: string[],
+): ReactNode[] {
   const lines = md.replace(/\r/g, "").split("\n");
   const out: ReactNode[] = [];
   let i = 0;
@@ -855,7 +1092,7 @@ function renderMd(md: string): ReactNode[] {
               <tr>
                 {header.map((h, hi) => (
                   <th key={hi} className="border border-line bg-black/[0.03] px-2.5 py-1.5 text-left font-medium">
-                    <Inline text={h} />
+                    <Inline text={h} onOpenDoc={onOpenDoc} docHints={docHints} />
                   </th>
                 ))}
               </tr>
@@ -865,7 +1102,7 @@ function renderMd(md: string): ReactNode[] {
                 <tr key={ri}>
                   {r.map((c, ci) => (
                     <td key={ci} className="border border-line px-2.5 py-1.5 align-top leading-relaxed">
-                      <Inline text={c} />
+                      <Inline text={c} onOpenDoc={onOpenDoc} docHints={docHints} />
                     </td>
                   ))}
                 </tr>
@@ -884,11 +1121,11 @@ function renderMd(md: string): ReactNode[] {
         level <= 2 ? (
           <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[14px] font-bold text-ink">
             <span className="h-3 w-[3px] rounded-full bg-accent" />
-            <Inline text={text} />
+            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} />
           </h4>
         ) : (
           <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[13px] font-semibold text-ink">
-            <Inline text={text} />
+            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} />
           </h5>
         ),
       );
@@ -905,7 +1142,7 @@ function renderMd(md: string): ReactNode[] {
         <ul key={`ul-${i}`} className="my-1 list-disc space-y-0.5 pl-4">
           {items.map((it, ii) => (
             <li key={ii}>
-              <Inline text={it} />
+              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} />
             </li>
           ))}
         </ul>,
@@ -922,7 +1159,7 @@ function renderMd(md: string): ReactNode[] {
         <ol key={`ol-${i}`} className="my-1 list-decimal space-y-0.5 pl-4">
           {items.map((it, ii) => (
             <li key={ii}>
-              <Inline text={it} />
+              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} />
             </li>
           ))}
         </ol>,
@@ -939,7 +1176,7 @@ function renderMd(md: string): ReactNode[] {
         <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[12.5px] text-ink-muted">
           {quote.map((q, qi) => (
             <div key={qi}>
-              <Inline text={q} />
+              <Inline text={q} onOpenDoc={onOpenDoc} docHints={docHints} />
             </div>
           ))}
         </blockquote>,
@@ -960,7 +1197,7 @@ function renderMd(md: string): ReactNode[] {
     }
     out.push(
       <p key={`p-${i}`} className="my-1 leading-relaxed">
-        <Inline text={para.join("\n")} />
+        <Inline text={para.join("\n")} onOpenDoc={onOpenDoc} docHints={docHints} />
       </p>,
     );
     i = j;

@@ -20,6 +20,10 @@ const MIME: Record<string, string> = {
   wav: "audio/wav",
   m4a: "audio/mp4",
   pdf: "application/pdf",
+  md: "text/markdown",
+  markdown: "text/markdown",
+  txt: "text/plain",
+  json: "application/json",
 };
 
 export async function GET(req: Request) {
