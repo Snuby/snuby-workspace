@@ -516,6 +516,16 @@ export default function SiteBrowser({
   };
 
   // —— 站点管理动作 ——
+  // ESC 关闭添加站点对话框 (焦点不在输入框时也生效)
+  useEffect(() => {
+    if (!addSiteOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAddSiteOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [addSiteOpen]);
+
   const handleAddSite = async () => {
     const url = siteUrl.trim();
     if (!url) return;
@@ -651,29 +661,62 @@ export default function SiteBrowser({
               <IconAdd className="h-4 w-4" />
             </button>
             {addSiteOpen ? (
-              <div className="absolute left-0 top-[34px] z-50 flex w-[340px] items-center gap-1.5 rounded-lg border border-line bg-white p-2 shadow-xl">
-                <input
-                  autoFocus
-                  value={siteUrl}
-                  onChange={(e) => setSiteUrl(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void handleAddSite()}
-                  placeholder="站点地址，如 https://example.com"
-                  className="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
-                />
-                <input
-                  value={siteLabel}
-                  onChange={(e) => setSiteLabel(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && void handleAddSite()}
-                  placeholder="名称（可选）"
-                  className="w-[92px] shrink-0 rounded-md border border-line bg-surface px-2 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleAddSite()}
-                  className="shrink-0 rounded-md bg-accent px-2.5 py-1.5 text-[12.5px] font-medium text-white hover:opacity-90"
+              <div
+                className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+                onClick={() => setAddSiteOpen(false)}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="添加站点"
+                  onClick={(e) => e.stopPropagation()}
+                  className="w-[440px] max-w-[90vw] rounded-xl border border-line bg-white p-5 shadow-2xl"
                 >
-                  添加
-                </button>
+                  <div className="mb-4 flex items-center justify-between">
+                    <span className="text-[14.5px] font-bold text-ink">添加站点</span>
+                    <button
+                      type="button"
+                      aria-label="关闭"
+                      onClick={() => setAddSiteOpen(false)}
+                      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+                    >
+                      <IconX className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <div className="flex flex-col gap-3">
+                    <input
+                      autoFocus
+                      value={siteUrl}
+                      onChange={(e) => setSiteUrl(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && void handleAddSite()}
+                      placeholder="站点地址，如 https://example.com"
+                      className="w-full rounded-md border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent"
+                    />
+                    <input
+                      value={siteLabel}
+                      onChange={(e) => setSiteLabel(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && void handleAddSite()}
+                      placeholder="名称（可选，不填则用域名）"
+                      className="w-full rounded-md border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent"
+                    />
+                    <div className="mt-1 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setAddSiteOpen(false)}
+                        className="rounded-md border border-line bg-surface px-3.5 py-1.5 text-[13px] text-ink-muted hover:bg-black/5"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleAddSite()}
+                        className="rounded-md bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
+                      >
+                        添加
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : null}
           </div>
