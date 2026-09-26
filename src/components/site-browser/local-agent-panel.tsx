@@ -442,7 +442,7 @@ export default function LocalAgentPanel() {
   return (
     <div className="flex h-full w-full overflow-hidden bg-page">
       {/* ── 会话侧栏 (磁盘持久化的本地会话) ── */}
-      <aside className="flex w-[216px] shrink-0 flex-col border-r border-line bg-surface">
+      <aside className="flex h-full w-[216px] shrink-0 flex-col border-r border-line bg-surface">
         <div className="flex items-center justify-between px-3 pb-2 pt-3">
           <span className="text-[11.5px] font-semibold uppercase tracking-wider text-ink-faint">会话</span>
           <button
@@ -500,27 +500,30 @@ export default function LocalAgentPanel() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* ── 连接状态条 ── */}
-      <div className="relative flex items-start gap-3 border-b border-line bg-surface px-4 py-3">
+      <div className="relative flex items-center gap-3 border-b border-line bg-surface px-4 py-3">
         <div
-          className={`mt-0.5 flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
+          className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
         >
           <span className={`h-2 w-2 rounded-full ${pm.dot}`} />
           {pm.label}
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-ink-muted">
-            {status?.discovered ? (
-              <>
-                <span>
-                  网关 <b className="font-semibold text-ink">{status.discovered.pid}</b> ·{" "}
-                  <b className="font-semibold text-ink">127.0.0.1:{status.discovered.port}</b>
-                </span>
-                <span>心跳 {Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前</span>
-              </>
-            ) : (
-              <span>未发现 ~/.workbuddy/sessions 存活网关，请先启动 WorkBuddy</span>
-            )}
-          </div>
+        <div className="flex min-w-0 flex-1 items-center gap-x-4 text-[11.5px] text-ink-muted">
+          {status?.discovered ? (
+            <>
+              <span className="whitespace-nowrap">
+                网关 <b className="font-semibold text-ink">{status.discovered.pid}</b> ·{" "}
+                <b className="font-semibold text-ink">127.0.0.1:{status.discovered.port}</b>
+              </span>
+              <span className="whitespace-nowrap">
+                心跳{" "}
+                {status.discovered.heartbeatMsAgo < 600_000
+                  ? `${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`
+                  : "未知（连接可用）"}
+              </span>
+            </>
+          ) : (
+            <span>未发现 ~/.workbuddy/sessions 存活网关，请先启动 WorkBuddy</span>
+          )}
           {status?.lastError && (
             <div className="mt-1.5 rounded bg-up-soft px-2 py-1.5 text-[11.5px] leading-snug text-up">
               {status.lastError}
@@ -811,10 +814,11 @@ const IconCheck = ({ className }: { className?: string }) => (
 );
 
 const IconInfo = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 16v-4" />
-    <path d="M12 8h.01" />
+  <svg viewBox="0 0 24 24" fill="none" className={className}>
+    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.7" />
+    <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.08" />
+    <path d="M12 16.2v-4.4" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
+    <circle cx="12" cy="8.1" r="1.45" fill="currentColor" />
   </svg>
 );
 
