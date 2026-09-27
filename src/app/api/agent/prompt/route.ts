@@ -1,5 +1,6 @@
 // 本地 Agent: 流式任务 (POST) — 转发 WorkBuddy 网关 SSE 为 NDJSON 行
 // 每行: {type:"chunk"|"thought"|"tool"|"done"|"error", ...}; 前端按行流式渲染
+// 多会话并行: prompt 按 localSessionId 使用各自专属 ACP 连接, 服务端不再加全局锁
 import { prompt } from "@/infrastructure/workbuddy-acp";
 import { getSession } from "@/infrastructure/agent-session-store";
 import { activateLocalSession } from "@/infrastructure/agent-session-activate";
@@ -41,7 +42,8 @@ export async function POST(req: Request) {
         }
       };
       try {
-        // 本地会话: 发送前激活 (关联网关会话 + 工作约定注入), 保证直接提问也有约定锚定
+        // 本地会话: 发送前激活 (在其专属连接上关联网关会话 + 工作约定注入), 保证直接提问也有约定锚定
+        // 多会话并行: activate + prompt 均按 localSessionId 走各自专属 ACP 连接, 互不阻塞
         if (localSessionId) {
           const act = await activateLocalSession(localSessionId);
           acpSessionId = act.acpSessionId;
@@ -49,7 +51,7 @@ export async function POST(req: Request) {
         await prompt(
           text,
           (e) => push(e),
-          { timeoutMs, acpSessionId, cwd },
+          { timeoutMs, acpSessionId, cwd, localSessionId },
         );
       } catch (e) {
         push({ type: "error", error: (e as Error).message });

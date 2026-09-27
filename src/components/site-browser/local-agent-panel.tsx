@@ -34,7 +34,41 @@ type AgentStatus = {
 
 type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
 /** 本地会话元信息 (磁盘持久化) */
-type SessionInfo = { id: string; title: string; createdAt: number; updatedAt: number; acpSessionId?: string };
+type SessionInfo = {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  acpSessionId?: string;
+  /** 本地会话工作目录 (与注入给 WorkBuddy 的约定一致) */
+  acpCwd?: string;
+};
+
+/** 会话维度的网关态 (per-session): 从 AgentStatus 拆出的非全局字段。
+ * 全局字段 (phase/discovered/lastError) 保留在 status; 这里只放「归属于某个会话」的状态。 */
+type GatewayInfo = {
+  connectionIdMasked?: string;
+  protocolVersion?: number;
+  acpSessionId?: string;
+  authMethods?: string[];
+  models?: AgentStatus["models"];
+  sessionConfig?: AgentStatus["sessionConfig"];
+  usage?: AgentStatus["usage"];
+};
+
+/** 会话视图态 (AgentSessionUi): 该会话的内存消息缓存与分页游标。
+ * 切走/切回不重拉磁盘: 已加载的直接复用; LRU 超限淘汰非活跃项 (运行中不淘汰)。 */
+type SessionUi = {
+  msgs: Msg[];
+  cursor: number | null;
+  hasMore: boolean;
+  loaded: boolean;
+  loading: boolean;
+  lastUsed: number;
+};
+
+/** 会话视图 LRU 上限: 内存中最多保留的会话消息缓存数 (超出淘汰最久未用; 运行中强制保活) */
+const UI_CACHE_MAX = 10;
 
 /** 磁盘存储的消息形态 (messages.jsonl 单行) */
 type StoredMsg = {
@@ -42,7 +76,9 @@ type StoredMsg = {
   text: string;
   tools?: { tool: string; detail?: string; toolCallId?: string; ts?: number }[];
   error?: boolean;
+  interrupted?: boolean;
   ts: number;
+  extra?: { title: string; text: string }[];
 };
 
 /** 磁盘消息 → 面板消息 */
@@ -59,6 +95,8 @@ function storedToMsg(m: StoredMsg): Msg {
       ts: t.ts ?? 0,
     })),
     error: m.error,
+    interrupted: m.interrupted,
+    extra: m.extra,
     streaming: false,
     finishedAt: m.ts,
     ts: m.ts,
@@ -87,9 +125,11 @@ type Msg = {
   thinking?: boolean;
   tools?: ToolEv[];
   error?: boolean;
+  interrupted?: boolean;
   startedAt?: number;
   finishedAt?: number;
   ts?: number;
+  extra?: { title: string; text: string }[];
 };
 
 const PHASE_META: Record<Phase, { label: string; color: string; dot: string }> = {
@@ -125,19 +165,61 @@ export default function LocalAgentPanel() {
   const [restoring, setRestoring] = useState(false);
   const [input, setInput] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [running, setRunning] = useState(false);
+  /** 运行中的会话集合 (每个会话可独立并行跑一个任务) */
+  const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  /** 每个运行会话的流式累积状态: sessionId -> RunState */
+  type RunState = {
+    sessionId: string;
+    msgId: number;
+    text: string;
+    tools: ToolEv[];
+    thinking: boolean;
+    error?: boolean;
+    interrupted?: boolean;
+    streaming: boolean;
+    startedAt: number;
+    ac: AbortController;
+  };
+  const runsRef = useRef<Map<string, RunState>>(new Map());
   /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
   const [preview, setPreview] = useState<DocPreview | null>(null);
   const [linkView, setLinkView] = useState<LinkView | null>(null);
+  const [extraView, setExtraView] = useState<{ title: string; items: { title: string; text: string }[] } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; src: string; name: string } | null>(null);
+  const [ctxToast, setCtxToast] = useState<string | null>(null);
   /** 本地会话: 列表 / 当前会话 / 历史加载中 */
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [histLoaded, setHistLoaded] = useState(false);
+  /** per-session 视图缓存 (AgentSessionRegistry 前端侧): sessionId -> SessionUi */
+  const uiRef = useRef<Map<string, SessionUi>>(new Map());
+  /** per-session 网关态: sessionId -> GatewayInfo (status 拆分: 非全局字段归会话) */
+  const gwRef = useRef<Map<string, GatewayInfo>>(new Map());
+  /** 当前激活会话的网关态视图 (渲染用) */
+  const [gw, setGw] = useState<GatewayInfo | null>(null);
+  /** 越界写入审计提示 (任务结束后检测到其他会话目录被写) */
+  const [auditWarn, setAuditWarn] = useState<string | null>(null);
   /** 流式中的最新 agent 消息 (供结束落盘) */
-  const agentLatestRef = useRef<Msg | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  /** currentId 的 ref 镜像 (供异步流式闭包读取最新值) */
+  const currentIdRef = useRef<string | null>(null);
+  const loadSeqRef = useRef(0); // 会话加载代际号: 切会话/清空列表时递增, 过期的异步加载结果直接丢弃, 防止快速切换时渲染串台
+  useEffect(() => {
+    currentIdRef.current = currentId;
+  }, [currentId]);
+  /** 流式自动滚底开关: 用户上滚查看历史时暂停跟随, 滚回底部自动恢复 */
+  const followRef = useRef(true);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 消息滚动容器 (渐进加载: 滚到顶部拉更早历史) */
+  const msgBoxRef = useRef<HTMLDivElement | null>(null);
+  /** 是否正在 prepend 更早历史 (抑制自动滚底, 保持视口) */
+  const prependRef = useRef(false);
+  /** 历史加载(切会话/首屏)标记: 该次 msgs 变化由加载函数手动瞬跳到底, 不触发平滑滚动 */
+  const histPendingRef = useRef(false);
+  /** 分页游标: 当前已加载消息中最早的字节偏移; null=未加载 */
+  const [msgCursor, setMsgCursor] = useState<number | null>(null);
+  const [hasMoreMsgs, setHasMoreMsgs] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   /** 状态信息下拉 */
   const infoRef = useRef<HTMLDivElement | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
@@ -146,6 +228,23 @@ export default function LocalAgentPanel() {
   const [sysDraft, setSysDraft] = useState("");
   const [sysSaving, setSysSaving] = useState(false);
   const sysLoadedRef = useRef(false);
+
+  // 挂载即加载工作约定: 发送时附加信息 / 打开编辑器都依赖它
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
+        const j = (await r.json()) as { prompt?: string };
+        if (j.prompt) {
+          setSysText(j.prompt);
+          setSysDraft(j.prompt);
+          sysLoadedRef.current = true;
+        }
+      } catch {
+        // 读取失败保持空白
+      }
+    })();
+  }, []);
 
   /** 打开约定编辑对话框: 首次加载当前约定 */
   const openSysEditor = async () => {
@@ -200,13 +299,242 @@ export default function LocalAgentPanel() {
     }
   }, []);
 
-  /** 「📄 文件名」补偿定位: 用会话工作目录做候选 */
-  const docHints = useMemo(
-    () => (status?.discovered?.cwd ? [status.discovered.cwd] : []),
-    [status?.discovered?.cwd],
-  );
+  /** 「📄 文件名」补偿定位: 用当前会话工作目录做候选 (产物都写在工作区) */
+  const docHints = useMemo(() => {
+    const s = sessions.find((x) => x.id === currentId);
+    return s?.acpCwd ? [s.acpCwd] : [];
+  }, [sessions, currentId]);
 
   const phase = status?.phase ?? "idle";
+
+  /** 图片右键: 拦截 → 自定义菜单 (下载/复制); 非图片保留浏览器默认菜单 */
+  const onCtxMenu = (e: React.MouseEvent) => {
+    const t = e.target as HTMLElement;
+    const img = t.closest("img");
+    if (!img) {
+      setCtxMenu(null);
+      return;
+    }
+    e.preventDefault();
+    const src = img.getAttribute("src") ?? "";
+    let name = "";
+    let real = src;
+    if (src.startsWith("/api/local-file")) {
+      try {
+        real = decodeURIComponent(new URL(src, window.location.origin).searchParams.get("path") ?? src);
+      } catch {
+        real = src;
+      }
+      name = real.split("/").pop() ?? "image";
+    } else {
+      name = new URL(src, window.location.origin).pathname.split("/").pop() ?? "image";
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, src: real, name });
+  };
+
+  /** 下载图片: 同源直接 fetch blob → a[download]; 跨域失败则新窗口打开 */
+  const downloadImage = useCallback(async () => {
+    const m = ctxMenu;
+    if (!m) return;
+    try {
+      const url = m.src.startsWith("/") || /^https?:\/\//i.test(m.src)
+        ? m.src
+        : `/api/local-file?path=${encodeURIComponent(m.src)}`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = m.name;
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      setCtxMenu(null);
+    } catch {
+      setCtxMenu(null);
+      window.open(m.src.startsWith("/") ? m.src : `file://${m.src}`, "_blank");
+    }
+  }, [ctxMenu]);
+
+  /** 复制图片: 同源 fetch → canvas 转 png → 写剪贴板 */
+  const copyImage = useCallback(async () => {
+    const m = ctxMenu;
+    if (!m) return;
+    try {
+      const url = m.src.startsWith("/") || /^https?:\/\//i.test(m.src)
+        ? m.src
+        : `/api/local-file?path=${encodeURIComponent(m.src)}`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const img = new Image();
+      img.src = URL.createObjectURL(blob);
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res();
+        img.onerror = () => rej(new Error("图片解码失败"));
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const cx = canvas.getContext("2d");
+      if (!cx) throw new Error("canvas 不可用");
+      cx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(img.src);
+      const png = await new Promise<Blob>((res, rej) =>
+        canvas.toBlob((b) => (b ? res(b) : rej(new Error("转码失败"))), "image/png"),
+      );
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      setCtxMenu(null);
+      setCtxToast("图片已复制到剪贴板");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    } catch {
+      setCtxMenu(null);
+      setCtxToast("复制失败");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    }
+  }, [ctxMenu]);
+
+  /** 切会话/首屏: 恢复自动跟随并滚到底 (双 rAF + 定时兜底), 无动画 */
+  const scrollBottomStable = useCallback(() => {
+    followRef.current = true;
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
+    window.setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }), 200);
+    window.setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }), 600);
+  }, []);
+
+  /** 从 AgentStatus 提取会话维度网关态 (全局字段留在 status) */
+  const toGw = (st: AgentStatus | null | undefined): GatewayInfo | null =>
+    st
+      ? {
+          connectionIdMasked: st.connectionIdMasked,
+          protocolVersion: st.protocolVersion,
+          acpSessionId: st.acpSessionId,
+          authMethods: st.authMethods,
+          models: st.models,
+          sessionConfig: st.sessionConfig,
+          usage: st.usage,
+        }
+      : null;
+
+  /** 会话视图缓存读写 (Registry): 不存在则创建空 Ui */
+  const uiOf = (id: string): SessionUi => {
+    const m = uiRef.current;
+    let u = m.get(id);
+    if (!u) {
+      u = { msgs: [], cursor: null, hasMore: false, loaded: false, loading: false, lastUsed: 0 };
+      m.set(id, u);
+    }
+    return u;
+  };
+  /** LRU 触达 + 超限淘汰 (运行中会话保活不淘汰; keepId 永不被淘汰) */
+  const evictUi = (keepId: string) => {
+    const m = uiRef.current;
+    if (m.size <= UI_CACHE_MAX) return;
+    const idle = [...m.entries()]
+      .filter(([k, u]) => k !== keepId && !runningIds.has(k) && u.loaded)
+      .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    for (const [k] of idle.slice(0, m.size - UI_CACHE_MAX)) m.delete(k);
+  };
+  /** 提交消息变更到会话缓存; 若该会话是激活会话则同步渲染视图 */
+  const commitMsgs = (id: string, updater: (prev: Msg[]) => Msg[]) => {
+    const u = uiOf(id);
+    u.msgs = updater(u.msgs);
+    u.lastUsed = Date.now();
+    evictUi(id);
+    if (id === currentIdRef.current) setMsgs(u.msgs);
+  };
+  /** 提交分页游标变更到会话缓存; 激活会话则同步渲染 */
+  const commitPage = (id: string, patch: Partial<Pick<SessionUi, "cursor" | "hasMore" | "loaded" | "loading">>) => {
+    const u = uiOf(id);
+    if (patch.cursor !== undefined) u.cursor = patch.cursor;
+    if (patch.hasMore !== undefined) u.hasMore = patch.hasMore;
+    if (patch.loaded !== undefined) u.loaded = patch.loaded;
+    if (patch.loading !== undefined) u.loading = patch.loading;
+    u.lastUsed = Date.now();
+    evictUi(id);
+    if (id === currentIdRef.current) {
+      setMsgCursor(u.cursor);
+      setHasMoreMsgs(u.hasMore);
+    }
+  };
+  /** 合并运行中任务的流式半成品到会话缓存 (切回继续渲染, 不中断) */
+  const mergeRunIntoView = (id: string) => {
+    const run = runsRef.current.get(id);
+    if (!run) return;
+    const u = uiOf(id);
+    if (u.msgs.some((m) => m.id === run.msgId)) return;
+    u.msgs = [
+      ...u.msgs,
+      {
+        id: run.msgId,
+        role: "agent",
+        text: run.text,
+        tools: run.tools,
+        thinking: run.thinking,
+        error: run.error,
+        interrupted: run.interrupted,
+        streaming: true,
+        startedAt: run.startedAt,
+        ts: run.startedAt,
+      },
+    ];
+    if (id === currentIdRef.current) setMsgs(u.msgs);
+  };
+  /** 拉取某会话的 per-session 网关态 (模型/配置/用量/连接) */
+  const loadGw = async (id: string) => {
+    try {
+      const r = await fetch(`/api/agent/status?sid=${encodeURIComponent(id)}`, { cache: "no-store" });
+      const j = (await r.json()) as { status: AgentStatus };
+      const g = toGw(j.status);
+      gwRef.current.set(id, g ?? {});
+      if (id === currentIdRef.current) setGw(g);
+    } catch {
+      // 忽略; 下次激活/任务时再刷新
+    }
+  };
+  /** 加载会话消息到缓存并设为激活视图; 缓存命中直接复用 (不重拉磁盘) */
+  const loadIntoUi = async (id: string, opts?: { scroll?: boolean }) => {
+    const u = uiOf(id);
+    if (u.loaded && !u.loading) {
+      // 缓存命中: 直接激活视图
+      histPendingRef.current = true;
+      setMsgs(u.msgs);
+      setMsgCursor(u.cursor);
+      setHasMoreMsgs(u.hasMore);
+      u.lastUsed = Date.now();
+      evictUi(id);
+      mergeRunIntoView(id);
+      if (opts?.scroll) scrollBottomStable();
+      return;
+    }
+    if (u.loading) return; // 正在加载, 避免并发重复拉取
+    u.loading = true;
+    u.lastUsed = Date.now();
+    const seq = ++loadSeqRef.current;
+    try {
+      const r = await fetch(`/api/agent/sessions/${id}/messages?limit=50`, { cache: "no-store" });
+      const j = (await r.json()) as { messages: StoredMsg[]; nextCursor?: number; hasMore?: boolean };
+      if (seq !== loadSeqRef.current) return; // 期间切了会话, 丢弃过期加载
+      u.msgs = (j.messages ?? []).map(storedToMsg);
+      u.cursor = typeof j.nextCursor === "number" ? j.nextCursor : null;
+      u.hasMore = !!j.hasMore;
+      u.loaded = true;
+      mergeRunIntoView(id);
+      u.lastUsed = Date.now();
+      evictUi(id);
+      if (id === currentIdRef.current) {
+        histPendingRef.current = true;
+        setMsgs(u.msgs);
+        setMsgCursor(u.cursor);
+        setHasMoreMsgs(u.hasMore);
+        if (opts?.scroll) scrollBottomStable();
+      }
+    } catch {
+      // 网络失败忽略; 缓存保持未加载, 下次切换再试
+    } finally {
+      u.loading = false;
+    }
+  };
 
   const refresh = useCallback(async () => {
     try {
@@ -235,9 +563,7 @@ export default function LocalAgentPanel() {
         setSessions(list);
         if (list.length) {
           setCurrentId(list[0].id);
-          const mr = await fetch(`/api/agent/sessions/${list[0].id}/messages`, { cache: "no-store" });
-          const mj = (await mr.json()) as { messages: StoredMsg[] };
-          setMsgs((mj.messages ?? []).map(storedToMsg));
+          await loadIntoUi(list[0].id, { scroll: true });
         } else {
           await createLocalSession();
         }
@@ -256,36 +582,41 @@ export default function LocalAgentPanel() {
       const j = (await r.json()) as { session: SessionInfo };
       setSessions((x) => [j.session, ...x]);
       setCurrentId(j.session.id);
+      ++loadSeqRef.current;
+      const u = uiOf(j.session.id);
+      u.msgs = [];
+      u.cursor = null;
+      u.hasMore = false;
+      u.loaded = true;
+      u.lastUsed = Date.now();
       setMsgs([]);
+      setMsgCursor(null);
+      setHasMoreMsgs(false);
     } catch {
       // 落盘失败不阻塞本地会话
     }
   };
 
-  /** 切换本地会话 (加载历史 + 恢复网关上下文) */
+  /** 切换本地会话: 缓存优先 (已加载不重拉), 恢复网关上下文 + 拉取 per-session 网关态 */
   const switchSession = async (id: string) => {
     if (id === currentId) return;
     setCurrentId(id);
-    setMsgs([]);
     // 恢复会话上下文期间禁止发送, 避免「首问卡 …」: 切会话后的第一次发送要付 loadSession 成本
     setRestoring(true);
     try {
-      const r = await fetch(`/api/agent/sessions/${id}/messages`, { cache: "no-store" });
-      const j = (await r.json()) as { messages: StoredMsg[] };
-      setMsgs((j.messages ?? []).map(storedToMsg));
-    } catch {
-      // 忽略
-    }
-    // 已连接时激活该会话绑定的网关会话 (session/load 恢复上下文, 使 WorkBuddy 记得之前对话)
-    if (phase === "connected") {
-      try {
-        await fetch(`/api/agent/sessions/${id}/activate`, { method: "POST" });
-      } catch {
-        // 激活失败不阻塞; 下次发送时 prompt 内部会再对齐
+      await loadIntoUi(id, { scroll: true });
+      // 已连接时激活该会话绑定的网关会话 (session/load 恢复上下文, 使 WorkBuddy 记得之前对话)
+      // 后台 fire-and-forget: 不阻塞 UI; 首条消息发送时 prompt 内部会排队对齐同一连接, 不会串台
+      if (phase === "connected") {
+        void fetch(`/api/agent/sessions/${id}/activate`, { method: "POST" }).catch(() => {
+          // 激活失败不阻塞; 下次发送时 prompt 内部会再对齐
+        });
+        void loadGw(id);
+        void refresh();
       }
-      void refresh();
+    } finally {
+      setRestoring(false);
     }
-    setRestoring(false);
   };
 
   /** 删除本地会话 (磁盘+列表); 删当前则切到最近会话 */
@@ -303,10 +634,10 @@ export default function LocalAgentPanel() {
     }
   };
 
-  /** 落盘一条消息到当前会话 */
-  const persist = (role: "user" | "assistant", msg: Partial<Msg>) => {
-    if (!currentId) return;
-    void fetch(`/api/agent/sessions/${currentId}/messages`, {
+  /** 落盘一条消息到指定会话 */
+  const persist = (sid: string, role: "user" | "assistant", msg: Partial<Msg>) => {
+    if (!sid) return;
+    void fetch(`/api/agent/sessions/${sid}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -314,9 +645,50 @@ export default function LocalAgentPanel() {
         text: msg.text ?? "",
         tools: msg.tools,
         error: msg.error,
+        interrupted: msg.interrupted,
         ts: Date.now(),
+        extra: msg.extra,
       }),
     });
+  };
+
+  /** 渐进加载: 拉取当前会话更早的历史 (IM 式上拉) */
+  const loadMoreMsgs = async () => {
+    if (!currentId || loadingMore || !hasMoreMsgs || msgCursor === null) return;
+    setLoadingMore(true);
+    const box = msgBoxRef.current;
+    const prevScrollTop = box?.scrollTop ?? 0;
+    const prevScrollHeight = box?.scrollHeight ?? 0;
+    try {
+      const seq = loadSeqRef.current;
+      const r = await fetch(`/api/agent/sessions/${currentId}/messages?limit=50&cursor=${msgCursor}`, { cache: "no-store" });
+      const j = (await r.json()) as { messages: StoredMsg[]; nextCursor?: number; hasMore?: boolean };
+      if (seq !== loadSeqRef.current) return; // 期间切了会话, 丢弃过期分页
+      const older = (j.messages ?? []).map(storedToMsg);
+      prependRef.current = true;
+      commitMsgs(currentId, (prev) => [...older, ...prev]);
+      commitPage(currentId, {
+        cursor: typeof j.nextCursor === "number" ? j.nextCursor : null,
+        hasMore: !!j.hasMore,
+      });
+      // 补偿滚动位置: 内容增高后保持视口不跳动
+      requestAnimationFrame(() => {
+        const el = msgBoxRef.current;
+        if (el) el.scrollTop = prevScrollTop + (el.scrollHeight - prevScrollHeight);
+      });
+    } catch {
+      // 忽略; 下次滚动再试
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  /** 消息容器滚动: 滚到顶部附近触发加载更早历史; 滚出底部区域暂停流式自动跟随 */
+  const onMsgScroll = () => {
+    const el = msgBoxRef.current;
+    if (!el) return;
+    followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (el.scrollTop < 48 && !loadingMore && hasMoreMsgs) void loadMoreMsgs();
   };
 
   /** 相对时间 */
@@ -345,6 +717,7 @@ export default function LocalAgentPanel() {
       const r = await fetch("/api/agent/connect", { method: "POST" });
       const j = (await r.json()) as { status: AgentStatus };
       setStatus(j.status);
+      if (currentIdRef.current) void loadGw(currentIdRef.current);
     } catch {
       setStatus((s) => ({ ...(s ?? {}), phase: "error", lastError: "本地服务无响应" }) as AgentStatus);
     } finally {
@@ -353,27 +726,53 @@ export default function LocalAgentPanel() {
   };
 
   const send = async (text?: string) => {
+    const sid = currentId;
     const task = (text ?? input).trim();
-    if (!task || running || restoring) return;
+    if (!task || !sid || runningIds.has(sid) || restoring) return;
     setInput("");
-    setRunning(true);
+    setRunningIds((prev) => new Set(prev).add(sid));
     const id = Date.now();
-    setMsgs((m) => [...m, { id, role: "user", text: task, ts: id }]);
-    persist("user", { text: task });
+    // 自动附带信息 (排障用): 工作约定 / 会话工作目录 / 当前模型
+    const extra: { title: string; text: string }[] = [];
+    if (sysText.trim()) extra.push({ title: "工作约定", text: sysText.trim() });
+    const cwd = sessions.find((sd) => sd.id === sid)?.acpCwd ?? "";
+    if (cwd) extra.push({ title: "会话工作目录", text: cwd });
+    const mdl = gwRef.current.get(sid)?.sessionConfig?.model?.currentValue;
+    if (mdl) extra.push({ title: "会话模型", text: mdl });
+    commitMsgs(sid, (prev) => [...prev, { id, role: "user", text: task, ts: id, extra }]);
+    persist(sid, "user", { text: task, extra });
     const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true, startedAt: Date.now(), ts: Date.now() };
-    agentLatestRef.current = agentMsg;
-    setMsgs((m) => [...m, agentMsg]);
+    commitMsgs(sid, (prev) => [...prev, agentMsg]);
     const ac = new AbortController();
-    abortRef.current = ac;
-    const update = (fn: (m: Msg) => Msg) =>
-      setMsgs((all) =>
-        all.map((m) => {
-          if (m.id !== agentMsg.id) return m;
-          const next = fn(m);
-          agentLatestRef.current = next;
-          return next;
-        }),
+    const run: RunState = {
+      sessionId: sid,
+      msgId: agentMsg.id,
+      text: "",
+      tools: [],
+      thinking: false,
+      streaming: true,
+      startedAt: Date.now(),
+      ac,
+    };
+    runsRef.current.set(sid, run);
+    // update: 更新 run 累积; 写会话缓存 (激活会话自动同步渲染, 切走只落缓存)
+    const update = (fn: (r: RunState) => void) => {
+      fn(run);
+      commitMsgs(sid, (all) =>
+        all.map((m) =>
+          m.id === agentMsg.id
+            ? {
+                ...m,
+                text: run.text,
+                tools: run.tools,
+                thinking: run.thinking,
+                error: run.error,
+                streaming: run.streaming,
+              }
+            : m,
+        ),
       );
+    };
     try {
       const res = await fetch("/api/agent/prompt", {
         method: "POST",
@@ -401,43 +800,100 @@ export default function LocalAgentPanel() {
             continue;
           }
           if (ev.type === "chunk") {
-            update((m) => ({ ...m, text: m.text + (ev.text ?? ""), thinking: false }));
+            update((r) => {
+              r.text += ev.text ?? "";
+              r.thinking = false;
+            });
           } else if (ev.type === "thought") {
-            update((m) => ({ ...m, thinking: true }));
+            update((r) => {
+              r.thinking = true;
+            });
           } else if (ev.type === "tool") {
-            update((m) => ({
-              ...m,
-              tools: [
-                ...(m.tools ?? []),
-                { tool: ev.tool ?? "", state: ev.state ?? "", detail: ev.detail ?? "", toolCallId: ev.toolCallId ?? "", ts: Date.now() },
-              ],
-            }));
+            update((r) => {
+              r.tools.push({
+                tool: ev.tool ?? "",
+                state: ev.state ?? "",
+                detail: ev.detail ?? "",
+                toolCallId: ev.toolCallId ?? "",
+                ts: Date.now(),
+              });
+            });
           } else if (ev.type === "done") {
-            update((m) => ({ ...m, streaming: false, thinking: false, finishedAt: Date.now() }));
+            update((r) => {
+              r.streaming = false;
+              r.thinking = false;
+            });
           } else if (ev.type === "error") {
-            update((m) => ({ ...m, streaming: false, error: true, text: ev.error ?? "任务执行失败" }));
+            update((r) => {
+              r.streaming = false;
+              r.error = true;
+              r.text = ev.error ?? "任务执行失败";
+            });
           }
         }
       }
     } catch (e) {
       if ((e as Error).name !== "AbortError") {
-        update((m) => ({ ...m, streaming: false, error: true, text: (e as Error).message }));
+        update((r) => {
+          r.streaming = false;
+          r.error = true;
+          r.text = (e as Error).message;
+        });
       } else {
-        update((m) => ({ ...m, streaming: false, text: m.text + "\n\n(已停止)" }));
+        update((r) => {
+          r.streaming = false;
+          r.interrupted = true;
+        });
       }
     } finally {
-      setRunning(false);
-      abortRef.current = null;
-      const last = agentLatestRef.current;
-      agentLatestRef.current = null;
-      if (last) persist("assistant", { text: last.text, tools: last.tools, error: last.error });
+      runsRef.current.delete(sid);
+      setRunningIds((prev) => {
+        const n = new Set(prev);
+        n.delete(sid);
+        return n;
+      });
+      // 最终状态写会话缓存 (标记结束); 激活会话自动同步渲染
+      commitMsgs(sid, (all) =>
+        all.map((m) =>
+          m.id === agentMsg.id
+            ? { ...m, text: run.text, tools: run.tools, error: run.error, streaming: false, thinking: false, finishedAt: Date.now() }
+            : m,
+        ),
+      );
+      if (run.interrupted) persist(sid, "assistant", { text: run.text, tools: run.tools, interrupted: true });
+      else if (run.error) persist(sid, "assistant", { text: run.text, tools: run.tools, error: true });
+      else if (run.text.trim()) persist(sid, "assistant", { text: run.text, tools: run.tools });
+      // 越界写入审计 (软隔离兜底): 任务刚结束, 检查是否写到了其他会话目录
+      void (async () => {
+        try {
+          const ar = await fetch("/api/agent/audit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: sid }),
+          });
+          const aj = (await ar.json()) as { violations?: { path: string; mtime: number; size: number }[] };
+          if (aj.violations?.length) {
+            setAuditWarn(`⚠ 检测到 ${aj.violations.length} 处工作区越界写入: WorkBuddy 可能读写到了其他会话目录（见控制台/审计接口）`);
+          } else {
+            setAuditWarn(null);
+          }
+        } catch {
+          // 审计失败静默
+        }
+      })();
     }
   };
 
   const stop = async () => {
-    abortRef.current?.abort();
+    const sid = currentId;
+    const run = sid ? runsRef.current.get(sid) : undefined;
+    run?.ac.abort();
     try {
-      await fetch("/api/agent/cancel", { method: "POST" });
+      await fetch("/api/agent/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ localSessionId: sid ?? undefined }),
+      });
     } catch {
       // 忽略
     }
@@ -451,11 +907,18 @@ export default function LocalAgentPanel() {
       const r = await fetch("/api/agent/set-model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: modelId }),
+        body: JSON.stringify({ model: modelId, localSessionId: currentId ?? undefined }),
       });
       const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
-      if (j.ok && j.status) setStatus(j.status);
-      else alert(j.error ?? "切换模型失败");
+      if (j.ok && j.status) {
+        // status 拆分: 全局只取 phase/错误, 网关态写入当前会话
+        setStatus((s) => ({ ...(s ?? {}), phase: j.status?.phase ?? "connected", lastError: j.status?.lastError }));
+        const g = toGw(j.status);
+        if (currentId) {
+          gwRef.current.set(currentId, g ?? {});
+          setGw(g);
+        }
+      } else alert(j.error ?? "切换模型失败");
     } catch {
       alert("切换模型失败: 本地服务无响应");
     } finally {
@@ -471,11 +934,18 @@ export default function LocalAgentPanel() {
       const r = await fetch("/api/agent/set-config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ configId, value }),
+        body: JSON.stringify({ configId, value, localSessionId: currentId ?? undefined }),
       });
       const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
-      if (j.ok && j.status) setStatus(j.status);
-      else alert(j.error ?? "设置失败");
+      if (j.ok && j.status) {
+        // status 拆分: 全局只取 phase/错误, 网关态写入当前会话
+        setStatus((s) => ({ ...(s ?? {}), phase: j.status?.phase ?? "connected", lastError: j.status?.lastError }));
+        const g = toGw(j.status);
+        if (currentId) {
+          gwRef.current.set(currentId, g ?? {});
+          setGw(g);
+        }
+      } else alert(j.error ?? "设置失败");
     } catch {
       alert("设置失败: 本地服务无响应");
     } finally {
@@ -483,9 +953,17 @@ export default function LocalAgentPanel() {
     }
   };
 
-  // 流式自动滚底
+  // 流式自动滚底 (用户上滚查看历史时暂停跟随; 历史加载/更早历史 prepend 时不平滑滚动)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (prependRef.current) {
+      prependRef.current = false;
+      return;
+    }
+    if (histPendingRef.current) {
+      histPendingRef.current = false;
+      return;
+    }
+    if (followRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs]);
 
   // 输入框自动撑高: 内容增高 → 高度跟随, 达到上限后滚动
@@ -501,6 +979,19 @@ export default function LocalAgentPanel() {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-page">
+      {auditWarn && (
+        <div className="flex items-center justify-between gap-3 border-b border-up/30 bg-up-soft px-4 py-1.5 text-[11.5px] text-up">
+          <span>{auditWarn}</span>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            onClick={() => setAuditWarn(null)}
+            className="shrink-0 rounded px-1.5 text-up/80 transition-colors hover:bg-up/10 hover:text-up"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div className="relative flex items-center gap-3 border-b border-line bg-surface px-4 py-3">
         <div
           className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
@@ -556,7 +1047,7 @@ export default function LocalAgentPanel() {
               onClick={() => setInfoOpen((v) => !v)}
               className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
             >
-              <IconInfo />
+              <IconInfo className="h-[15px] w-[15px]" />
             </button>
             {infoOpen && phase === "connected" && status ? (
               <div
@@ -584,14 +1075,14 @@ export default function LocalAgentPanel() {
                       <InfoRow label="心跳" value={`${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`} />
                     </>
                   ) : null}
-                  {status.connectionIdMasked ? (
-                    <InfoRow label="连接 ID" value={status.connectionIdMasked} mono />
+                  {gw?.connectionIdMasked ? (
+                    <InfoRow label="连接 ID" value={gw.connectionIdMasked} mono />
                   ) : null}
-                  {status.protocolVersion ? (
-                    <InfoRow label="协议版本" value={`v${status.protocolVersion}`} />
+                  {gw?.protocolVersion ? (
+                    <InfoRow label="协议版本" value={`v${gw.protocolVersion}`} />
                   ) : null}
-                  {status.acpSessionId ? (
-                    <InfoRow label="ACP 会话" value={`${status.acpSessionId.slice(0, 8)}…${status.acpSessionId.slice(-4)}`} mono />
+                  {gw?.acpSessionId ? (
+                    <InfoRow label="ACP 会话" value={`${gw.acpSessionId.slice(0, 8)}…${gw.acpSessionId.slice(-4)}`} mono />
                   ) : null}
                 </div>
                 {caps ? (
@@ -607,7 +1098,7 @@ export default function LocalAgentPanel() {
                         caps.promptCapabilities?.embeddedContext && "embeddedContext",
                         caps.mcpCapabilities?.http && "MCP·HTTP",
                         caps.mcpCapabilities?.sse && "MCP·SSE",
-                        ...(status.authMethods ?? []).map((a) => `auth:${a}`),
+                        ...(gw?.authMethods ?? []).map((a) => `auth:${a}`),
                       ]
                         .filter(Boolean)
                         .map((c) => (
@@ -643,14 +1134,14 @@ export default function LocalAgentPanel() {
         </div>
       </div>
       {/* ── 会话设置条 (模型 + 动态配置项 + 用量) ── */}
-      {phase === "connected" && status?.sessionConfig && (
+      {phase === "connected" && gw?.sessionConfig && (
         <div className="border-b border-line bg-surface px-4 py-2">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px]">
             <CtlSelect
               label="模型"
-              value={status.sessionConfig.model?.currentValue ?? ""}
+              value={gw.sessionConfig.model?.currentValue ?? ""}
               options={
-                status.models?.map((m) => ({
+                gw.models?.map((m) => ({
                   value: m.modelId,
                   label: `${m.name}${m.description ? ` · ${m.description}` : ""}`,
                 })) ?? []
@@ -660,7 +1151,7 @@ export default function LocalAgentPanel() {
               title="切换会话模型 (session/set_model)"
             />
             {/* 动态渲染网关暴露的其他 select 配置项 (options 非空), 新增项自动出现 */}
-            {Object.entries(status.sessionConfig)
+            {Object.entries(gw.sessionConfig)
               .filter(([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0)
               .map(([id, c]) => (
                 <CtlSelect
@@ -676,9 +1167,9 @@ export default function LocalAgentPanel() {
                   title={c.description ?? undefined}
                 />
               ))}
-            {status.usage ? (
-              <span className="ml-auto tabular-nums text-ink-faint" title={`token 用量 ${status.usage.used} / ${status.usage.size}`}>
-                用量 {(status.usage.used / 1000).toFixed(1)}k / {(status.usage.size / 1000).toFixed(0)}k
+            {gw.usage ? (
+              <span className="ml-auto tabular-nums text-ink-faint" title={`token 用量 ${gw.usage.used} / ${gw.usage.size}`}>
+                用量 {(gw.usage.used / 1000).toFixed(1)}k / {(gw.usage.size / 1000).toFixed(0)}k
               </span>
             ) : null}
           </div>
@@ -723,6 +1214,12 @@ export default function LocalAgentPanel() {
                 title={sd.title}
               >
                 <span className="min-w-0 flex-1 truncate">{sd.title}</span>
+                {runningIds.has(sd.id) && (
+                  <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-accent">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                    运行中
+                  </span>
+                )}
                 <span className="shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtRel(sd.updatedAt)}</span>
                 <button
                   type="button"
@@ -745,7 +1242,7 @@ export default function LocalAgentPanel() {
       </aside>
         <div className="flex min-w-0 flex-1 flex-col">
       {/* ── 协作演示区 ── */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div ref={msgBoxRef} onScroll={onMsgScroll} onContextMenu={onCtxMenu} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {msgs.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
             <div className="text-[15px] font-semibold text-ink">本地 Agent 协作演示</div>
@@ -759,7 +1256,7 @@ export default function LocalAgentPanel() {
                 <button
                   key={t}
                   onClick={() => send(t)}
-                  disabled={running}
+                  disabled={runningIds.has(currentId ?? "")}
                   className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] text-accent hover:bg-accent-soft disabled:opacity-40"
                 >
                   {t}
@@ -768,38 +1265,62 @@ export default function LocalAgentPanel() {
             </div>
           </div>
         ) : (
-          <div className="mx-auto space-y-3" style={{ width: "min(max(820px, 80vw), 100%)" }}>
+          <div className="mx-auto space-y-4" style={{ width: "min(max(980px, 88vw), 100%)" }}>
             {msgs.map((m) => (
               <div key={m.id}>
                 {m.role === "user" ? (
-                  <div className="group flex items-end justify-end gap-1.5">
-                    <CopyBtn text={m.text} />
-                    <div className="max-w-[70%] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[13px] leading-relaxed text-white">
-                      {m.text}
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-1.5">
+                      {m.extra && m.extra.length > 0 && (
+                        <button
+                          type="button"
+                          title="查看本条消息自动附带的信息 (排障用)"
+                          onClick={() => setExtraView({ title: "附加信息", items: m.extra! })}
+                          className="rounded border border-line bg-surface px-1.5 py-px text-[10px] text-ink-muted transition-colors hover:bg-page hover:text-ink"
+                        >
+                          附加信息
+                        </button>
+                      )}
+                      <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
                     </div>
-                    <span className="mb-0.5 shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
+                    <div className="flex items-end gap-2">
+                      <div className="group flex items-end justify-end gap-1.5">
+                        <CopyBtn text={m.text} />
+                        <div className="max-w-[640px] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[13px] leading-relaxed text-white">
+                          {m.text}
+                        </div>
+                      </div>
+                      <Avatar who="user" />
+                    </div>
                   </div>
                 ) : (
-                  <div className="max-w-[90%]">
-                    <div className="group mb-1 flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-                      <span className="text-[11px] font-medium text-ink-muted">本地 Agent</span>
+                  <div className="flex items-start gap-2">
+                    <Avatar who="agent" />
+                    <div className="min-w-0 flex-1">
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-ink">本地 Agent</span>
                       <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
                       {m.streaming && (
                         <span className="text-[11px] text-accent">
                           {m.thinking ? "思考中…" : "正在生成…"}
                         </span>
                       )}
-                      <span className="ml-auto">
-                        <CopyBtn text={m.text} />
-                      </span>
+                      {m.interrupted && (
+                        <span
+                          className="rounded bg-black/[0.06] px-1.5 py-px text-[10px] font-medium text-ink-muted"
+                          title="任务已被手动取消（本地停止），已产出的内容已保留"
+                        >
+                          已取消
+                        </span>
+                      )}
                     </div>
                     <ToolStrip m={m} />
-                    <div
-                      className={`rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed ${
-                        m.error ? "border-up/40 text-up" : "text-ink"
-                      }`}
-                    >
+                    <div className="group flex items-start gap-1.5">
+                      <div
+                        className={`inline-block rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed ${
+                          m.error ? "border-up/40 text-up" : "text-ink"
+                        }`}
+                      >
                       {m.error ? (
                         m.text
                       ) : m.text ? (
@@ -812,8 +1333,10 @@ export default function LocalAgentPanel() {
                       ) : (
                         "…"
                       )}
+                      </div>
+                      <CopyBtn text={m.text} />
                     </div>
-
+                    </div>
                   </div>
                 )}
               </div>
@@ -843,12 +1366,12 @@ export default function LocalAgentPanel() {
                   ? "正在恢复会话上下文…"
                   : "给本地 Agent 派个任务… (Enter 发送, Shift+Enter 换行)"
             }
-            disabled={phase !== "connected" || running || restoring}
+            disabled={phase !== "connected" || runningIds.has(currentId ?? "") || restoring}
             rows={1}
             style={{ maxHeight: INPUT_MAX_H }}
             className="min-h-[38px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-page px-3 py-2 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
           />
-          {running ? (
+          {runningIds.has(currentId ?? "") ? (
             <button
               onClick={stop}
               className="shrink-0 rounded-lg bg-up px-4 py-2 text-[12.5px] font-medium text-white hover:opacity-90"
@@ -858,7 +1381,7 @@ export default function LocalAgentPanel() {
           ) : (
             <button
               onClick={() => void send()}
-              disabled={phase !== "connected" || restoring || !input.trim()}
+              disabled={phase !== "connected" || restoring || runningIds.has(currentId ?? "") || !input.trim()}
               className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-medium text-white hover:bg-accent-deep disabled:opacity-40"
             >
               发送
@@ -939,6 +1462,89 @@ export default function LocalAgentPanel() {
           onOpenLink={openLink}
         />
       ) : null}
+      {ctxMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[60]"
+            onMouseDown={() => setCtxMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setCtxMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[61] min-w-[150px] overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-xl"
+            style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 110) }}
+          >
+            <button
+              type="button"
+              onClick={() => void downloadImage()}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-page"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 shrink-0">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+              </svg>
+              下载图片
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyImage()}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-page"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 shrink-0">
+                <rect x="9" y="9" width="11" height="11" rx="2" />
+                <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+              </svg>
+              复制图片
+            </button>
+          </div>
+        </>
+      )}
+      {ctxToast && (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-full bg-ink px-4 py-1.5 text-[12px] text-white shadow-lg">
+          {ctxToast}
+        </div>
+      )}
+      {extraView && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setExtraView(null);
+          }}
+        >
+          <div className="flex h-[70vh] w-[min(720px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+            <div className="flex items-center gap-2 border-b border-line bg-page px-3.5 py-2">
+              <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
+                📎 {extraView.title}
+              </span>
+              <button
+                type="button"
+                title="关闭"
+                aria-label="关闭附加信息"
+                onClick={() => setExtraView(null)}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              {extraView.items.map((it, i) => (
+                <div key={i} className="mb-3 last:mb-0">
+                  <div className="mb-1 text-[11px] font-semibold text-ink-muted">{it.title}</div>
+                  <pre className="max-h-[38vh] overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-page px-3 py-2 text-[12px] leading-relaxed text-ink">
+                    {it.text}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1058,7 +1664,25 @@ function WebviewBox({ src }: { src: string }) {
   return <div ref={hostRef} className="h-full w-full overflow-hidden bg-white" />;
 }
 
-/** 链接/文件预览弹窗: url → 内嵌 webview; file → 拉取文本渲染 (不再插入消息流) */
+/** 链接/文件预览弹窗: url → 内嵌 webview; 本地文件按扩展名分发 (图片→img, html/pdf→webview, 文本→markdown/pre) */
+const PREVIEW_IMG_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
+const PREVIEW_DOC_EXT = ["html", "htm", "pdf"];
+const extOf = (p: string) => (p.split(".").pop() ?? "").toLowerCase();
+/** jsonl/log: 逐行 JSON.parse 后 pretty, 非 JSON 行保留原文 */
+const prettyJsonl = (raw: string) =>
+  raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.stringify(JSON.parse(l), null, 2);
+      } catch {
+        return l;
+      }
+    })
+    .join("\n\n");
+
 function LinkPreviewModal({
   view,
   onClose,
@@ -1074,8 +1698,13 @@ function LinkPreviewModal({
 }) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const ext = view.kind === "file" ? extOf(view.path) : "";
+  const isImg = PREVIEW_IMG_EXT.includes(ext);
+  const isDoc = PREVIEW_DOC_EXT.includes(ext);
+  const localFileUrl = (p: string) => `${window.location.origin}/api/local-file?path=${encodeURIComponent(p)}`;
   useEffect(() => {
     if (view.kind !== "file") return;
+    if (isImg || isDoc) return; // 图片/html/pdf 不走文本拉取
     let dead = false;
     setText(null);
     setErr(null);
@@ -1141,6 +1770,12 @@ function LinkPreviewModal({
         <div className="min-h-0 flex-1 bg-white">
           {view.kind === "url" ? (
             <WebviewBox src={view.url} />
+          ) : isImg ? (
+            <div className="flex h-full items-center justify-center p-4">
+              <img src={localFileUrl(view.path)} alt={view.title} className="max-h-full max-w-full object-contain" />
+            </div>
+          ) : isDoc ? (
+            <WebviewBox src={localFileUrl(view.path)} />
           ) : err ? (
             <div className="p-4">
               <div className="rounded bg-up-soft px-2.5 py-2 text-[12px] leading-snug text-up">打开失败: {err}</div>
@@ -1148,6 +1783,12 @@ function LinkPreviewModal({
           ) : text === null ? (
             <div className="flex h-full items-center justify-center text-[12px] text-ink-faint">
               <span className="animate-pulse">加载中…</span>
+            </div>
+          ) : ext === "jsonl" || ext === "log" ? (
+            <div className="h-full overflow-y-auto px-4 py-3">
+              <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed text-ink">
+                {prettyJsonl(text)}
+              </pre>
             </div>
           ) : (
             <div className="h-full overflow-y-auto px-4 py-3 text-[13px] leading-relaxed text-ink">
@@ -1171,6 +1812,33 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
 }
 
 /** 复制按钮: hover 显示, 点击复制消息原文 (Markdown) */
+/** IM 气泡头像: user = 品牌色「我」, agent = 浅色机器人图标 */
+function Avatar({ who }: { who: "user" | "agent" }) {
+  return who === "user" ? (
+    <div className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
+      我
+    </div>
+  ) : (
+    <div className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full bg-accent-soft text-accent">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="h-4 w-4"
+      >
+        <rect x="4" y="8" width="16" height="12" rx="3" />
+        <path d="M12 8V4" />
+        <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none" />
+        <path d="M9 13h.01M15 13h.01" strokeWidth="2.4" />
+        <path d="M9 16.5h6" />
+      </svg>
+    </div>
+  );
+}
+
 function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {

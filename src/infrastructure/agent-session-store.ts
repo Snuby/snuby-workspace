@@ -1,24 +1,33 @@
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "fs";
 import path from "path";
 
-// 本地 Agent 会话持久化: 每个会话一个文件夹
+// 本地 Agent 会话持久化 (AgentSessionRepository): 每个会话一个聚合目录, 内部数据与工作区物理分离
 //
-//   data/agent-sessions/
+//   data/agent-sessions/                       # 内部数据 (WorkBuddy 不可见)
 //     <session-id>/
-//       meta.json            # 元信息: id/title/createdAt/updatedAt/acpCwd/model
+//       meta.json            # 元信息: id/title/createdAt/updatedAt/acpCwd/model/acpSessionId
 //       messages.jsonl       # 历史对话: 每行一条消息 { role, text, tools?, error?, ts }
-//       artifacts/           # 中间产物与相关资源目录 (预留)
+//     system-prompt.txt      # 全局工作约定 (所有会话注入)
+//     model-preference.json  # 模型偏好 (新会话恢复)
 //
-// 开发态根目录: <cwd>/data/agent-sessions; 打包态可用 env AGENT_SESSIONS_PATH 覆盖。
+//   data/agent-workspaces/                      # 工作区 (WorkBuddy 唯一授权区域 = 网关 cwd)
+//     <session-id>/
+//       artifacts/           # 任务产物 (必须写在这里)
+//
+// 开发态根目录: <cwd>/data/agent-sessions; 打包态可用 env AGENT_SESSIONS_PATH / AGENT_WORKSPACES_PATH 覆盖。
 
 export type AgentToolRecord = {
   tool: string;
@@ -33,6 +42,8 @@ export type AgentMessage = {
   tools?: AgentToolRecord[];
   error?: boolean;
   ts: number;
+  /** 自动附带的信息 (如工作约定/会话工作目录/模型), 排障用 */
+  extra?: { title: string; text: string }[];
 };
 
 export type AgentSessionMeta = {
@@ -52,6 +63,9 @@ export type AgentSessionMeta = {
 
 const ROOT = process.env.AGENT_SESSIONS_PATH ?? path.join(process.cwd(), "data", "agent-sessions");
 export const SESSIONS_ROOT = ROOT;
+/** 工作区根: 每个会话一个子目录, 作为注入给 WorkBuddy 的网关 cwd 与产物目录 (与内部数据物理分离) */
+const WORKSPACES_ROOT = process.env.AGENT_WORKSPACES_PATH ?? path.join(process.cwd(), "data", "agent-workspaces");
+export const WORKSPACES_PATH = WORKSPACES_ROOT;
 const SYSTEM_PROMPT_PATH = path.join(ROOT, "system-prompt.txt");
 
 /** 默认工作约定 (可编辑; 以普通「工作约定」语气注入, 不自称系统级约束以免被拒) */
@@ -114,6 +128,10 @@ function ensureRoot(): string {
 function dirOf(id: string): string {
   return path.join(ROOT, id);
 }
+/** 会话工作区目录 (WorkBuddy 唯一授权区域; 网关 cwd 指向这里) */
+export function workDirOf(id: string): string {
+  return path.join(WORKSPACES_ROOT, id);
+}
 function metaOf(id: string): string {
   return path.join(dirOf(id), "meta.json");
 }
@@ -135,6 +153,7 @@ function writeMeta(meta: AgentSessionMeta): void {
 
 /** 会话列表 (按最近更新倒序) */
 export function listSessions(): AgentSessionMeta[] {
+  migrateWorkspaces();
   ensureRoot();
   const out: AgentSessionMeta[] = [];
   for (const name of readdirSync(ROOT)) {
@@ -145,46 +164,145 @@ export function listSessions(): AgentSessionMeta[] {
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-/** 新建会话 (生成唯一 id, 创建 artifacts 目录) */
+/** 新建会话 (生成唯一 id, 创建工作区与 artifacts) */
 export function createSession(acpCwd?: string, model?: string): AgentSessionMeta {
+  migrateWorkspaces();
   ensureRoot();
   let id = "";
   do {
     id = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${Math.random().toString(36).slice(2, 6)}`;
   } while (existsSync(dirOf(id)));
-  mkdirSync(path.join(dirOf(id), "artifacts"), { recursive: true });
+  const wd = workDirOf(id);
+  mkdirSync(path.join(wd, "artifacts"), { recursive: true });
   const now = Date.now();
   const meta: AgentSessionMeta = {
     id,
     title: `会话 ${new Date(now).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}`,
     createdAt: now,
     updatedAt: now,
-    acpCwd,
+    acpCwd: acpCwd ?? wd,
     model,
   };
   writeMeta(meta);
   return meta;
 }
 
+/** 一次性迁移: 把历史会话的 artifacts 从 sessions/<id> 迁入 workspaces/<id>,
+ *  并把 meta.acpCwd 对齐到新工作区 (旧值指向 sessions/<id>)。幂等, 惰性执行一次。 */
+let migrated = false;
+export function migrateWorkspaces(): void {
+  if (migrated) return;
+  migrated = true;
+  try {
+    mkdirSync(WORKSPACES_ROOT, { recursive: true });
+    ensureRoot();
+    if (!existsSync(ROOT)) return;
+    for (const name of readdirSync(ROOT)) {
+      const oldArt = path.join(ROOT, name, "artifacts");
+      if (!existsSync(oldArt)) continue;
+      try {
+        const wd = workDirOf(name);
+        mkdirSync(path.join(wd, "artifacts"), { recursive: true });
+        for (const f of readdirSync(oldArt)) {
+          const src = path.join(oldArt, f);
+          const dst = path.join(wd, "artifacts", f);
+          if (!existsSync(dst)) renameSync(src, dst);
+        }
+        rmSync(oldArt, { recursive: true, force: true });
+        const meta = readMeta(name);
+        if (meta && meta.acpCwd !== wd) {
+          meta.acpCwd = wd;
+          writeMeta(meta);
+        }
+      } catch {
+        // 单个会话迁移失败不影响其他会话
+      }
+    }
+  } catch {
+    // 迁移失败不影响运行; 下次惰性重试由 migrated 标志控制, 必要时手动触发
+  }
+}
+
 export function getSession(id: string): AgentSessionMeta | null {
+  migrateWorkspaces();
   return readMeta(id);
 }
 
-/** 读取历史消息 (按写入顺序) */
-export function readMessages(id: string): AgentMessage[] {
-  const p = msgsOf(id);
-  if (!existsSync(p)) return [];
-  const out: AgentMessage[] = [];
-  for (const line of readFileSync(p, "utf8").split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    try {
-      out.push(JSON.parse(t) as AgentMessage);
-    } catch {
-      // 单行损坏跳过, 不阻塞其他消息
+/** 分页读取结果: messages 升序(时间正序); nextCursor 为更早数据的起始字节偏移, 0 表示无更多; hasMore 是否还有更早 */
+export type MessagePage = {
+  messages: AgentMessage[];
+  nextCursor: number;
+  hasMore: boolean;
+};
+
+const TAIL_CHUNK = 256 * 1024; // 尾部倒读起始窗口
+
+type LineEntry = { msg: AgentMessage; off: number };
+
+/** 逐行扫描窗口文本: 返回有效消息 + 其绝对字节偏移; 首段残行(窗口起点在行中)自动跳过 */
+function scanLines(text: string, base: number): LineEntry[] {
+  const out: LineEntry[] = [];
+  const n = text.length;
+  let i = 0;
+  if (base > 0 && text[0] !== "\n") {
+    const nl = text.indexOf("\n");
+    if (nl === -1) return out; // 整个窗口是同一行的残段
+    i = nl + 1;
+  }
+  while (i < n) {
+    const nl = text.indexOf("\n", i);
+    const line = nl === -1 ? text.slice(i) : text.slice(i, nl);
+    if (line.trim()) {
+      try {
+        out.push({ msg: JSON.parse(line) as AgentMessage, off: base + i });
+      } catch {
+        // 坏行(窗口边缘切到行中)跳过
+      }
     }
+    if (nl === -1) break;
+    i = nl + 1;
   }
   return out;
+}
+
+/**
+ * 分页读取历史消息 — 渐进式加载, 不整读大文件:
+ * 从文件尾部(或 cursor 字节偏移)向前倍增读取窗口, 逐行扫描并记录精确字节偏移。
+ *  - limit: 返回条数 (默认 50)
+ *  - cursor: 字节游标 (来自上次返回的 nextCursor, 指向"更早首条"的行起点); 省略 = 取文件尾部最近 limit 条
+ * 返回 messages(升序) + nextCursor(更早首条的行起点偏移; 0=无更多) + hasMore
+ */
+export function readMessages(id: string, opts?: { limit?: number; cursor?: number }): MessagePage {
+  const p = msgsOf(id);
+  if (!existsSync(p)) return { messages: [], nextCursor: 0, hasMore: false };
+  const limit = Math.max(1, Math.min(opts?.limit ?? 50, 500));
+  const size = statSync(p).size;
+  if (size === 0) return { messages: [], nextCursor: 0, hasMore: false };
+  const end = Math.max(0, Math.min(opts?.cursor === undefined ? size : opts.cursor, size));
+  const fd = openSync(p, "r");
+  try {
+    let win = TAIL_CHUNK;
+    let start = Math.max(0, end - win);
+    let entries: LineEntry[] = [];
+    for (let attempt = 0; attempt < 24; attempt++) {
+      start = Math.max(0, end - win);
+      const buf = Buffer.alloc(end - start);
+      readSync(fd, buf, 0, buf.length, start);
+      entries = scanLines(buf.toString("utf8"), start);
+      if (entries.length >= limit + 1 || start === 0) break;
+      win *= 2;
+    }
+    const tail = entries.slice(-limit);
+    // nextCursor: 本次返回最旧一条的行起点偏移 — 下次从该起点之前继续读取(不含已返回的这条), 不重不漏
+    const older = tail.length ? tail[0].off : 0;
+    return {
+      messages: tail.map((e) => e.msg),
+      nextCursor: older,
+      hasMore: older > 0,
+    };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** 追加一条消息; 未设标题时用首条用户消息截断生成 */
@@ -230,15 +348,48 @@ export function renameSession(id: string, title: string): AgentSessionMeta | nul
 export function deleteSession(id: string): boolean {
   if (!existsSync(dirOf(id))) return false;
   rmSync(dirOf(id), { recursive: true, force: true });
+  rmSync(workDirOf(id), { recursive: true, force: true });
   return true;
 }
 
-/** 会话文件夹内已写入的产物文件 (供展示/清理) */
+/** 会话工作区内已写入的产物文件 (供展示/清理) */
 export function listArtifacts(id: string): { name: string; size: number; mtime: number }[] {
-  const d = path.join(dirOf(id), "artifacts");
+  const d = path.join(workDirOf(id), "artifacts");
   if (!existsSync(d)) return [];
   return readdirSync(d).map((name) => {
     const st = statSync(path.join(d, name));
     return { name, size: st.size, mtime: st.mtimeMs };
   });
+}
+
+/**
+ * 越界写入审计 (软隔离兜底): 扫描本会话工作区/内部目录之外的所有会话目录,
+ * 返回最近 cutoffMs 内有新写入的文件清单。若 WorkBuddy 未遵守「产物只写工作区」的约定,
+ * 其越界写入会落在兄弟会话目录上, 此处即可发现。
+ */
+export function auditWorkspaceViolations(
+  id: string,
+  opts?: { cutoffMs?: number },
+): { path: string; mtime: number; size: number }[] {
+  migrateWorkspaces();
+  const out: { path: string; mtime: number; size: number }[] = [];
+  const cutoff = Date.now() - (opts?.cutoffMs ?? 5 * 60_000);
+  const skip = new Set([dirOf(id), workDirOf(id)]);
+  const walk = (dir: string): void => {
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      const p = path.join(dir, name);
+      if (skip.has(p)) continue;
+      try {
+        const st = statSync(p);
+        if (st.isDirectory()) walk(p);
+        else if (st.mtimeMs > cutoff) out.push({ path: p, mtime: st.mtimeMs, size: st.size });
+      } catch {
+        // 不可读/已删除忽略
+      }
+    }
+  };
+  walk(ROOT); // 兄弟会话内部目录 (messages.jsonl 等)
+  walk(WORKSPACES_ROOT); // 兄弟工作区
+  return out;
 }
