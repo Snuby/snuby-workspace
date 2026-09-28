@@ -10,7 +10,7 @@
 
 1. **next 生产服务器以 `ELECTRON_RUN_AS_NODE` 子进程运行**（`spawn(process.execPath, [...next, "start", "-H", "127.0.0.1", "-p", port])`）：与 Web 版 `npm start` 同构、行为可预期、崩溃隔离；主进程退出时 `child.kill()` 清理（AC-D 实测无残留）。放弃内嵌 programmatic API —— asar 下 `spawn ENOTDIR`、TS 配置触发构建链缺失、打包态 `prepare()` 静默挂起（均为实测死路）。
 2. **asar: false 全量真实文件**：next 运行时内部 spawn/require 自身组件，asar 内路径不可用（实测必须关闭）。
-3. **零业务代码改动**：现有契约已兼容 —— 仓储读 `MACRO_DB_PATH`/`MARKET_DB_PATH` 环境变量、fetch 用 `process.cwd()` + 相对 `scripts/*.py`、Python 脚本读 env 覆盖。桌面端只补环境变量与工作目录。
+3. **零业务代码改动（历史）**：桌面端通过环境变量与工作目录对接仓储；宏观/行情库与 fetch 脚本已于 2026-09-27 下线，现仅注入 `SITE_TABS_DB_PATH` / `AGENT_*` / `SNUBY_USER_DATA`。
 4. **数据隔离**：打包内置 `data/*.db` 模板，首次启动复制到 `userData/data/`（幂等），读写均在该目录。
 5. **端口**：3310 起递增探测（EADDRINUSE 自动换端口），避免与 Web 版（3300）冲突。
 6. **单实例锁**：重复启动聚焦已有窗口，不重复拉起 next 进程。

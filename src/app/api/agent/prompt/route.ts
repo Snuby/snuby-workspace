@@ -1,9 +1,36 @@
 // 本地 Agent: 流式任务 (POST) — 转发 WorkBuddy 网关 SSE 为 NDJSON 行
-// 每行: {type:"chunk"|"thought"|"tool"|"done"|"error", ...}; 前端按行流式渲染
-// 多会话并行: prompt 按 localSessionId 使用各自专属 ACP 连接, 服务端不再加全局锁
-import { prompt } from "@/infrastructure/workbuddy-acp";
-import { getSession } from "@/infrastructure/agent-session-store";
-import { activateLocalSession } from "@/infrastructure/agent-session-activate";
+// 每行: {type:"queued"|"chunk"|"thought"|"tool"|"done"|"error", ...}; 前端按行流式渲染
+// 激活+prompt 必须在同一全局锁内, 防止对齐后被他会话插队 (spec 017 §11)
+import { globalQueueSnapshot, prompt, withGlobalAgentLock } from "@/infrastructure/workbuddy-acp";
+import {
+  getSession,
+  listSessions,
+  readMessages,
+  updateSessionGateway,
+} from "@/infrastructure/agent-session-store";
+import { activateLocalSessionUnlocked } from "@/infrastructure/agent-session-activate";
+import { snubyLog } from "@/infrastructure/snuby-log";
+
+/** 「继续」类短指令: ACP 会话可能已空, 内联近期历史, 避免再诱导 Read messages.jsonl */
+function looksLikeContinue(text: string): boolean {
+  const t = text.trim();
+  if (t.length > 40) return false;
+  return /^(继续|接着|resume|continue)/i.test(t) || /继续(任务|刚才|上[一面]|工作)/.test(t);
+}
+
+function inlineRecentHistory(localSessionId: string): string {
+  const { messages } = readMessages(localSessionId, { limit: 10 });
+  const lines: string[] = [];
+  for (const m of messages) {
+    const role = m.role === "user" ? "用户" : "助手";
+    const body = (m.text ?? "").trim();
+    if (!body) continue;
+    const clipped = body.length > 600 ? `${body.slice(0, 600)}…` : body;
+    lines.push(`${role}: ${clipped}`);
+  }
+  if (!lines.length) return "";
+  return `【近期对话摘录 · 已内联，勿再读取任何日志文件】\n${lines.join("\n\n")}\n\n`;
+}
 
 export async function POST(req: Request) {
   let text = "";
@@ -16,12 +43,15 @@ export async function POST(req: Request) {
     text = (body.text ?? "").trim();
     if (typeof body.timeoutMs === "number" && body.timeoutMs > 0) timeoutMs = body.timeoutMs;
     localSessionId = body.localSessionId;
-    // 本地会话 → 网关会话映射: 发送前对齐到该会话绑定的网关上下文
     if (localSessionId) {
       const meta = getSession(localSessionId);
       if (meta) {
         acpSessionId = meta.acpSessionId;
         cwd = meta.acpCwd;
+        if (looksLikeContinue(text)) {
+          const hist = inlineRecentHistory(localSessionId);
+          if (hist) text = `${hist}请根据以上摘录继续推进用户当前要做的事。用户说：${text}`;
+        }
       }
     }
   } catch {
@@ -42,17 +72,111 @@ export async function POST(req: Request) {
         }
       };
       try {
-        // 本地会话: 发送前激活 (在其专属连接上关联网关会话 + 工作约定注入), 保证直接提问也有约定锚定
-        // 多会话并行: activate + prompt 均按 localSessionId 走各自专属 ACP 连接, 互不阻塞
-        if (localSessionId) {
-          const act = await activateLocalSession(localSessionId);
-          acpSessionId = act.acpSessionId;
-        }
-        await prompt(
-          text,
-          (e) => push(e),
-          { timeoutMs, acpSessionId, cwd, localSessionId },
-        );
+        const titleOf = (id: string | null) => {
+          if (!id || id === "default") return id;
+          return listSessions().find((s) => s.id === id)?.title ?? id.slice(0, 8);
+        };
+
+        let clientGone = false;
+        const safePush = (obj: unknown) => {
+          try {
+            push(obj);
+          } catch {
+            clientGone = true;
+          }
+        };
+
+        const lockKey = localSessionId ?? "default";
+        // 先入队 (同步写入 pendingTokens), 再推排队快照, 最后 await 执行
+        const run = withGlobalAgentLock(lockKey, async () => {
+          safePush({ type: "running" });
+          let promptText = text;
+          let pendingFp: string | undefined;
+          if (localSessionId) {
+            // deferInject: 全量约定并入本轮; 否则至少附带短工作区提醒 (防临时 cwd)
+            const act = await activateLocalSessionUnlocked(localSessionId, { deferInject: true });
+            acpSessionId = act.acpSessionId;
+            const meta = getSession(localSessionId);
+            cwd = meta?.acpCwd ?? act.workDir ?? cwd;
+            if (act.setupText) {
+              promptText = `${act.setupText}\n\n——\n用户本轮请求：\n${text}`;
+              pendingFp = act.sysPromptFp;
+              snubyLog(
+                "session",
+                `inject merged into prompt local=${localSessionId} acp=${act.acpSessionId} setupLen=${act.setupText.length} userLen=${text.length} totalLen=${promptText.length}`,
+              );
+            } else if (act.reminderText) {
+              promptText = `${act.reminderText}\n\n——\n用户本轮请求：\n${text}`;
+              snubyLog(
+                "session",
+                `inject reminder into prompt local=${localSessionId} acp=${act.acpSessionId} reminderLen=${act.reminderText.length} userLen=${text.length}`,
+              );
+            } else {
+              snubyLog(
+                "session",
+                `inject none into prompt local=${localSessionId} acp=${act.acpSessionId} (unexpected: no setup/reminder)`,
+              );
+            }
+          } else {
+            snubyLog("session", `inject bypass local=default (no localSessionId)`);
+          }
+          try {
+            await prompt(
+              promptText,
+              (e) => {
+                if (clientGone) return;
+                safePush(e);
+                // 生产构建会 gzip。权限/结束这种短行会攒到流关闭才到达浏览器,
+                // 界面就只看见「正在执行」或弹窗和结束挤在同一帧。补填充迫使立即刷出。
+                if (e.type === "permission" || e.type === "done") {
+                  try {
+                    controller.enqueue(encoder.encode(`${" ".repeat(20 * 1024)}\n`));
+                  } catch {
+                    clientGone = true;
+                  }
+                }
+              },
+              {
+                timeoutMs,
+                acpSessionId,
+                cwd,
+                localSessionId,
+                bypassGlobalQueue: true,
+                onTimeout: () => {
+                  safePush({ type: "error", error: "任务超时（网关任务可能仍在执行）" });
+                },
+              },
+            );
+            if (localSessionId && pendingFp) {
+              updateSessionGateway(localSessionId, { sysPromptFp: pendingFp, sysPromptFailed: undefined });
+              snubyLog(
+                "session",
+                `inject commit ok local=${localSessionId} fp=${pendingFp}`,
+              );
+            }
+          } catch (e) {
+            if (localSessionId && pendingFp) {
+              updateSessionGateway(localSessionId, { sysPromptFailed: true });
+              snubyLog(
+                "session",
+                `inject commit fail local=${localSessionId}: ${(e as Error).message}`,
+              );
+            }
+            throw e;
+          }
+        });
+        const q = globalQueueSnapshot();
+        // AC-10: 前序 = 当前持锁会话 (若不是自己)
+        const aheadKey = q.activeKey && q.activeKey !== lockKey ? q.activeKey : null;
+        push({
+          type: "queued",
+          activeKey: q.activeKey,
+          activeTitle: titleOf(aheadKey ?? q.activeKey),
+          aheadKey,
+          aheadTitle: titleOf(aheadKey),
+          pendingKeys: q.pendingKeys,
+        });
+        await run;
       } catch (e) {
         push({ type: "error", error: (e as Error).message });
       } finally {

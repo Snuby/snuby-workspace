@@ -139,8 +139,7 @@ export default function SettingsPage() {
 
           <div className="mt-6 space-y-2">
             {[
-              ["数据更新方式", "手动触发（宏观「更新数据」/ 行情「更新行情」按钮）"],
-              ["数据来源", "国家统计局 · 中国人民银行 · 海关总署 · 中指研究院 等"],
+              ["用户数据", "~/snuby-workspace-data（主题库与 Agent 会话）"],
               ["版本", "v0.5"],
             ].map(([k, v]) => (
               <div

@@ -1,10 +1,10 @@
 // Spec: 017-site-tabs — 站内标签页/历史/配置的 SQLite 持久化 (infrastructure 层)
-// 与 sqlite-macro-repository 同模式: node:sqlite DatabaseSync, 零原生依赖。
-// 库文件 data/site_tabs.db (打包态: userData/data, 主进程 env SITE_TABS_DB_PATH)。
+// node:sqlite DatabaseSync, 零原生依赖。
+// 库文件默认 ~/snuby-workspace-data/site_tabs.db (SITE_TABS_DB_PATH / SNUBY_USER_DATA 可覆盖)。
 // 职责: 建表(幂等) + 每模块全量读取 + 站点组标签替换 + 历史追加裁剪 + 设置 upsert。
 
 import { DatabaseSync } from "node:sqlite";
-import path from "node:path";
+import { userDataPath } from "@/infrastructure/user-data-paths";
 
 export type SiteTabRow = { id: string; url: string; title: string };
 export type SiteHistoryRow = { url: string; title: string; closedAt: number };
@@ -29,8 +29,7 @@ let db: DatabaseSync | null = null;
 
 function getDb(): DatabaseSync {
   if (db) return db;
-  const dbPath =
-    process.env.SITE_TABS_DB_PATH ?? path.join(process.cwd(), "data", "site_tabs.db");
+  const dbPath = process.env.SITE_TABS_DB_PATH ?? userDataPath("site_tabs.db");
   db = new DatabaseSync(dbPath);
   db.exec(`
     CREATE TABLE IF NOT EXISTS site_tabs (

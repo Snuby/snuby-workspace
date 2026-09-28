@@ -4,7 +4,15 @@
 // 连接可视化: 网关发现 → 建连 → initialize → 会话, 分阶段可见状态
 // 协作演示: 发送任务, WorkBuddy 回复经 ACP SSE 流式渲染 (打字机效果)
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { useClickOutside } from "@/lib/use-click-outside";
 
 type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
@@ -29,10 +37,66 @@ type AgentStatus = {
     string,
     { id: string; name: string; description?: string; currentValue?: string; options?: { value: string; name: string; description?: string }[] }
   >;
-  usage?: { used: number; size: number };
+  usage?: {
+    used: number;
+    size: number;
+    lastPromptTokens?: number;
+    lastCompletionTokens?: number;
+    lastTotalTokens?: number;
+    sessionTotalTokens?: number;
+    lastCost?: number;
+    sessionCost?: number;
+  };
 };
 
-type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number };
+function fmtTokens(n: number | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function fmtCost(n: number | undefined): string {
+  if (n == null || !Number.isFinite(n) || n <= 0) return "";
+  return n >= 1 ? n.toFixed(2) : n.toFixed(3);
+}
+
+
+type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number; endTs?: number };
+
+const TOOL_DETAIL_MAX = 240;
+
+function clipToolDetail(s: string | undefined): string {
+  if (!s) return "";
+  return s.length > TOOL_DETAIL_MAX ? `${s.slice(0, TOOL_DETAIL_MAX)}…` : s;
+}
+
+/** 流式 tool 更新按 toolCallId 合并, 避免数千次 push 把历史撑爆 */
+function upsertTool(tools: ToolEv[], ev: { tool?: string; state?: string; detail?: string; toolCallId?: string }): void {
+  const id = ev.toolCallId ?? "";
+  const detail = clipToolDetail(ev.detail);
+  const now = Date.now();
+  const idx = id ? tools.findIndex((t) => t.toolCallId === id) : -1;
+  if (idx >= 0) {
+    const prev = tools[idx];
+    tools[idx] = {
+      ...prev,
+      tool: ev.tool || prev.tool,
+      state: ev.state || prev.state,
+      detail: detail || prev.detail,
+      endTs: now,
+    };
+    return;
+  }
+  tools.push({
+    tool: ev.tool ?? "",
+    state: ev.state ?? "",
+    detail,
+    toolCallId: id,
+    ts: now,
+    endTs: now,
+  });
+}
 /** 本地会话元信息 (磁盘持久化) */
 type SessionInfo = {
   id: string;
@@ -74,7 +138,7 @@ const UI_CACHE_MAX = 10;
 type StoredMsg = {
   role: "user" | "assistant";
   text: string;
-  tools?: { tool: string; detail?: string; toolCallId?: string; ts?: number }[];
+  tools?: { tool: string; state?: string; detail?: string; toolCallId?: string; ts?: number; endTs?: number }[];
   error?: boolean;
   interrupted?: boolean;
   ts: number;
@@ -89,10 +153,11 @@ function storedToMsg(m: StoredMsg): Msg {
     text: m.text,
     tools: (m.tools ?? []).map((t) => ({
       tool: t.tool,
-      state: "",
-      detail: t.detail ?? "",
+      state: t.state ?? "",
+      detail: clipToolDetail(t.detail),
       toolCallId: t.toolCallId ?? "",
       ts: t.ts ?? 0,
+      endTs: t.endTs ?? t.ts ?? 0,
     })),
     error: m.error,
     interrupted: m.interrupted,
@@ -133,12 +198,34 @@ type Msg = {
 };
 
 const PHASE_META: Record<Phase, { label: string; color: string; dot: string }> = {
-  idle: { label: "未检测到 WorkBuddy 网关", color: "bg-ink-faint/20 text-ink-faint", dot: "bg-ink-faint" },
+  idle: { label: "未连接", color: "bg-ink-faint/20 text-ink-faint", dot: "bg-ink-faint" },
   discovering: { label: "正在发现网关…", color: "bg-ink-faint/20 text-ink-faint", dot: "bg-ink-faint animate-pulse" },
   connecting: { label: "正在建立连接…", color: "bg-accent-soft text-accent-deep", dot: "bg-accent animate-pulse" },
   connected: { label: "已连接 WorkBuddy 网关", color: "bg-down-soft text-down", dot: "bg-down" },
   error: { label: "连接失败", color: "bg-up-soft text-up", dot: "bg-up" },
 };
+
+/** 徽章文案: idle 时区分「未发现」与「已发现但未连接」 */
+function phaseBadge(
+  phase: Phase,
+  discovered?: AgentStatus["discovered"],
+): { label: string; color: string; dot: string } {
+  if (phase === "idle") {
+    if (discovered) {
+      return {
+        label: "已检测到网关，未连接",
+        color: "bg-accent-soft text-accent-deep",
+        dot: "bg-accent",
+      };
+    }
+    return {
+      label: "未检测到 WorkBuddy 网关",
+      color: "bg-ink-faint/20 text-ink-faint",
+      dot: "bg-ink-faint",
+    };
+  }
+  return PHASE_META[phase];
+}
 
 const PRESET_TASKS = [
   "用一句话介绍你自己",
@@ -154,19 +241,82 @@ const CONFIG_LABEL: Record<string, string> = {
   multitask: "多任务",
 };
 
+/** 工具名 → 用户可读说明 */
+const TOOL_LABEL: Record<string, string> = {
+  Bash: "运行终端命令",
+  Shell: "运行终端命令",
+  WebFetch: "访问网页",
+  WebSearch: "搜索网页",
+  Read: "读取文件",
+  Write: "写入文件",
+  Edit: "编辑文件",
+  Glob: "查找文件",
+  Grep: "搜索文件内容",
+  AskUserQuestion: "向你提问",
+};
+
+function friendlyToolLabel(title: string): string {
+  const t = title.trim();
+  if (!t) return "使用工具";
+  if (TOOL_LABEL[t]) return TOOL_LABEL[t];
+  const key = Object.keys(TOOL_LABEL).find((k) => t.toLowerCase().includes(k.toLowerCase()));
+  return key ? TOOL_LABEL[key] : t;
+}
+
+function friendlyOptionLabel(o: { optionId: string; name: string; kind?: string }): string {
+  const id = `${o.optionId} ${o.kind ?? ""} ${o.name}`.toLowerCase();
+  if (/allow_always|allow-always|always/.test(id)) return "本会话始终允许";
+  if (/allow_once|allow-once|allow_session/.test(id) || /^allow$/.test(o.optionId)) return "允许一次";
+  if (/reject|deny|skip|取消|拒绝/.test(id)) return "拒绝";
+  // 网关已给中文名则直接用
+  if (/[\u4e00-\u9fff]/.test(o.name)) return o.name;
+  return o.name || o.optionId;
+}
+
 // 输入框自动撑开: 最多 MAX_ROWS 行, 超出才滚动
 const INPUT_MAX_ROWS = 6;
 const INPUT_LINE_H = 20; // 13px 字号 + line-height
 const INPUT_MAX_H = INPUT_MAX_ROWS * INPUT_LINE_H + 16; // 上下 padding py-2 = 16px
 
+/** 编辑框草稿: 按会话暂存, 切模块/切会话/面板重挂均可恢复 (不落盘到磁盘) */
+const INPUT_DRAFT_SS_KEY = "snuby.agent.inputDrafts";
+const inputDraftMem = new Map<string, string>();
+
+function readInputDraft(sid: string): string {
+  if (inputDraftMem.has(sid)) return inputDraftMem.get(sid) ?? "";
+  try {
+    const all = JSON.parse(sessionStorage.getItem(INPUT_DRAFT_SS_KEY) || "{}") as Record<string, string>;
+    const v = typeof all[sid] === "string" ? all[sid] : "";
+    inputDraftMem.set(sid, v);
+    return v;
+  } catch {
+    return "";
+  }
+}
+
+function writeInputDraft(sid: string, text: string): void {
+  inputDraftMem.set(sid, text);
+  try {
+    const raw = sessionStorage.getItem(INPUT_DRAFT_SS_KEY);
+    const all = (raw ? JSON.parse(raw) : {}) as Record<string, string>;
+    if (text) all[sid] = text;
+    else delete all[sid];
+    sessionStorage.setItem(INPUT_DRAFT_SS_KEY, JSON.stringify(all));
+  } catch {
+    // sessionStorage 不可用时仍保留内存暂存
+  }
+}
+
 export default function LocalAgentPanel() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [busy, setBusy] = useState(false);
-  const [restoring, setRestoring] = useState(false);
   const [input, setInput] = useState("");
-  const [msgs, setMsgs] = useState<Msg[]>([]);
-  /** 运行中的会话集合 (每个会话可独立并行跑一个任务) */
+  const inputValueRef = useRef("");
+  inputValueRef.current = input;  const [msgs, setMsgs] = useState<Msg[]>([]);
+  /** 运行中/排队中的会话 (全局串行: 同时可有多个 queued, 至多一个真正执行) */
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  /** 排队提示: sessionId -> 前序会话标题 */
+  const [queueHint, setQueueHint] = useState<Record<string, string | null>>({});
   /** 每个运行会话的流式累积状态: sessionId -> RunState */
   type RunState = {
     sessionId: string;
@@ -179,6 +329,8 @@ export default function LocalAgentPanel() {
     streaming: boolean;
     startedAt: number;
     ac: AbortController;
+    /** 仍在全局队列等待 (尚未收到 running) */
+    queued?: boolean;
   };
   const runsRef = useRef<Map<string, RunState>>(new Map());
   /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
@@ -191,10 +343,21 @@ export default function LocalAgentPanel() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [histLoaded, setHistLoaded] = useState(false);
+  /** 侧栏标题就地编辑 */
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const editTitleRef = useRef<HTMLInputElement | null>(null);
+  /** 侧栏 ⋯ 菜单 / 删除确认 */
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const sessionMenuRef = useRef<HTMLDivElement | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  useClickOutside(sessionMenuRef, menuFor !== null, () => setMenuFor(null));
   /** per-session 视图缓存 (AgentSessionRegistry 前端侧): sessionId -> SessionUi */
   const uiRef = useRef<Map<string, SessionUi>>(new Map());
   /** per-session 网关态: sessionId -> GatewayInfo (status 拆分: 非全局字段归会话) */
   const gwRef = useRef<Map<string, GatewayInfo>>(new Map());
+  /** 连接级共享: 模型/配置/用量 (单 ACP 连接, 新建会话继承, 避免模型选择消失) */
+  const sharedGwRef = useRef<GatewayInfo | null>(null);
   /** 当前激活会话的网关态视图 (渲染用) */
   const [gw, setGw] = useState<GatewayInfo | null>(null);
   /** 越界写入审计提示 (任务结束后检测到其他会话目录被写) */
@@ -228,6 +391,78 @@ export default function LocalAgentPanel() {
   const [sysDraft, setSysDraft] = useState("");
   const [sysSaving, setSysSaving] = useState(false);
   const sysLoadedRef = useRef(false);
+  /** 模型外其余会话配置 (权限/思考深度/沙箱等) 对话框 */
+  const [configOpen, setConfigOpen] = useState(false);
+  /** 网关工具权限请求 (Always Ask 时弹窗) */
+  const [permAsk, setPermAsk] = useState<{
+    requestId: string | number;
+    localSessionId: string;
+    toolTitle: string;
+    toolCallId?: string;
+    detail?: string;
+    options: { optionId: string; name: string; kind?: string }[];
+    /** 网关已结束本轮 (勿再应答), 弹窗留到用户关闭, 避免「闪一下消失」 */
+    stale?: boolean;
+    /** 网关已用该 stopReason 结束本轮 */
+    stopReason?: string;
+  } | null>(null);
+  const [permBusy, setPermBusy] = useState(false);
+  const permAnsweredRef = useRef(false);
+
+  // 任务运行中轮询未决权限 (NDJSON 在服务端阻塞等待时可能迟迟刷不出 permission 事件)
+  useEffect(() => {
+    if (runningIds.size === 0) return;
+    let alive = true;
+    const tick = async () => {
+      for (const sid of runningIds) {
+        if (!alive) return;
+        try {
+          const r = await fetch(`/api/agent/permission?localSessionId=${encodeURIComponent(sid)}`, {
+            cache: "no-store",
+          });
+          const j = (await r.json()) as {
+            pending?: {
+              requestId: string | number;
+              toolTitle: string;
+              toolCallId?: string;
+              detail?: string;
+              options: { optionId: string; name: string; kind?: string }[];
+            }[];
+          };
+          const p = j.pending?.[0];
+          if (p) {
+            setPermAsk((prev) => {
+              if (prev && prev.localSessionId === sid && String(prev.requestId) === String(p.requestId)) {
+                return prev.detail || !p.detail ? prev : { ...prev, detail: p.detail };
+              }
+              permAnsweredRef.current = false;
+              return {
+                requestId: p.requestId,
+                localSessionId: sid,
+                toolTitle: p.toolTitle,
+                toolCallId: p.toolCallId,
+                detail: p.detail,
+                options: p.options ?? [],
+              };
+            });
+            return;
+          }
+          setPermAsk((prev) => {
+            if (!prev || prev.localSessionId !== sid || prev.stale || permAnsweredRef.current) return prev;
+            return { ...prev, stale: true };
+          });
+        } catch {
+          // 忽略
+        }
+      }
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [runningIds]);
 
   // 挂载即加载工作约定: 发送时附加信息 / 打开编辑器都依赖它
   useEffect(() => {
@@ -307,6 +542,23 @@ export default function LocalAgentPanel() {
 
   const phase = status?.phase ?? "idle";
 
+  /** 把右键菜单里的 src 还原成可 fetch 的地址 (勿把 /Users/... 当同源路径) */
+  const resolveImageFetchUrl = (src: string): string => {
+    if (
+      src.startsWith("blob:") ||
+      src.startsWith("data:") ||
+      src.startsWith("/api/") ||
+      /^https?:\/\//i.test(src)
+    ) {
+      return src;
+    }
+    const cleaned = src.replace(/^file:\/\//, "");
+    if (cleaned.startsWith("/")) {
+      return `/api/local-file?path=${encodeURIComponent(cleaned)}`;
+    }
+    return src;
+  };
+
   /** 图片右键: 拦截 → 自定义菜单 (下载/复制); 非图片保留浏览器默认菜单 */
   const onCtxMenu = (e: React.MouseEvent) => {
     const t = e.target as HTMLElement;
@@ -316,73 +568,96 @@ export default function LocalAgentPanel() {
       return;
     }
     e.preventDefault();
+    e.stopPropagation();
     const src = img.getAttribute("src") ?? "";
-    let name = "";
+    const dataPath = img.getAttribute("data-local-path") ?? "";
+    let name = img.getAttribute("alt") || "";
     let real = src;
-    if (src.startsWith("/api/local-file")) {
+    if (dataPath) {
+      real = dataPath;
+      name = name || dataPath.split("/").pop() || "image.png";
+    } else if (src.startsWith("/api/local-file")) {
       try {
         real = decodeURIComponent(new URL(src, window.location.origin).searchParams.get("path") ?? src);
       } catch {
         real = src;
       }
-      name = real.split("/").pop() ?? "image";
+      name = name || real.split("/").pop() || "image.png";
+    } else if (src.startsWith("blob:")) {
+      name = name || "image.png";
+      real = src; // fetch blob: 直接可用
     } else {
-      name = new URL(src, window.location.origin).pathname.split("/").pop() ?? "image";
+      try {
+        name = name || new URL(src, window.location.origin).pathname.split("/").pop() || "image.png";
+      } catch {
+        name = name || "image.png";
+      }
     }
+    if (!/\.\w{2,5}$/i.test(name)) name = `${name}.png`;
     setCtxMenu({ x: e.clientX, y: e.clientY, src: real, name });
   };
 
-  /** 下载图片: 同源直接 fetch blob → a[download]; 跨域失败则新窗口打开 */
+  /** 下载图片: 同源/blob fetch → a[download]; 失败则新窗口打开 */
   const downloadImage = useCallback(async () => {
     const m = ctxMenu;
     if (!m) return;
     try {
-      const url = m.src.startsWith("/") || /^https?:\/\//i.test(m.src)
-        ? m.src
-        : `/api/local-file?path=${encodeURIComponent(m.src)}`;
+      const url = resolveImageFetchUrl(m.src);
       const r = await fetch(url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const blob = await r.blob();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = m.name;
+      a.download = m.name || "image.png";
       a.click();
       window.setTimeout(() => URL.revokeObjectURL(a.href), 3000);
       setCtxMenu(null);
+      setCtxToast("已开始下载");
+      window.setTimeout(() => setCtxToast(null), 2000);
     } catch {
       setCtxMenu(null);
-      window.open(m.src.startsWith("/") ? m.src : `file://${m.src}`, "_blank");
+      setCtxToast("下载失败");
+      window.setTimeout(() => setCtxToast(null), 2000);
+      try {
+        window.open(resolveImageFetchUrl(m.src), "_blank");
+      } catch {
+        /* ignore */
+      }
     }
   }, [ctxMenu]);
 
-  /** 复制图片: 同源 fetch → canvas 转 png → 写剪贴板 */
+  /** 复制图片: fetch → canvas 转 png → 写剪贴板 */
   const copyImage = useCallback(async () => {
     const m = ctxMenu;
     if (!m) return;
     try {
-      const url = m.src.startsWith("/") || /^https?:\/\//i.test(m.src)
-        ? m.src
-        : `/api/local-file?path=${encodeURIComponent(m.src)}`;
+      const url = resolveImageFetchUrl(m.src);
       const r = await fetch(url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const blob = await r.blob();
-      const img = new Image();
-      img.src = URL.createObjectURL(blob);
-      await new Promise<void>((res, rej) => {
-        img.onload = () => res();
-        img.onerror = () => rej(new Error("图片解码失败"));
-      });
-      const canvas = document.createElement("canvas");
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const cx = canvas.getContext("2d");
-      if (!cx) throw new Error("canvas 不可用");
-      cx.drawImage(img, 0, 0);
-      URL.revokeObjectURL(img.src);
-      const png = await new Promise<Blob>((res, rej) =>
-        canvas.toBlob((b) => (b ? res(b) : rej(new Error("转码失败"))), "image/png"),
-      );
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      // Chromium: image/png 可直接写剪贴板; 其它类型走 canvas 转 png
+      if (blob.type === "image/png") {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      } else {
+        const img = new Image();
+        const obj = URL.createObjectURL(blob);
+        img.src = obj;
+        await new Promise<void>((res, rej) => {
+          img.onload = () => res();
+          img.onerror = () => rej(new Error("图片解码失败"));
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const cx = canvas.getContext("2d");
+        if (!cx) throw new Error("canvas 不可用");
+        cx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(obj);
+        const png = await new Promise<Blob>((res, rej) =>
+          canvas.toBlob((b) => (b ? res(b) : rej(new Error("转码失败"))), "image/png"),
+        );
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      }
       setCtxMenu(null);
       setCtxToast("图片已复制到剪贴板");
       window.setTimeout(() => setCtxToast(null), 2000);
@@ -480,14 +755,32 @@ export default function LocalAgentPanel() {
     ];
     if (id === currentIdRef.current) setMsgs(u.msgs);
   };
-  /** 拉取某会话的 per-session 网关态 (模型/配置/用量/连接) */
+  /** 合并连接级网关态: 新建会话无缓存时继承 shared, 避免模型选择消失 */
+  const mergeGw = (incoming: GatewayInfo | null | undefined, fallback?: GatewayInfo | null): GatewayInfo => {
+    const base = fallback ?? sharedGwRef.current ?? {};
+    const g = incoming ?? {};
+    const hasCfg = !!g.sessionConfig && Object.keys(g.sessionConfig).length > 0;
+    const merged: GatewayInfo = {
+      ...base,
+      ...g,
+      sessionConfig: hasCfg ? g.sessionConfig : base.sessionConfig,
+      models: g.models?.length ? g.models : base.models,
+      usage: g.usage ?? base.usage,
+    };
+    if (merged.sessionConfig && Object.keys(merged.sessionConfig).length > 0) {
+      sharedGwRef.current = merged;
+    }
+    return merged;
+  };
+
+  /** 拉取网关态并写入会话缓存; 模型/配置按连接级合并继承 */
   const loadGw = async (id: string) => {
     try {
       const r = await fetch(`/api/agent/status?sid=${encodeURIComponent(id)}`, { cache: "no-store" });
       const j = (await r.json()) as { status: AgentStatus };
-      const g = toGw(j.status);
-      gwRef.current.set(id, g ?? {});
-      if (id === currentIdRef.current) setGw(g);
+      const merged = mergeGw(toGw(j.status));
+      gwRef.current.set(id, merged);
+      if (id === currentIdRef.current) setGw(merged);
     } catch {
       // 忽略; 下次激活/任务时再刷新
     }
@@ -553,7 +846,7 @@ export default function LocalAgentPanel() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  // 会话列表 + 最近会话历史 (磁盘持久化)
+  // 会话列表先亮出来; 最近会话历史异步加载, 不堵侧栏
   useEffect(() => {
     void (async () => {
       try {
@@ -561,16 +854,16 @@ export default function LocalAgentPanel() {
         const j = (await r.json()) as { sessions: SessionInfo[] };
         const list = j.sessions ?? [];
         setSessions(list);
+        setHistLoaded(true);
         if (list.length) {
           setCurrentId(list[0].id);
-          await loadIntoUi(list[0].id, { scroll: true });
+          void loadIntoUi(list[0].id, { scroll: true });
         } else {
-          await createLocalSession();
+          void createLocalSession();
         }
       } catch {
-        // 网络失败忽略, 面板仍可连接后新建
+        setHistLoaded(true);
       }
-      setHistLoaded(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -581,6 +874,8 @@ export default function LocalAgentPanel() {
       const r = await fetch("/api/agent/sessions", { method: "POST" });
       const j = (await r.json()) as { session: SessionInfo };
       setSessions((x) => [j.session, ...x]);
+      // 同步 ref, 避免紧接着 loadGw 时仍指向旧会话导致 setGw 被跳过
+      currentIdRef.current = j.session.id;
       setCurrentId(j.session.id);
       ++loadSeqRef.current;
       const u = uiOf(j.session.id);
@@ -592,41 +887,119 @@ export default function LocalAgentPanel() {
       setMsgs([]);
       setMsgCursor(null);
       setHasMoreMsgs(false);
+      // 继承连接级模型/配置, 再拉一次状态 (新建会话本身没有独立网关态)
+      const seeded = mergeGw(null, sharedGwRef.current ?? gw);
+      gwRef.current.set(j.session.id, seeded);
+      setGw(seeded);
+      if (phase === "connected") void loadGw(j.session.id);
     } catch {
       // 落盘失败不阻塞本地会话
     }
   };
 
-  /** 切换本地会话: 缓存优先 (已加载不重拉), 恢复网关上下文 + 拉取 per-session 网关态 */
+  /** 切换本地会话: 纯视图操作 (AC-7) — 不触发网关 activate/load; 对齐仅在发送时 */
   const switchSession = async (id: string) => {
     if (id === currentId) return;
+    currentIdRef.current = id;
     setCurrentId(id);
-    // 恢复会话上下文期间禁止发送, 避免「首问卡 …」: 切会话后的第一次发送要付 loadSession 成本
-    setRestoring(true);
+    // 先展示已有/继承的网关态, 避免切换瞬间模型选择消失
+    const cached = gwRef.current.get(id);
+    setGw(mergeGw(cached ?? null, sharedGwRef.current ?? gw));
+    await loadIntoUi(id, { scroll: true });
+    // 仅刷新网关态缓存 (status?sid=, 只读, 不改网关活动会话)
+    if (phase === "connected") void loadGw(id);
+  };
+
+  /** 开始编辑会话标题 */
+  const beginRename = (id: string, title: string) => {
+    setEditingTitleId(id);
+    setEditTitle(title);
+    requestAnimationFrame(() => {
+      editTitleRef.current?.focus();
+      editTitleRef.current?.select();
+    });
+  };
+
+  /** 提交重命名; 空标题视为取消 */
+  const commitRename = async (id: string) => {
+    const next = editTitle.trim();
+    setEditingTitleId(null);
+    const prev = sessions.find((s) => s.id === id)?.title ?? "";
+    if (!next || next === prev) return;
+    // 乐观更新
+    setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: next } : s)));
     try {
-      await loadIntoUi(id, { scroll: true });
-      // 已连接时激活该会话绑定的网关会话 (session/load 恢复上下文, 使 WorkBuddy 记得之前对话)
-      // 后台 fire-and-forget: 不阻塞 UI; 首条消息发送时 prompt 内部会排队对齐同一连接, 不会串台
-      if (phase === "connected") {
-        void fetch(`/api/agent/sessions/${id}/activate`, { method: "POST" }).catch(() => {
-          // 激活失败不阻塞; 下次发送时 prompt 内部会再对齐
-        });
-        void loadGw(id);
-        void refresh();
+      const r = await fetch(`/api/agent/sessions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: next }),
+      });
+      if (!r.ok) {
+        setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: prev } : s)));
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        alert(j.error ?? "重命名失败");
+        return;
       }
-    } finally {
-      setRestoring(false);
+      const j = (await r.json()) as { session?: SessionInfo };
+      if (j.session?.title) {
+        setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: j.session!.title } : s)));
+      }
+    } catch {
+      setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: prev } : s)));
+      alert("重命名失败：本地服务无响应");
     }
   };
 
-  /** 删除本地会话 (磁盘+列表); 删当前则切到最近会话 */
-  const removeSession = async (id: string) => {
-    try {
-      await fetch(`/api/agent/sessions/${id}`, { method: "DELETE" });
-    } catch {
-      // 忽略
+  /** 打开删除确认 (AC-9: 运行/排队中拦截) */
+  const askRemoveSession = (id: string) => {
+    setMenuFor(null);
+    if (runningIds.has(id) || runsRef.current.has(id)) {
+      alert("会话任务进行中或排队中，请先停止/取消后再删除");
+      return;
     }
-    const rest = sessions.filter((x) => x.id !== id);
+    setDeleteConfirmId(id);
+  };
+
+  /** 确认后删除本地会话 */
+  const removeSession = async (id: string) => {
+    setDeleteConfirmId(null);
+    if (runningIds.has(id) || runsRef.current.has(id)) {
+      alert("会话任务进行中或排队中，请先停止/取消后再删除");
+      return;
+    }
+    try {
+      const r = await fetch(`/api/agent/sessions/${id}`, { method: "DELETE" });
+      if (r.status === 409) {
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        alert(j.error ?? "会话忙碌中，无法删除");
+        return;
+      }
+      if (!r.ok) {
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        alert(j.error ?? "删除失败");
+        return;
+      }
+    } catch {
+      alert("删除失败：本地服务无响应");
+      return;
+    }
+    uiRef.current.delete(id);
+    gwRef.current.delete(id);
+    setQueueHint((prev) => {
+      if (!(id in prev)) return prev;
+      const n = { ...prev };
+      delete n[id];
+      return n;
+    });
+    // 以服务端列表为准, 避免本地过滤与磁盘不一致
+    let rest = sessions.filter((x) => x.id !== id);
+    try {
+      const lr = await fetch("/api/agent/sessions", { cache: "no-store" });
+      const lj = (await lr.json()) as { sessions?: SessionInfo[] };
+      if (Array.isArray(lj.sessions)) rest = lj.sessions;
+    } catch {
+      // 用本地过滤结果
+    }
     setSessions(rest);
     if (id === currentId) {
       if (rest.length) void switchSession(rest[0].id);
@@ -634,7 +1007,25 @@ export default function LocalAgentPanel() {
     }
   };
 
-  /** 落盘一条消息到指定会话 */
+  /** 对话后把该会话顶到列表前 (与服务端 updatedAt 排序一致) */
+  const bumpSessionActivity = (sid: string, userText?: string) => {
+    const now = Date.now();
+    setSessions((list) => {
+      const next = list.map((s) => {
+        if (s.id !== sid) return s;
+        let title = s.title;
+        // 与 appendMessage 同规则: 默认「会话 …」标题用首条用户消息截断
+        if (userText && (title.startsWith("会话 ") || title.startsWith("「"))) {
+          const t = userText.replace(/\s+/g, " ").trim();
+          if (t) title = t.length > 24 ? `${t.slice(0, 24)}…` : t;
+        }
+        return { ...s, updatedAt: now, title };
+      });
+      return next.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  };
+
+  /** 落盘一条消息到指定会话 (tools 仅内存展示, 不写盘) */
   const persist = (sid: string, role: "user" | "assistant", msg: Partial<Msg>) => {
     if (!sid) return;
     void fetch(`/api/agent/sessions/${sid}/messages`, {
@@ -643,13 +1034,35 @@ export default function LocalAgentPanel() {
       body: JSON.stringify({
         role,
         text: msg.text ?? "",
-        tools: msg.tools,
         error: msg.error,
         interrupted: msg.interrupted,
         ts: Date.now(),
         extra: msg.extra,
       }),
     });
+    bumpSessionActivity(sid, role === "user" ? msg.text : undefined);
+  };
+
+  /** 在系统文件管理器中打开当前会话工作目录 */
+  const openSessionFolder = async () => {
+    const cwd = sessions.find((s) => s.id === currentId)?.acpCwd;
+    if (!cwd) {
+      setCtxToast("当前会话尚无工作目录");
+      window.setTimeout(() => setCtxToast(null), 2000);
+      return;
+    }
+    try {
+      const r = await fetch("/api/agent/open-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: cwd }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    } catch (e) {
+      setCtxToast(e instanceof Error ? e.message : "打开文件夹失败");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    }
   };
 
   /** 渐进加载: 拉取当前会话更早的历史 (IM 式上拉) */
@@ -714,8 +1127,29 @@ export default function LocalAgentPanel() {
     setBusy(true);
     setStatus((s) => ({ ...(s ?? {}), phase: "connecting" }) as AgentStatus);
     try {
+      // AC-8: 重连前中断本地仍在跑的展示流 (不静默重放)
+      for (const [sid, run] of [...runsRef.current.entries()]) {
+        run.interrupted = true;
+        run.streaming = false;
+        run.ac.abort();
+        commitMsgs(sid, (all) =>
+          all.map((m) =>
+            m.id === run.msgId
+              ? { ...m, streaming: false, interrupted: true, text: run.text, finishedAt: Date.now() }
+              : m,
+          ),
+        );
+        persist(sid, "assistant", { text: run.text, tools: run.tools, interrupted: true });
+        runsRef.current.delete(sid);
+      }
+      setRunningIds(new Set());
+      setQueueHint({});
+
       const r = await fetch("/api/agent/connect", { method: "POST" });
-      const j = (await r.json()) as { status: AgentStatus };
+      const j = (await r.json()) as {
+        status: AgentStatus;
+        interruptedLocalIds?: string[];
+      };
       setStatus(j.status);
       if (currentIdRef.current) void loadGw(currentIdRef.current);
     } catch {
@@ -728,20 +1162,28 @@ export default function LocalAgentPanel() {
   const send = async (text?: string) => {
     const sid = currentId;
     const task = (text ?? input).trim();
-    if (!task || !sid || runningIds.has(sid) || restoring) return;
+    if (!task || !sid || runningIds.has(sid)) return;
     setInput("");
+    writeInputDraft(sid, "");
     setRunningIds((prev) => new Set(prev).add(sid));
     const id = Date.now();
-    // 自动附带信息 (排障用): 工作约定 / 会话工作目录 / 当前模型
+    // extra 仅 UI/落盘排障用, 不会发给网关。勿塞「工作约定」全文:
+    // 约定只在 activate 时注入一次; 若写入每条 messages.jsonl, Agent 读历史会反复看到并易卡在 Read。
     const extra: { title: string; text: string }[] = [];
-    if (sysText.trim()) extra.push({ title: "工作约定", text: sysText.trim() });
     const cwd = sessions.find((sd) => sd.id === sid)?.acpCwd ?? "";
     if (cwd) extra.push({ title: "会话工作目录", text: cwd });
     const mdl = gwRef.current.get(sid)?.sessionConfig?.model?.currentValue;
     if (mdl) extra.push({ title: "会话模型", text: mdl });
-    commitMsgs(sid, (prev) => [...prev, { id, role: "user", text: task, ts: id, extra }]);
-    persist(sid, "user", { text: task, extra });
-    const agentMsg: Msg = { id: id + 1, role: "agent", text: "", streaming: true, startedAt: Date.now(), ts: Date.now() };
+    commitMsgs(sid, (prev) => [...prev, { id, role: "user", text: task, ts: id, extra: extra.length ? extra : undefined }]);
+    persist(sid, "user", { text: task, ...(extra.length ? { extra } : {}) });
+    const agentMsg: Msg = {
+      id: id + 1,
+      role: "agent",
+      text: "",
+      streaming: true,
+      startedAt: Date.now(),
+      ts: Date.now(),
+    };
     commitMsgs(sid, (prev) => [...prev, agentMsg]);
     const ac = new AbortController();
     const run: RunState = {
@@ -753,9 +1195,9 @@ export default function LocalAgentPanel() {
       streaming: true,
       startedAt: Date.now(),
       ac,
+      queued: true,
     };
     runsRef.current.set(sid, run);
-    // update: 更新 run 累积; 写会话缓存 (激活会话自动同步渲染, 切走只落缓存)
     const update = (fn: (r: RunState) => void) => {
       fn(run);
       commitMsgs(sid, (all) =>
@@ -777,7 +1219,7 @@ export default function LocalAgentPanel() {
       const res = await fetch("/api/agent/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: task, localSessionId: currentId ?? undefined }),
+        body: JSON.stringify({ text: task, localSessionId: sid }),
         signal: ac.signal,
       });
       if (!res.ok || !res.body) throw new Error("任务启动失败");
@@ -793,13 +1235,66 @@ export default function LocalAgentPanel() {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           if (!line.trim()) continue;
-          let ev: { type: string; text?: string; tool?: string; state?: string; detail?: string; toolCallId?: string; error?: string };
+          let ev: {
+            type: string;
+            text?: string;
+            tool?: string;
+            state?: string;
+            detail?: string;
+            toolCallId?: string;
+            error?: string;
+            aheadTitle?: string | null;
+            aheadKey?: string | null;
+            requestId?: string | number;
+            toolTitle?: string;
+            stopReason?: string;
+            options?: { optionId: string; name: string; kind?: string }[];
+            usage?: AgentStatus["usage"];
+          };
           try {
             ev = JSON.parse(line);
           } catch {
             continue;
           }
-          if (ev.type === "chunk") {
+          if (ev.type === "usage" && ev.usage) {
+            for (const [id, prev] of gwRef.current) {
+              gwRef.current.set(id, { ...prev, usage: ev.usage });
+            }
+            if (currentIdRef.current) {
+              setGw((g) => ({ ...(g ?? {}), usage: ev.usage }));
+            }
+            continue;
+          }
+          if (ev.type === "permission" && ev.requestId != null) {
+            permAnsweredRef.current = false;
+            setPermAsk({
+              requestId: ev.requestId,
+              localSessionId: sid,
+              toolTitle: ev.toolTitle || "工具请求权限",
+              toolCallId: ev.toolCallId,
+              detail: ev.detail,
+              options: ev.options ?? [],
+            });
+            continue;
+          }
+          if (ev.type === "queued") {
+            run.queued = true;
+            const hint =
+              ev.aheadTitle && ev.aheadKey
+                ? `排队中（前序：会话「${ev.aheadTitle}」）`
+                : "排队中…";
+            setQueueHint((prev) => ({ ...prev, [sid]: hint }));
+            update((r) => {
+              if (!r.text) r.text = "";
+            });
+          } else if (ev.type === "running") {
+            run.queued = false;
+            setQueueHint((prev) => {
+              const n = { ...prev };
+              delete n[sid];
+              return n;
+            });
+          } else if (ev.type === "chunk") {
             update((r) => {
               r.text += ev.text ?? "";
               r.thinking = false;
@@ -810,20 +1305,24 @@ export default function LocalAgentPanel() {
             });
           } else if (ev.type === "tool") {
             update((r) => {
-              r.tools.push({
-                tool: ev.tool ?? "",
-                state: ev.state ?? "",
-                detail: ev.detail ?? "",
-                toolCallId: ev.toolCallId ?? "",
-                ts: Date.now(),
-              });
+              upsertTool(r.tools, ev);
             });
           } else if (ev.type === "done") {
+            if (permAnsweredRef.current) {
+              setPermAsk((p) => (p?.localSessionId === sid ? null : p));
+            } else {
+              setPermAsk((p) =>
+                p?.localSessionId === sid ? { ...p, stale: true, stopReason: ev.stopReason } : p,
+              );
+            }
             update((r) => {
               r.streaming = false;
               r.thinking = false;
             });
           } else if (ev.type === "error") {
+            if (permAnsweredRef.current) {
+              setPermAsk((p) => (p?.localSessionId === sid ? null : p));
+            }
             update((r) => {
               r.streaming = false;
               r.error = true;
@@ -832,6 +1331,7 @@ export default function LocalAgentPanel() {
           }
         }
       }
+      void loadGw(sid);
     } catch (e) {
       if ((e as Error).name !== "AbortError") {
         update((r) => {
@@ -852,18 +1352,30 @@ export default function LocalAgentPanel() {
         n.delete(sid);
         return n;
       });
-      // 最终状态写会话缓存 (标记结束); 激活会话自动同步渲染
+      setQueueHint((prev) => {
+        const n = { ...prev };
+        delete n[sid];
+        return n;
+      });
       commitMsgs(sid, (all) =>
         all.map((m) =>
           m.id === agentMsg.id
-            ? { ...m, text: run.text, tools: run.tools, error: run.error, streaming: false, thinking: false, finishedAt: Date.now() }
+            ? {
+                ...m,
+                text: run.text,
+                tools: run.tools,
+                error: run.error,
+                interrupted: run.interrupted,
+                streaming: false,
+                thinking: false,
+                finishedAt: Date.now(),
+              }
             : m,
         ),
       );
       if (run.interrupted) persist(sid, "assistant", { text: run.text, tools: run.tools, interrupted: true });
       else if (run.error) persist(sid, "assistant", { text: run.text, tools: run.tools, error: true });
       else if (run.text.trim()) persist(sid, "assistant", { text: run.text, tools: run.tools });
-      // 越界写入审计 (软隔离兜底): 任务刚结束, 检查是否写到了其他会话目录
       void (async () => {
         try {
           const ar = await fetch("/api/agent/audit", {
@@ -873,7 +1385,9 @@ export default function LocalAgentPanel() {
           });
           const aj = (await ar.json()) as { violations?: { path: string; mtime: number; size: number }[] };
           if (aj.violations?.length) {
-            setAuditWarn(`⚠ 检测到 ${aj.violations.length} 处工作区越界写入: WorkBuddy 可能读写到了其他会话目录（见控制台/审计接口）`);
+            setAuditWarn(
+              `⚠ 检测到 ${aj.violations.length} 处工作区越界写入: WorkBuddy 可能读写到了其他会话目录（见控制台/审计接口）`,
+            );
           } else {
             setAuditWarn(null);
           }
@@ -888,6 +1402,7 @@ export default function LocalAgentPanel() {
     const sid = currentId;
     const run = sid ? runsRef.current.get(sid) : undefined;
     run?.ac.abort();
+    setPermAsk(null);
     try {
       await fetch("/api/agent/cancel", {
         method: "POST",
@@ -896,6 +1411,39 @@ export default function LocalAgentPanel() {
       });
     } catch {
       // 忽略
+    }
+  };
+
+  /** 应答网关 session/request_permission */
+  const answerPermission = async (optionId: string | null) => {
+    if (!permAsk || permBusy) return;
+    if (permAsk.stale) {
+      setPermAsk(null);
+      return;
+    }
+    setPermBusy(true);
+    permAnsweredRef.current = true;
+    let expired = false;
+    try {
+      const res = await fetch("/api/agent/permission", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          localSessionId: permAsk.localSessionId,
+          requestId: permAsk.requestId,
+          ...(optionId ? { optionId } : { cancelled: true }),
+        }),
+      });
+      if (res.status === 404) {
+        expired = true;
+        permAnsweredRef.current = false;
+      }
+    } catch {
+      // 网络失败: 服务端超时后会自行 cancelled
+    } finally {
+      setPermBusy(false);
+      if (expired) setPermAsk((p) => (p ? { ...p, stale: true } : p));
+      else setPermAsk(null);
     }
   };
 
@@ -911,12 +1459,13 @@ export default function LocalAgentPanel() {
       });
       const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
       if (j.ok && j.status) {
-        // status 拆分: 全局只取 phase/错误, 网关态写入当前会话
+        // 全局偏好: 所有会话缓存同步模型当前值
         setStatus((s) => ({ ...(s ?? {}), phase: j.status?.phase ?? "connected", lastError: j.status?.lastError }));
-        const g = toGw(j.status);
+        const merged = mergeGw(toGw(j.status));
+        for (const id of gwRef.current.keys()) gwRef.current.set(id, merged);
         if (currentId) {
-          gwRef.current.set(currentId, g ?? {});
-          setGw(g);
+          gwRef.current.set(currentId, merged);
+          setGw(merged);
         }
       } else alert(j.error ?? "切换模型失败");
     } catch {
@@ -926,7 +1475,7 @@ export default function LocalAgentPanel() {
     }
   };
 
-  /** 通用配置项: POST /api/agent/set-config (权限模式/思考深度/沙箱) */
+  /** 通用配置项: POST /api/agent/set-config (权限模式/思考深度/沙箱) — 全局共享 */
   const applyConfig = async (configId: string, value: string) => {
     if (!value) return;
     setBusy(true);
@@ -938,12 +1487,12 @@ export default function LocalAgentPanel() {
       });
       const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
       if (j.ok && j.status) {
-        // status 拆分: 全局只取 phase/错误, 网关态写入当前会话
         setStatus((s) => ({ ...(s ?? {}), phase: j.status?.phase ?? "connected", lastError: j.status?.lastError }));
-        const g = toGw(j.status);
+        const merged = mergeGw(toGw(j.status));
+        for (const id of gwRef.current.keys()) gwRef.current.set(id, merged);
         if (currentId) {
-          gwRef.current.set(currentId, g ?? {});
-          setGw(g);
+          gwRef.current.set(currentId, merged);
+          setGw(merged);
         }
       } else alert(j.error ?? "设置失败");
     } catch {
@@ -966,6 +1515,18 @@ export default function LocalAgentPanel() {
     if (followRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs]);
 
+  // 按会话恢复/切换草稿; 卸载时再写一次防丢
+  useEffect(() => {
+    if (currentId) setInput(readInputDraft(currentId));
+    else setInput("");
+  }, [currentId]);
+  useEffect(() => {
+    return () => {
+      const sid = currentIdRef.current;
+      if (sid) writeInputDraft(sid, inputValueRef.current);
+    };
+  }, []);
+
   // 输入框自动撑高: 内容增高 → 高度跟随, 达到上限后滚动
   useEffect(() => {
     const el = taRef.current;
@@ -974,7 +1535,7 @@ export default function LocalAgentPanel() {
     el.style.height = `${Math.min(el.scrollHeight, INPUT_MAX_H)}px`;
   }, [input]);
 
-  const pm = PHASE_META[phase];
+  const pm = phaseBadge(phase, status?.discovered);
   const caps = status?.capabilities;
 
   return (
@@ -1023,6 +1584,105 @@ export default function LocalAgentPanel() {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {/* 已连接: 模型选择放状态行右侧; 其余配置进对话框 */}
+          {phase === "connected" && (gw?.sessionConfig || gw?.models?.length) ? (
+            <>
+              {gw.usage &&
+              (gw.usage.lastTotalTokens ||
+                gw.usage.sessionTotalTokens ||
+                gw.usage.used ||
+                gw.usage.lastCost) ? (
+                <span
+                  className="hidden max-w-[280px] truncate text-[11px] tabular-nums text-ink-muted sm:inline"
+                  title={
+                    [
+                      gw.usage.lastPromptTokens != null
+                        ? `本轮提示 ${fmtTokens(gw.usage.lastPromptTokens)}`
+                        : null,
+                      gw.usage.lastCompletionTokens != null
+                        ? `本轮补全 ${fmtTokens(gw.usage.lastCompletionTokens)}`
+                        : null,
+                      gw.usage.sessionTotalTokens != null
+                        ? `本连接累计 ${fmtTokens(gw.usage.sessionTotalTokens)}`
+                        : null,
+                      gw.usage.size > 0
+                        ? `上下文 ${fmtTokens(gw.usage.used)} / ${fmtTokens(gw.usage.size)}`
+                        : gw.usage.lastPromptTokens != null
+                          ? `上下文 ${fmtTokens(gw.usage.lastPromptTokens)}`
+                          : null,
+                      gw.usage.lastCost != null && gw.usage.lastCost > 0
+                        ? `cost ${fmtCost(gw.usage.lastCost)}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "Token 用量"
+                  }
+                >
+                  Token{" "}
+                  <b className="font-semibold text-ink">
+                    {fmtTokens(gw.usage.lastTotalTokens ?? gw.usage.used)}
+                  </b>
+                  {gw.usage.sessionTotalTokens != null &&
+                  gw.usage.sessionTotalTokens !== (gw.usage.lastTotalTokens ?? gw.usage.used) ? (
+                    <span className="text-ink-faint"> · 累计 {fmtTokens(gw.usage.sessionTotalTokens)}</span>
+                  ) : null}
+                  {gw.usage.size > 0 ? (
+                    <span className="text-ink-faint">
+                      {" "}
+                      · 上下文 {fmtTokens(gw.usage.used)}/{fmtTokens(gw.usage.size)}
+                    </span>
+                  ) : gw.usage.lastPromptTokens != null ? (
+                    <span className="text-ink-faint"> · 上下文 {fmtTokens(gw.usage.lastPromptTokens)}</span>
+                  ) : null}
+                  {fmtCost(gw.usage.lastCost) ? (
+                    <span className="text-ink-faint"> · cost {fmtCost(gw.usage.lastCost)}</span>
+                  ) : null}
+                </span>
+              ) : null}
+              <CtlSelect
+                value={gw.sessionConfig?.model?.currentValue ?? ""}
+                options={
+                  gw.models?.map((m) => ({
+                    value: m.modelId,
+                    label: `${m.name}${m.description ? ` · ${m.description}` : ""}`,
+                  })) ??
+                  gw.sessionConfig?.model?.options?.map((o) => ({
+                    value: o.value,
+                    label: o.name || o.value,
+                  })) ??
+                  []
+                }
+                disabled={busy}
+                onChange={(v) => void applyModel(v)}
+                title="切换会话模型"
+              />
+              <button
+                type="button"
+                aria-label="ACP 参数"
+                title="ACP 参数（权限模式 / 思考深度 / 沙箱等）"
+                onClick={() => setConfigOpen(true)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" />
+                </svg>
+              </button>
+            </>
+          ) : null}
+          {/* 打开会话工作目录 (Finder / 资源管理器) */}
+          <button
+            type="button"
+            aria-label="打开工作目录"
+            title={docHints[0] ? `打开工作目录\n${docHints[0]}` : "打开工作目录"}
+            disabled={!docHints[0]}
+            onClick={() => void openSessionFolder()}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+            </svg>
+          </button>
           {/* 工作约定按钮: 查看/编辑全局工作约定 (激活会话时注入给 WorkBuddy) */}
           <button
             type="button"
@@ -1038,7 +1698,7 @@ export default function LocalAgentPanel() {
               <path d="M9 16h4" />
             </svg>
           </button>
-          {/* 状态信息按钮: 点击展示连接/会话/能力详情 */}
+          {/* 状态信息按钮: 未连接也可查看发现态 (进程/心跳); 已连接再补会话与能力 */}
           <div className="relative">
             <button
               type="button"
@@ -1049,13 +1709,13 @@ export default function LocalAgentPanel() {
             >
               <IconInfo className="h-[15px] w-[15px]" />
             </button>
-            {infoOpen && phase === "connected" && status ? (
+            {infoOpen ? (
               <div
                 ref={infoRef}
                 className="absolute right-0 top-[36px] z-50 w-[360px] rounded-lg border border-line bg-white p-3.5 shadow-xl"
               >
                 <div className="mb-2 flex items-center justify-between">
-                  <span className="text-[12.5px] font-semibold text-ink">网关连接信息</span>
+                  <span className="text-[12.5px] font-semibold text-ink">网关状态</span>
                   <button
                     type="button"
                     aria-label="关闭信息"
@@ -1069,23 +1729,34 @@ export default function LocalAgentPanel() {
                   </button>
                 </div>
                 <div className="space-y-1.5 text-[11.5px]">
-                  {status.discovered ? (
+                  <InfoRow label="连接状态" value={pm.label} />
+                  {status?.discovered ? (
                     <>
                       <InfoRow label="网关进程" value={`${status.discovered.pid} · 127.0.0.1:${status.discovered.port}`} mono />
-                      <InfoRow label="心跳" value={`${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`} />
+                      <InfoRow
+                        label="心跳"
+                        value={
+                          status.discovered.heartbeatMsAgo < 600_000
+                            ? `${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`
+                            : "未知"
+                        }
+                      />
                     </>
-                  ) : null}
-                  {gw?.connectionIdMasked ? (
+                  ) : (
+                    <InfoRow label="发现" value="未找到 ~/.workbuddy/sessions 存活网关" />
+                  )}
+                  {phase === "connected" && gw?.connectionIdMasked ? (
                     <InfoRow label="连接 ID" value={gw.connectionIdMasked} mono />
                   ) : null}
-                  {gw?.protocolVersion ? (
+                  {phase === "connected" && gw?.protocolVersion ? (
                     <InfoRow label="协议版本" value={`v${gw.protocolVersion}`} />
                   ) : null}
-                  {gw?.acpSessionId ? (
+                  {phase === "connected" && gw?.acpSessionId ? (
                     <InfoRow label="ACP 会话" value={`${gw.acpSessionId.slice(0, 8)}…${gw.acpSessionId.slice(-4)}`} mono />
                   ) : null}
+                  {status?.lastError ? <InfoRow label="最近错误" value={status.lastError} /> : null}
                 </div>
-                {caps ? (
+                {phase === "connected" && caps ? (
                   <div className="mt-2.5 border-t border-line pt-2">
                     <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-wider text-ink-faint">
                       网关能力
@@ -1133,49 +1804,6 @@ export default function LocalAgentPanel() {
           )}
         </div>
       </div>
-      {/* ── 会话设置条 (模型 + 动态配置项 + 用量) ── */}
-      {phase === "connected" && gw?.sessionConfig && (
-        <div className="border-b border-line bg-surface px-4 py-2">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px]">
-            <CtlSelect
-              label="模型"
-              value={gw.sessionConfig.model?.currentValue ?? ""}
-              options={
-                gw.models?.map((m) => ({
-                  value: m.modelId,
-                  label: `${m.name}${m.description ? ` · ${m.description}` : ""}`,
-                })) ?? []
-              }
-              disabled={busy}
-              onChange={(v) => void applyModel(v)}
-              title="切换会话模型 (session/set_model)"
-            />
-            {/* 动态渲染网关暴露的其他 select 配置项 (options 非空), 新增项自动出现 */}
-            {Object.entries(gw.sessionConfig)
-              .filter(([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0)
-              .map(([id, c]) => (
-                <CtlSelect
-                  key={id}
-                  label={CONFIG_LABEL[id] ?? c.name}
-                  value={c.currentValue ?? ""}
-                  options={(c.options ?? []).map((o) => ({
-                    value: o.value,
-                    label: `${o.name}${o.description ? ` · ${o.description}` : ""}`,
-                  }))}
-                  disabled={busy}
-                  onChange={(v) => void applyConfig(id, v)}
-                  title={c.description ?? undefined}
-                />
-              ))}
-            {gw.usage ? (
-              <span className="ml-auto tabular-nums text-ink-faint" title={`token 用量 ${gw.usage.used} / ${gw.usage.size}`}>
-                用量 {(gw.usage.used / 1000).toFixed(1)}k / {(gw.usage.size / 1000).toFixed(0)}k
-              </span>
-            ) : null}
-          </div>
-        </div>
-      )}
-
       <div className="flex min-h-0 flex-1">
 
       {/* ── 会话侧栏 (磁盘持久化的本地会话) ── */}
@@ -1206,35 +1834,102 @@ export default function LocalAgentPanel() {
                 key={sd.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => void switchSession(sd.id)}
-                onKeyDown={(e) => e.key === "Enter" && void switchSession(sd.id)}
+                onClick={() => {
+                  if (editingTitleId === sd.id) return;
+                  void switchSession(sd.id);
+                }}
+                onKeyDown={(e) => {
+                  if (editingTitleId === sd.id) return;
+                  if (e.key === "Enter") void switchSession(sd.id);
+                }}
                 className={`group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] ${
                   sd.id === currentId ? "bg-accent-soft font-medium text-accent-deep" : "text-ink hover:bg-black/5"
                 }`}
-                title={sd.title}
+                title={editingTitleId === sd.id ? undefined : `${sd.title}\n悬停右侧 ⋯ 可重命名或删除`}
               >
-                <span className="min-w-0 flex-1 truncate">{sd.title}</span>
+                {editingTitleId === sd.id ? (
+                  <input
+                    ref={editTitleRef}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void commitRename(sd.id);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setEditingTitleId(null);
+                      }
+                    }}
+                    onBlur={() => void commitRename(sd.id)}
+                    className="min-w-0 flex-1 rounded border border-accent/40 bg-white px-1 py-0.5 text-[12.5px] font-medium text-ink outline-none"
+                  />
+                ) : (
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      beginRename(sd.id, sd.title);
+                    }}
+                  >
+                    {sd.title}
+                  </span>
+                )}
                 {runningIds.has(sd.id) && (
                   <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-accent">
                     <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-                    运行中
+                    {queueHint[sd.id] ? "排队中" : "运行中"}
                   </span>
                 )}
                 <span className="shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtRel(sd.updatedAt)}</span>
-                <button
-                  type="button"
-                  aria-label={`删除会话 ${sd.title}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void removeSession(sd.id);
-                  }}
-                  className="hidden h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-red-500 group-hover:flex"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3 w-3">
-                    <path d="M6 6l12 12" />
-                    <path d="M18 6L6 18" />
-                  </svg>
-                </button>
+                <div className="relative shrink-0">
+                  <button
+                    type="button"
+                    aria-label={`管理会话 ${sd.title}`}
+                    disabled={editingTitleId === sd.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMenuFor(menuFor === sd.id ? null : sd.id);
+                    }}
+                    className={`${
+                      menuFor === sd.id ? "flex" : "hidden group-hover:flex"
+                    } h-4 w-4 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="h-3 w-3">
+                      <circle cx="12" cy="5" r="1.6" />
+                      <circle cx="12" cy="12" r="1.6" />
+                      <circle cx="12" cy="19" r="1.6" />
+                    </svg>
+                  </button>
+                  {menuFor === sd.id ? (
+                    <div
+                      ref={sessionMenuRef}
+                      className="absolute right-0 top-full z-50 mt-1 w-[120px] rounded-lg border border-line bg-white p-1 shadow-xl"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMenuFor(null);
+                          beginRename(sd.id, sd.title);
+                        }}
+                        className="block w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-black/5"
+                      >
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        disabled={runningIds.has(sd.id)}
+                        onClick={() => askRemoveSession(sd.id)}
+                        className="block w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-red-500 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ))
           )}
@@ -1348,11 +2043,21 @@ export default function LocalAgentPanel() {
 
       {/* ── 输入区 ── */}
       <div className="border-t border-line bg-surface px-4 py-3">
+        {currentId && queueHint[currentId] && (
+          <div className="mx-auto mb-2 text-[11.5px] text-accent-deep" style={{ width: "min(max(820px, 80vw), 100%)" }}>
+            {queueHint[currentId]}
+            <span className="ml-2 text-ink-faint">可点「取消排队」放弃</span>
+          </div>
+        )}
         <div className="mx-auto flex items-center gap-2" style={{ width: "min(max(820px, 80vw), 100%)" }}>
           <textarea
             ref={taRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              const v = e.target.value;
+              setInput(v);
+              if (currentId) writeInputDraft(currentId, v);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -1362,11 +2067,11 @@ export default function LocalAgentPanel() {
             placeholder={
               phase !== "connected"
                 ? "请先连接 WorkBuddy 网关"
-                : restoring
-                  ? "正在恢复会话上下文…"
+                : currentId && queueHint[currentId]
+                  ? queueHint[currentId]!
                   : "给本地 Agent 派个任务… (Enter 发送, Shift+Enter 换行)"
             }
-            disabled={phase !== "connected" || runningIds.has(currentId ?? "") || restoring}
+            disabled={phase !== "connected" || runningIds.has(currentId ?? "")}
             rows={1}
             style={{ maxHeight: INPUT_MAX_H }}
             className="min-h-[38px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-page px-3 py-2 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
@@ -1374,14 +2079,19 @@ export default function LocalAgentPanel() {
           {runningIds.has(currentId ?? "") ? (
             <button
               onClick={stop}
+              title={
+                currentId && queueHint[currentId]
+                  ? "取消排队"
+                  : "已停止显示；网关侧可能仍在收尾"
+              }
               className="shrink-0 rounded-lg bg-up px-4 py-2 text-[12.5px] font-medium text-white hover:opacity-90"
             >
-              停止
+              {currentId && queueHint[currentId] ? "取消排队" : "停止"}
             </button>
           ) : (
             <button
               onClick={() => void send()}
-              disabled={phase !== "connected" || restoring || runningIds.has(currentId ?? "") || !input.trim()}
+              disabled={phase !== "connected" || runningIds.has(currentId ?? "") || !input.trim()}
               className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-medium text-white hover:bg-accent-deep disabled:opacity-40"
             >
               发送
@@ -1389,11 +2099,171 @@ export default function LocalAgentPanel() {
           )}
         </div>
         <div className="mx-auto mt-1.5 text-[10.5px] text-ink-faint" style={{ width: "min(max(820px, 80vw), 100%)" }}>
-          ACP over HTTP+SSE · 连接令牌仅保存在本机内存 · 权限请求默认拒绝
+          ACP over HTTP+SSE · 连接令牌仅保存在本机内存
+          {gw?.sessionConfig?.mode?.currentValue
+            ? ` · 权限：${gw.sessionConfig.mode.options?.find((o) => o.value === gw.sessionConfig?.mode?.currentValue)?.name ?? gw.sessionConfig.mode.currentValue}`
+            : ""}
         </div>
       </div>
         </div>
       </div>
+      {/* ── 工具权限授权对话框 (session/request_permission) ── */}
+      {permAsk && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="需要你的授权"
+            className="flex w-[480px] max-w-[92vw] flex-col rounded-xl border border-line bg-white shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <span className="text-[13px] font-semibold text-ink">需要你的授权</span>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              <p className="text-[13px] leading-relaxed text-ink">
+                Agent 想要
+                <span className="font-medium"> {friendlyToolLabel(permAsk.toolTitle)}</span>
+              </p>
+              {permAsk.detail ? (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-page px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink">
+                  {permAsk.detail}
+                </pre>
+              ) : (
+                <p className="text-[11.5px] text-ink-faint">未提供具体内容，请根据工具类型判断是否允许。</p>
+              )}
+              <p className="text-[11.5px] leading-relaxed text-ink-muted">
+                {permAsk.stale
+                  ? "这轮任务已经结束，这次授权不会再生效。关闭后重新发送即可。"
+                  : "当前是每次询问。允许一次只放行这一步；本会话始终允许后，同类操作在本会话内不再弹窗。"}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3">
+              {permAsk.stale ? (
+                <button
+                  type="button"
+                  disabled={permBusy}
+                  onClick={() => void answerPermission(null)}
+                  className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+                >
+                  关闭
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    disabled={permBusy}
+                    onClick={() => void answerPermission(null)}
+                    className="rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page disabled:opacity-50"
+                  >
+                    拒绝
+                  </button>
+                  {(permAsk.options.length
+                    ? permAsk.options
+                    : [{ optionId: "allow", name: "允许一次", kind: "allow_once" }]
+                  ).map((o) => {
+                    const label = friendlyOptionLabel(o);
+                    const primary = /允许/.test(label);
+                    return (
+                      <button
+                        key={o.optionId}
+                        type="button"
+                        disabled={permBusy}
+                        onClick={() => void answerPermission(o.optionId)}
+                        className={
+                          primary
+                            ? "rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+                            : "rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page disabled:opacity-50"
+                        }
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 模型配置对话框 (权限模式 / 思考深度 / 沙箱等, 不含模型本身) ── */}
+      {configOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setConfigOpen(false);
+          }}
+        >
+          <div className="flex w-[420px] max-w-[90vw] flex-col rounded-xl border border-line bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <span className="text-[13px] font-semibold text-ink">ACP 参数</span>
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setConfigOpen(false)}
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              {phase === "connected" && gw?.sessionConfig ? (
+                <>
+                  {Object.entries(gw.sessionConfig)
+                    .filter(([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0)
+                    .map(([id, c]) => (
+                      <label key={id} className="flex flex-col gap-1" title={c.description ?? undefined}>
+                        <span className="text-[11.5px] font-medium text-ink-muted">
+                          {CONFIG_LABEL[id] ?? c.name}
+                        </span>
+                        <select
+                          value={c.currentValue ?? ""}
+                          disabled={busy}
+                          onChange={(e) => void applyConfig(id, e.target.value)}
+                          className="w-full cursor-pointer rounded-md border border-line bg-page px-2.5 py-1.5 text-[12.5px] text-ink outline-none hover:border-accent focus:border-accent disabled:opacity-50"
+                        >
+                          {(c.options ?? []).map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.name}
+                              {o.description ? ` · ${o.description}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                        {c.description ? (
+                          <span className="text-[10.5px] leading-relaxed text-ink-faint">{c.description}</span>
+                        ) : null}
+                      </label>
+                    ))}
+                  {Object.entries(gw.sessionConfig).filter(
+                    ([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0,
+                  ).length === 0 ? (
+                    <p className="text-[12px] text-ink-faint">当前网关未暴露可配置项</p>
+                  ) : null}
+                  {gw.sessionConfig.mode?.currentValue && /bypass/i.test(gw.sessionConfig.mode.currentValue) ? (
+                    <p className="rounded-md border border-line bg-page px-3 py-2 text-[11.5px] leading-relaxed text-ink-muted">
+                      当前为 Bypass：工具权限将自动放行，不再弹窗询问。
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-[12px] text-ink-faint">请先连接网关后再配置</p>
+              )}
+            </div>
+            <div className="flex items-center justify-end border-t border-line px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setConfigOpen(false)}
+                className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep"
+              >
+                完成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* ── 工作约定编辑对话框 ── */}
       {sysOpen && (
         <div
@@ -1426,7 +2296,7 @@ export default function LocalAgentPanel() {
                 placeholder="在此编辑工作约定…（激活会话时作为首条消息注入给 WorkBuddy）"
               />
               <div className="mt-2 text-[10.5px] leading-relaxed text-ink-faint">
-                此约定会在<u>切换或重新进入会话</u>时作为首条消息注入 WorkBuddy；之后每次回复都会遵守。包括 Markdown
+                约定只在<u>首次激活 / 重连后对齐 / 约定内容变更</u>时注入一次，不会拼进每条用户消息。包括 Markdown
                 格式、图片/文件引用方式等。
               </div>
             </div>
@@ -1453,6 +2323,41 @@ export default function LocalAgentPanel() {
           </div>
         </div>
       )}
+      {deleteConfirmId ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/35 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-session-title"
+            className="w-full max-w-sm rounded-xl border border-line bg-surface p-4 shadow-xl"
+          >
+            <h3 id="delete-session-title" className="text-[14px] font-semibold text-ink">
+              删除会话
+            </h3>
+            <p className="mt-2 text-[12.5px] leading-relaxed text-ink-muted">
+              确定删除「
+              {sessions.find((s) => s.id === deleteConfirmId)?.title ?? deleteConfirmId.slice(0, 8)}
+              」？历史消息与产物将一并清除，且不可恢复。
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmId(null)}
+                className="rounded-lg border border-line px-3 py-1.5 text-[12.5px] text-ink-muted hover:bg-page"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void removeSession(deleteConfirmId)}
+                className="rounded-lg bg-red-500 px-3 py-1.5 text-[12.5px] font-medium text-white hover:bg-red-600"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {linkView ? (
         <LinkPreviewModal
           view={linkView}
@@ -1460,6 +2365,7 @@ export default function LocalAgentPanel() {
           onOpenDoc={openDoc}
           docHints={docHints}
           onOpenLink={openLink}
+          onCtxMenu={onCtxMenu}
         />
       ) : null}
       {ctxMenu && (
@@ -1635,7 +2541,7 @@ function DocPreviewCard({
             打开失败: {preview.error}
           </div>
         ) : (
-          renderMd(preview.text, onOpenDoc, docHints)
+          renderMd(preview.text, onOpenDoc, docHints, undefined, preview.path.replace(/\/[^/]+$/, ""))
         )}
       </div>
     </div>
@@ -1667,7 +2573,11 @@ function WebviewBox({ src }: { src: string }) {
 /** 链接/文件预览弹窗: url → 内嵌 webview; 本地文件按扩展名分发 (图片→img, html/pdf→webview, 文本→markdown/pre) */
 const PREVIEW_IMG_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
 const PREVIEW_DOC_EXT = ["html", "htm", "pdf"];
-const extOf = (p: string) => (p.split(".").pop() ?? "").toLowerCase();
+const extOf = (p: string) => {
+  const base = p.split("/").pop() ?? p;
+  const i = base.lastIndexOf(".");
+  return i >= 0 ? base.slice(i + 1).toLowerCase() : "";
+};
 /** jsonl/log: 逐行 JSON.parse 后 pretty, 非 JSON 行保留原文 */
 const prettyJsonl = (raw: string) =>
   raw
@@ -1683,25 +2593,138 @@ const prettyJsonl = (raw: string) =>
     })
     .join("\n\n");
 
+/** 本地图片预览: fetch→blob, 404 时列出同目录可用媒体 (Agent 常写错文件名) */
+function LocalImagePreview({
+  path,
+  title,
+  onOpenFile,
+}: {
+  path: string;
+  title: string;
+  onOpenFile: (path: string, title: string) => void;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [siblings, setSiblings] = useState<{ name: string; path: string; mime: string }[]>([]);
+
+  useEffect(() => {
+    let dead = false;
+    let objectUrl: string | null = null;
+    setSrc(null);
+    setErr(null);
+    setSiblings([]);
+    void (async () => {
+      try {
+        const r = await fetch(`/api/local-file?path=${encodeURIComponent(path)}`, { cache: "no-store" });
+        if (!r.ok) {
+          const dir = path.replace(/\/[^/]+$/, "") || "/";
+          let hint = r.status === 404 ? "文件不存在" : `加载失败 (HTTP ${r.status})`;
+          try {
+            const j = (await r.json()) as { error?: string };
+            if (j?.error === "not found") hint = "文件不存在";
+          } catch {
+            /* ignore */
+          }
+          if (!dead) setErr(`${hint}: ${path}`);
+          try {
+            const lr = await fetch(`/api/local-file?path=${encodeURIComponent(dir)}&list=1`, { cache: "no-store" });
+            if (lr.ok) {
+              const j = (await lr.json()) as { entries?: { name: string; path: string; mime: string }[] };
+              const imgs = (j.entries ?? []).filter((e) => e.mime.startsWith("image/") && e.path !== path);
+              if (!dead) setSiblings(imgs);
+            }
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        const blob = await r.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (dead) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setSrc(objectUrl);
+      } catch (e) {
+        if (!dead) setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      dead = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path]);
+
+  if (err) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
+        <div className="max-w-[520px] rounded-lg bg-up-soft px-3 py-2.5 text-center text-[12.5px] leading-snug text-up">
+          {err}
+        </div>
+        {siblings.length > 0 && (
+          <div className="w-full max-w-[520px]">
+            <div className="mb-1.5 text-center text-[11.5px] text-ink-faint">同目录可用图片 — 点击打开</div>
+            <ul className="max-h-[240px] space-y-1 overflow-y-auto rounded-lg border border-line bg-page p-2">
+              {siblings.map((s) => (
+                <li key={s.path}>
+                  <button
+                    type="button"
+                    onClick={() => onOpenFile(s.path, s.name)}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-accent-deep transition-colors hover:bg-accent-soft"
+                    title={s.path}
+                  >
+                    <span className="shrink-0 text-ink-faint">图</span>
+                    <span className="min-w-0 flex-1 truncate font-medium">{s.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (!src) {
+    return (
+      <div className="flex h-full items-center justify-center text-[12px] text-ink-faint">
+        <span className="animate-pulse">加载图片…</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full items-center justify-center p-4">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={title}
+        data-local-path={path}
+        className="max-h-full max-w-full object-contain"
+      />
+    </div>
+  );
+}
+
 function LinkPreviewModal({
   view,
   onClose,
   onOpenDoc,
   docHints,
   onOpenLink,
+  onCtxMenu,
 }: {
   view: LinkView;
   onClose: () => void;
   onOpenDoc: (path: string, title: string) => void;
   docHints: string[];
   onOpenLink: (raw: string) => void;
+  onCtxMenu?: (e: React.MouseEvent) => void;
 }) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const ext = view.kind === "file" ? extOf(view.path) : "";
   const isImg = PREVIEW_IMG_EXT.includes(ext);
   const isDoc = PREVIEW_DOC_EXT.includes(ext);
-  const localFileUrl = (p: string) => `${window.location.origin}/api/local-file?path=${encodeURIComponent(p)}`;
+  const localFileUrl = (p: string) => `/api/local-file?path=${encodeURIComponent(p)}`;
   useEffect(() => {
     if (view.kind !== "file") return;
     if (isImg || isDoc) return; // 图片/html/pdf 不走文本拉取
@@ -1711,7 +2734,7 @@ function LinkPreviewModal({
     void (async () => {
       try {
         const r = await fetch(`/api/local-file?path=${encodeURIComponent(view.path)}`, { cache: "no-store" });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        if (!r.ok) throw new Error(r.status === 404 ? "文件不存在" : `HTTP ${r.status}`);
         const t = await r.text();
         if (!dead) setText(t);
       } catch (e) {
@@ -1721,7 +2744,7 @@ function LinkPreviewModal({
     return () => {
       dead = true;
     };
-  }, [view]);
+  }, [view, isImg, isDoc]);
 
   // ESC 关闭
   useEffect(() => {
@@ -1739,10 +2762,13 @@ function LinkPreviewModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex h-[82vh] w-[min(1100px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+      <div
+        className="flex h-[82vh] w-[min(1100px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl"
+        onContextMenu={onCtxMenu}
+      >
         <div className="flex items-center gap-2 border-b border-line bg-page px-3.5 py-2">
           <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
-            {view.kind === "url" ? "🔗 " : "📄 "}
+            {view.kind === "url" ? "链接 " : "文件 "}
             {view.title}
           </span>
           {view.kind === "url" ? (
@@ -1771,9 +2797,7 @@ function LinkPreviewModal({
           {view.kind === "url" ? (
             <WebviewBox src={view.url} />
           ) : isImg ? (
-            <div className="flex h-full items-center justify-center p-4">
-              <img src={localFileUrl(view.path)} alt={view.title} className="max-h-full max-w-full object-contain" />
-            </div>
+            <LocalImagePreview path={view.path} title={view.title} onOpenFile={onOpenDoc} />
           ) : isDoc ? (
             <WebviewBox src={localFileUrl(view.path)} />
           ) : err ? (
@@ -1792,7 +2816,13 @@ function LinkPreviewModal({
             </div>
           ) : (
             <div className="h-full overflow-y-auto px-4 py-3 text-[13px] leading-relaxed text-ink">
-              {renderMd(text, onOpenDoc, docHints, onOpenLink)}
+              {renderMd(
+                text,
+                onOpenDoc,
+                docHints,
+                onOpenLink,
+                view.kind === "file" ? view.path.replace(/\/[^/]+$/, "") : undefined,
+              )}
             </div>
           )}
         </div>
@@ -1883,7 +2913,7 @@ function CtlSelect({
   disabled,
   title,
 }: {
-  label: string;
+  label?: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (v: string) => void;
@@ -1892,7 +2922,7 @@ function CtlSelect({
 }) {
   return (
     <label className="flex items-center gap-1.5" title={title}>
-      <span className="text-ink-faint">{label}</span>
+      {label ? <span className="text-ink-faint">{label}</span> : null}
       <select
         value={value}
         disabled={disabled}
@@ -1924,15 +2954,16 @@ function ToolStrip({ m }: { m: Msg }) {
     arr.forEach((t, i) => {
       const k = t.toolCallId || `${t.tool}-${i}`;
       const ts = t.ts ?? 0;
-      const r = map.get(k) ?? { tool: t.tool, detail: "", start: ts, end: ts };
+      const end = t.endTs ?? ts;
+      const r = map.get(k) ?? { tool: t.tool, detail: "", start: ts, end };
       if (!r.start || (ts && ts < r.start)) r.start = ts;
-      if (ts > r.end) r.end = ts;
+      if (end > r.end) r.end = end;
       if (t.detail) r.detail = t.detail;
       map.set(k, r);
     });
     return [...map.values()]
       .sort((a, b) => a.start - b.start)
-      .map((r) => ({ ...r, ms: r.end - r.start }));
+      .map((r) => ({ ...r, ms: Math.max(0, r.end - r.start) }));
   }, [m.tools]);
 
   if (!tools.length && !m.streaming) return null;
@@ -2001,21 +3032,104 @@ function ToolStrip({ m }: { m: Msg }) {
   );
 }
 
+const MD_LOCAL_RE = /^(\/Users\/|\/home\/|\/private\/|\/tmp\/|file:\/\/)/;
+const MD_IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif)(\?|#|$)/i;
+const MD_VID_EXT_RE = /\.(mp4|webm|mov|m3u8)(\?|#|$)/i;
+
+/** 相对路径相对 baseDir 解析为绝对路径 (仅本机预览用) */
+function resolveAgainstDir(baseDir: string, rel: string): string {
+  const cleaned = rel.replace(/^file:\/\//, "");
+  if (cleaned.startsWith("/")) return cleaned;
+  const stack = baseDir.replace(/\/$/, "").split("/").filter(Boolean);
+  for (const seg of cleaned.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") stack.pop();
+    else stack.push(seg);
+  }
+  return `/${stack.join("/")}`;
+}
+
+function isMediaLikeUrl(u: string): boolean {
+  if (/^data:image\//i.test(u)) return true;
+  if (MD_IMG_EXT_RE.test(u) || MD_VID_EXT_RE.test(u)) return true;
+  // 绝对本地路径无扩展名时仍交给 /api/local-file 判定
+  return MD_LOCAL_RE.test(u) || (u.startsWith("/") && !/^https?:/i.test(u));
+}
+
+/** 图片加载失败时回退为可点击链接 (常见: ![alt](文章页 URL)) */
+function MdImg({
+  src,
+  alt,
+  title,
+  href,
+  localPath,
+  onOpenLink,
+  style,
+}: {
+  src: string;
+  alt: string;
+  title?: string;
+  href: string;
+  localPath?: string;
+  onOpenLink?: (raw: string) => void;
+  style?: CSSProperties;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <a
+        href={href}
+        onClick={(e) => {
+          if (onOpenLink) {
+            e.preventDefault();
+            onOpenLink(href);
+          }
+        }}
+        target="_blank"
+        rel="noreferrer"
+        className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[12px] text-accent no-underline"
+        title={href}
+      >
+        <span className="shrink-0 text-ink-faint">图</span>
+        <span className="min-w-0 flex-1 truncate font-medium text-accent-deep">{alt || "查看原图/来源"}</span>
+        <span className="max-w-[40%] shrink-0 truncate font-mono text-[10.5px] text-ink-faint">{href}</span>
+      </a>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- 本地/外链媒体预览, 非优化静态资源
+    <img
+      src={src}
+      alt={alt}
+      title={title || undefined}
+      data-local-path={localPath || undefined}
+      loading="lazy"
+      onError={() => setFailed(true)}
+      style={style}
+      className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
+    />
+  );
+}
+
 /** 行内解析: **粗体** `代码` [链接](url) ![图片/视频](url "title")
  *  + HTML 白名单直通: <video> / <img> (属性+协议双重校验)
  *  + 裸 http(s) URL 自动转可点击链接
  *  + 本地 markdown 路径 → 可点击按钮 (点击内联预览)
- *  + 「📄 文件名.md」纯文本 → 用 docHints (会话工作目录) 尝试定位并预览 */
+ *  + 「📄 文件名.md」纯文本 → 用 docHints (会话工作目录) 尝试定位并预览
+ *  + 相对路径图片相对 baseDir (文档目录 / 工作目录) 解析
+ *  + 非媒体 URL 的 ![alt](url) 降级为可点来源链接, 避免裂图 */
 function Inline({
   text,
   onOpenDoc,
   docHints,
   onOpenLink,
+  baseDir,
 }: {
   text: string;
   onOpenDoc?: (path: string, title: string) => void;
   docHints?: string[];
   onOpenLink?: (raw: string) => void;
+  baseDir?: string;
 }) {
   const parts = text.split(
     /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|https?:\/\/[^\s<]+)/g,
@@ -2023,17 +3137,28 @@ function Inline({
   const out: ReactNode[] = [];
   parts.forEach((p, i) => {
     // 安全: 协议白名单 + 标签/属性白名单
-    const LOCAL_RE = /^(\/Users\/|\/home\/|\/private\/|\/tmp\/|file:\/\/)/;
-    const safeUrl = (u: string) => /^(https?:\/\/|data:image\/)/i.test(u) || LOCAL_RE.test(u);
+    const mediaBase = baseDir ?? docHints?.[0];
+    const safeUrl = (u: string) => /^(https?:\/\/|data:image\/)/i.test(u) || MD_LOCAL_RE.test(u) || u.startsWith("/");
     const toSrc = (u: string) => {
       const cleaned = u.replace(/^file:\/\//, "");
-      return LOCAL_RE.test(u) ? `/api/local-file?path=${encodeURIComponent(cleaned)}` : u;
+      if (MD_LOCAL_RE.test(u) || (cleaned.startsWith("/") && !/^https?:/i.test(u))) {
+        return `/api/local-file?path=${encodeURIComponent(cleaned)}`;
+      }
+      return u;
+    };
+    const resolveSrc = (raw: string): string => {
+      const t = raw.trim();
+      if (/^(https?:\/\/|data:)/i.test(t) || MD_LOCAL_RE.test(t) || t.startsWith("/")) {
+        return t.replace(/^file:\/\//, "");
+      }
+      if (mediaBase && !t.includes("://")) return resolveAgainstDir(mediaBase, t);
+      return t;
     };
 
     const vtag = p.match(/^<video([^>]*)>[\s\S]*?<\/video>$/i);
     if (vtag) {
       const attrs = vtag[1];
-      const src = attrs.match(/src="([^"]+)"/)?.[1] ?? "";
+      const src = resolveSrc(attrs.match(/src="([^"]+)"/)?.[1] ?? "");
       const width = attrs.match(/width="?(\d+)"?/)?.[1];
       const height = attrs.match(/height="?(\d+)"?/)?.[1];
       const controls = /\bcontrols\b/i.test(attrs);
@@ -2057,20 +3182,28 @@ function Inline({
     const htag = p.match(/^<img([^>]*)\/?>$/i);
     if (htag) {
       const attrs = htag[1];
-      const src = attrs.match(/src="([^"]+)"/)?.[1] ?? "";
+      const rawSrc = attrs.match(/src="([^"]+)"/)?.[1] ?? "";
+      const src = resolveSrc(rawSrc);
       const width = attrs.match(/width="?(\d+)"?/)?.[1];
       const height = attrs.match(/height="?(\d+)"?/)?.[1];
       const alt = attrs.match(/alt="([^"]*)"/)?.[1] ?? "";
-      if (src && safeUrl(src)) {
+      if (src && safeUrl(src) && isMediaLikeUrl(src)) {
         out.push(
-          <img
+          <MdImg
             key={i}
             src={toSrc(src)}
             alt={alt}
-            loading="lazy"
+            href={rawSrc || src}
+            localPath={src.startsWith("/") && !/^https?:/i.test(src) ? src : undefined}
+            onOpenLink={onOpenLink}
             style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 360 }}
-            className="my-1 rounded-lg border border-line object-contain bg-black/[0.02]"
           />,
+        );
+        return;
+      }
+      if (src && /^https?:\/\//i.test(src)) {
+        out.push(
+          <MdImg key={i} src={src} alt={alt} href={src} onOpenLink={onOpenLink} />,
         );
         return;
       }
@@ -2095,10 +3228,35 @@ function Inline({
     const img = p.match(/^!\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)$/);
     if (img) {
       const alt = img[1];
-      const src = img[2].trim();
+      const rawSrc = img[2].trim();
+      const src = resolveSrc(rawSrc);
       const title = img[3] ?? "";
+      // 文章页 / 无扩展名外链: 不当作 <img>, 直接给可点来源
+      if (/^https?:\/\//i.test(src) && !isMediaLikeUrl(src)) {
+        out.push(
+          <a
+            key={i}
+            href={src}
+            onClick={(e) => {
+              if (onOpenLink) {
+                e.preventDefault();
+                onOpenLink(src);
+              }
+            }}
+            target="_blank"
+            rel="noreferrer"
+            className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[12px] text-accent no-underline"
+            title={title || src}
+          >
+            <span className="shrink-0 text-ink-faint">链</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-accent-deep">{alt || "查看来源"}</span>
+            <span className="max-w-[40%] shrink-0 truncate font-mono text-[10.5px] text-ink-faint">{src}</span>
+          </a>,
+        );
+        return;
+      }
       if (safeUrl(src)) {
-        if (/\.(mp4|webm|mov|m3u8)(\?|#|$)/i.test(src)) {
+        if (MD_VID_EXT_RE.test(src)) {
           out.push(
             <video key={i} src={toSrc(src)} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
               <p className="px-2 py-1 text-[11.5px] text-ink-muted">视频无法预览: {alt || src}</p>
@@ -2106,13 +3264,14 @@ function Inline({
           );
         } else {
           out.push(
-            <img
+            <MdImg
               key={i}
               src={toSrc(src)}
               alt={alt}
               title={title || undefined}
-              loading="lazy"
-              className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
+              href={rawSrc}
+              localPath={src.startsWith("/") && !/^https?:/i.test(src) ? src : undefined}
+              onOpenLink={onOpenLink}
             />,
           );
         }
@@ -2126,7 +3285,7 @@ function Inline({
     if (m && safeUrl(m[2])) {
       const target = m[2].trim();
       // 本地 markdown 文档: 不跳转, 点击内联预览
-      if (LOCAL_RE.test(target) && /\.(md|markdown)(\?|#|$)/i.test(target)) {
+      if (MD_LOCAL_RE.test(target) && /\.(md|markdown)(\?|#|$)/i.test(target)) {
         out.push(
           <button
             key={i}
@@ -2216,11 +3375,13 @@ function renderMd(
   onOpenDoc?: (path: string, title: string) => void,
   docHints?: string[],
   onOpenLink?: (raw: string) => void,
+  baseDir?: string,
 ): ReactNode[] {
   const lines = md.replace(/\r/g, "").split("\n");
   const out: ReactNode[] = [];
   let i = 0;
   const parseRow = (r: string) => r.split("|").slice(1, -1).map((x) => x.trim());
+  const inlineProps = { onOpenDoc, docHints, onOpenLink, baseDir };
   while (i < lines.length) {
     const line = lines[i];
     const trimmed = line.trim();
@@ -2254,7 +3415,7 @@ function renderMd(
               <tr>
                 {header.map((h, hi) => (
                   <th key={hi} className="border border-line bg-black/[0.03] px-2.5 py-1.5 text-left font-medium">
-                    <Inline text={h} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+                    <Inline text={h} {...inlineProps} />
                   </th>
                 ))}
               </tr>
@@ -2264,7 +3425,7 @@ function renderMd(
                 <tr key={ri}>
                   {r.map((c, ci) => (
                     <td key={ci} className="border border-line px-2.5 py-1.5 align-top leading-relaxed">
-                      <Inline text={c} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+                      <Inline text={c} {...inlineProps} />
                     </td>
                   ))}
                 </tr>
@@ -2283,11 +3444,11 @@ function renderMd(
         level <= 2 ? (
           <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[14px] font-bold text-ink">
             <span className="h-3 w-[3px] rounded-full bg-accent" />
-            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+            <Inline text={text} {...inlineProps} />
           </h4>
         ) : (
           <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[13px] font-semibold text-ink">
-            <Inline text={text} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+            <Inline text={text} {...inlineProps} />
           </h5>
         ),
       );
@@ -2304,7 +3465,7 @@ function renderMd(
         <ul key={`ul-${i}`} className="my-1 list-disc space-y-0.5 pl-4">
           {items.map((it, ii) => (
             <li key={ii}>
-              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+              <Inline text={it} {...inlineProps} />
             </li>
           ))}
         </ul>,
@@ -2321,7 +3482,7 @@ function renderMd(
         <ol key={`ol-${i}`} className="my-1 list-decimal space-y-0.5 pl-4">
           {items.map((it, ii) => (
             <li key={ii}>
-              <Inline text={it} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+              <Inline text={it} {...inlineProps} />
             </li>
           ))}
         </ol>,
@@ -2338,7 +3499,7 @@ function renderMd(
         <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[12.5px] text-ink-muted">
           {quote.map((q, qi) => (
             <div key={qi}>
-              <Inline text={q} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+              <Inline text={q} {...inlineProps} />
             </div>
           ))}
         </blockquote>,
@@ -2359,7 +3520,7 @@ function renderMd(
     }
     out.push(
       <p key={`p-${i}`} className="my-1 leading-relaxed">
-        <Inline text={para.join("\n")} onOpenDoc={onOpenDoc} docHints={docHints} onOpenLink={onOpenLink} />
+        <Inline text={para.join("\n")} {...inlineProps} />
       </p>,
     );
     i = j;

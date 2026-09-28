@@ -1,16 +1,17 @@
-// Spec: 012-electron-packaging — Electron 主进程
-// next 生产服务器以 utilityProcess.fork 运行 (官方「主进程外跑 Node 逻辑」通道):
-// 纯后台 Node 进程, 不上 Dock / 无 GUI 身份, 生命周期随主进程 (app 退出自动终止, 不留孤儿占端口)。
-// 端口从 3310 起递增探测, 避免与开发端口 3300 冲突。
-// 数据契约: MACRO_DB_PATH / MARKET_DB_PATH / FETCH_PYTHON_BIN (与 Web 版同组 env),
-// fetch 脚本相对 cwd (process.chdir 到资源根, 含 scripts/)。
+// Spec: 012-electron-packaging — Electron 主进程 (唯一产品形态: APP, 无独立 Web 版)
+// next 生产服务器以 utilityProcess.fork 运行; 端口 3310+ 探测。
+// 软件目录 (安装/仓库) 与用户数据分离:
+//   用户数据根 = ~/snuby-workspace-data (SNUBY_USER_DATA 可覆盖)
+//   含主题库 + Agent 会话与工作区; 启动时从旧路径幂等迁移。
 
 const { app, BrowserWindow, dialog, session, utilityProcess, Menu, clipboard } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const os = require("node:os");
 
 const APP_TITLE = "Snuby 工作台";
-const VENV_PYTHON = "/Users/suweijie/.workbuddy/binaries/python/envs/default/bin/python";
+/** 用户数据根: 使用过程产生的全部业务数据（主题库、Agent 会话等） */
+const USER_DATA_ROOT = process.env.SNUBY_USER_DATA?.trim() || path.join(os.homedir(), "snuby-workspace-data");
 
 // Spec: 016 — 开发态与打包态数据隔离: package.json name = "snuby-workspace" 使开发态
 // userData 与打包版相同 → 单实例锁互相排斥 (用户运行打包版时开发壳无法启动), 且开发壳
@@ -121,29 +122,88 @@ function bundledRoot() {
   return app.isPackaged ? process.resourcesPath : app.getAppPath();
 }
 
-/** 初始化数据区: 首次启动把模板 db 复制到 userData, 幂等; 返回数据目录 */
-function initDataDir() {
-  const dataDir = path.join(app.getPath("userData"), "data");
-  fs.mkdirSync(dataDir, { recursive: true });
-  if (!app.isPackaged) return dataDir; // 开发态直接用项目 data/, 不复制
-  const bundledData = path.join(bundledRoot(), "data");
-  for (const file of ["china_economy.db", "market.db"]) {
-    const src = path.join(bundledData, file);
-    const dest = path.join(dataDir, file);
-    if (!fs.existsSync(dest) && fs.existsSync(src)) {
-      fs.copyFileSync(src, dest);
+/** 文件: 目标不存在则从源复制 */
+function migrateFile(src, dest) {
+  if (!fs.existsSync(src) || fs.existsSync(dest)) return false;
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(src, dest);
+  return true;
+}
+
+/** 目录: 目标不存在则整树复制; 已存在则只补缺失子项 (不覆盖)。
+ *  仅用于非会话类数据; 会话目录请用 migrateDirOnce, 否则「用户删除的子项」会被旧源回填。 */
+function migrateDir(src, dest) {
+  if (!fs.existsSync(src)) return false;
+  if (!fs.existsSync(dest)) {
+    fs.cpSync(src, dest, { recursive: true });
+    return true;
+  }
+  let any = false;
+  for (const name of fs.readdirSync(src)) {
+    const s = path.join(src, name);
+    const d = path.join(dest, name);
+    try {
+      if (fs.statSync(s).isDirectory()) {
+        if (migrateDir(s, d)) any = true;
+      } else if (migrateFile(s, d)) {
+        any = true;
+      }
+    } catch {
+      // 单文件失败跳过
     }
+  }
+  return any;
+}
+
+/** 会话/工作区: 仅当目标根目录尚不存在时整树迁入一次; 绝不回填已删除的子会话 */
+function migrateDirOnce(src, dest) {
+  if (!fs.existsSync(src) || fs.existsSync(dest)) return false;
+  fs.cpSync(src, dest, { recursive: true });
+  return true;
+}
+
+/**
+ * 初始化用户数据根 ~/snuby-workspace-data:
+ * 从旧位置幂等迁入 (项目 data/、Application Support 下 snuby-* /data)
+ */
+function initUserDataDir() {
+  const dataDir = USER_DATA_ROOT;
+  fs.mkdirSync(dataDir, { recursive: true });
+
+  const legacySources = [
+    path.join(bundledRoot(), "data"),
+    path.join(app.getPath("userData"), "data"),
+    path.join(os.homedir(), "Library", "Application Support", "snuby-workspace", "data"),
+    path.join(os.homedir(), "Library", "Application Support", "snuby-dev", "data"),
+  ];
+
+  const files = ["site_tabs.db"];
+  // 会话目录一经迁入用户数据根, 删除只改用户侧; 禁止从仓库 data/ 回填「缺失」子项
+  const sessionDirs = ["agent-sessions"];
+
+  for (const srcRoot of legacySources) {
+    if (!fs.existsSync(srcRoot)) continue;
+    for (const f of files) migrateFile(path.join(srcRoot, f), path.join(dataDir, f));
+    for (const d of sessionDirs) migrateDirOnce(path.join(srcRoot, d), path.join(dataDir, d));
+  }
+
+  try {
+    fs.appendFileSync(
+      "/tmp/snuby-next.log",
+      `[${new Date().toISOString()}] userDataRoot=${dataDir}\n`,
+    );
+  } catch {
+    // ignore
   }
   return dataDir;
 }
 
-/** 桌面端环境: 数据目录 + python 解释器 (存在才设) + 工作目录切到资源根 */
+/** 桌面端环境: 业务路径指向用户数据根; cwd 为软件资源根 */
 function applyDesktopEnv(dataDir) {
-  process.env.MACRO_DB_PATH = path.join(dataDir, "china_economy.db");
-  process.env.MARKET_DB_PATH = path.join(dataDir, "market.db");
+  process.env.SNUBY_USER_DATA = dataDir;
   process.env.SITE_TABS_DB_PATH = path.join(dataDir, "site_tabs.db");
-  if (fs.existsSync(VENV_PYTHON)) process.env.FETCH_PYTHON_BIN = VENV_PYTHON;
-  process.chdir(bundledRoot()); // fetch 的 PROJECT_ROOT=process.cwd() 命中 scripts/
+  process.env.AGENT_SESSIONS_PATH = path.join(dataDir, "agent-sessions");
+  process.chdir(bundledRoot());
 }
 
 /** 启动 next 生产服务器 (utilityProcess.fork, 无 Dock 图标), 返回随机可用端口 */
@@ -252,7 +312,7 @@ app.whenReady().then(async () => {
     session.defaultSession.setPermissionRequestHandler((wc, _permission, callback) => {
       callback(wc.getType() !== "webview");
     });
-    const dataDir = initDataDir();
+    const dataDir = initUserDataDir();
     applyDesktopEnv(dataDir);
     const port = await startNextServer();
     const win = new BrowserWindow({

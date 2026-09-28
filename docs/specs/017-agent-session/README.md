@@ -18,23 +18,24 @@
 ## 核心决策（详见 design.md）
 
 1. 命名族：**AgentSession / AgentSessionUi / AgentSessionService / AgentSessionRepository / AgentSessionRegistry**（用户 2026-09-27 确认）。
-2. 存储分离：`data/agent-sessions/<id>/`（内部数据：meta/messages）+ `data/agent-workspaces/<id>/`（授权工作区：cwd 指向这里、产物只写这里）；一次性迁移历史会话 artifacts 与 `meta.acpCwd`。
+2. 存储统一：`agent-sessions/<id>/` 同时承载内部数据（meta/messages）与工作区（cwd + artifacts/）。
 3. 隔离顺序：**软隔离先行**（工作区分离 + 任务后越界审计 + 强提示），硬隔离（delegateToolsSupport 工具委派 + realpath 白名单）待网关协议实测后再上。
 4. REST API 形态不变（前端重构不依赖 API 变更）；新增 `status?sid=` 与 `audit` 两个只读接口。
 5. 服务端连接池语义化对齐：`ConnState` = AgentSessionService 实例，`conns` Map = AgentSessionRegistry；新增 `running` 保活标志，运行中连接不参与空闲回收。
+6. **用户操作矩阵**（design.md §11）：切换=纯视图；网关活动会话仅在获全局执行权时改变；重连失效全部绑定；停止不承诺网关已停。事实源：`docs/acp-gateway-capability.md` 复测。
 
 ## 非目标
 
 - 不实现 delegateToolsSupport 硬隔离（未验证协议，留作下一迭代）。
 - 不做多账号 partition（全局统一 `default` 持久化，用户已定）。
 - 不改 REST API 的既有请求/响应形状。
-- Web 版（3300）不维护。
+- 独立浏览器 Web 版已废弃；仅 Electron APP。
 
 ## 交付物
 
 - `src/infrastructure/workbuddy-acp.ts` — 连接池语义化（AgentSessionService/Registry 别名）+ running 保活
-- `src/infrastructure/agent-session-store.ts` — 工作区根/迁移/越界审计（AgentSessionRepository）
-- `src/infrastructure/agent-session-activate.ts` — 激活注入改用 workDir + dataDir 双目录
+- `src/infrastructure/agent-session-store.ts` — 统一会话目录 / 越界审计（AgentSessionRepository）
+- `src/infrastructure/agent-session-activate.ts` — 激活注入（cwd = 会话目录）
 - `src/app/api/agent/status/route.ts` — 支持 `?sid=` per-session 网关态
 - `src/app/api/agent/audit/route.ts` — 越界写入审计接口（新增）
 - `src/components/site-browser/local-agent-panel.tsx` — 前端 AgentSessionRegistry（uiRef/gwRef/commitMsgs/commitPage/loadIntoUi/loadGw/evictUi + UI_CACHE_MAX LRU + auditWarn 提示条）
@@ -42,4 +43,7 @@
 
 ## 变更记录
 
+- 2026-09-28: 会话与工作区合并为单一 `agent-sessions/<id>/`；移除 `agent-workspaces` / `migrateWorkspaces` / 布局标记等全部迁移入口。
 - 2026-09-27: 初版（implementing）。服务端 running 保活、存储分离+迁移+审计、status?sid、前端 Registry/LRU/status 拆分全部实现；tsc 通过、next build 通过（BUILD_ID `_Cn3oZC0-7GnNzqcVw8tA`）；存量 11 会话 artifacts 迁移验证通过（w62l 产物 4 件均入工作区）；3310 + Electron(9222) 已重启。页面级「双会话并发不串台 / 切回不重拉」待用户验证后关单。
+- 2026-09-27: 依据 ACP 网关复测，补充 design.md §11「用户操作矩阵」；requirements 增补故事 5–6 与 AC-7～AC-10；AC-5 措辞改为「切换不中断 + 全局串行」以匹配网关物理限制。落地检查清单见 design §11.5（实现差距待闭合）。
+- 2026-09-27: 落地 #53–#58：切换零网关、重连 reset+needsAlign、删除 409、排队文案/取消、activate∥prompt 同锁、新建延迟首次发送。tsc 通过。

@@ -1,5 +1,7 @@
 # Spec 012 — 设计
 
+> **变更（2026-09-27）**：宏观经济 / 资产行情及 `MACRO_DB_PATH` / `MARKET_DB_PATH` / `scripts/fetch_*.py` 已移除。用户数据根为 `~/snuby-workspace-data`（仅 `site_tabs.db` + Agent 目录）；下文决策 3/4 中的宏观/行情表述为历史记录。
+
 ## 架构决策
 
 ### 决策 1：next 生产服务器以 ELECTRON_RUN_AS_NODE 子进程运行

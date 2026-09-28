@@ -15,12 +15,10 @@ asar: false
 # next server 运行时大量 fs 读 .next, 外置规避 asar 补丁边界行为
 asarUnpack:
   - .next/**
-# 数据模板与数据管道脚本: 运行时由主进程复制/引用
+# 可选遗留 data 目录 (主题库等); 用户运行时数据在 ~/snuby-workspace-data
 extraResources:
   - from: data
     to: data
-  - from: scripts
-    to: scripts
 mac:
   target:
     - dmg

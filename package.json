@@ -4,18 +4,15 @@
   "private": true,
   "main": "electron/main.js",
   "scripts": {
-    "dev": "next dev --turbopack -p 3300",
+    "dev": "next dev --turbopack -p 3310",
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 3300",
-    "fetch": "python3 scripts/fetch_data.py",
-    "fetch:market": "python3 scripts/fetch_market.py",
-    "test": "node --import tsx --test src/domain/*.test.ts src/application/*.test.ts src/infrastructure/*.test.ts",
+    "start": "next start -H 127.0.0.1 -p 3310",
+    "test": "node --import tsx --test src/domain/*.test.ts src/infrastructure/*.test.ts",
     "lint": "next lint",
     "desktop": "npm run build && electron .",
     "dist": "npm run build && electron-builder --mac"
   },
   "dependencies": {
-    "echarts": "^5.5.1",
     "next": "^15.1.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
