@@ -8,9 +8,11 @@
 
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTopics } from "@/components/workbench/topics-context";
+import { topicIcon } from "@/components/workbench/topic-icon";
 import LocalAgentPanel from "@/components/site-browser/local-agent-panel";
 import { tabIconFor } from "@/components/ui/site-favicon";
 import { ContextMenuItem, ContextMenuLayer } from "@/components/ui/context-menu-layer";
+import { useClickOutside } from "@/lib/use-click-outside";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -240,6 +242,11 @@ export default function SiteBrowser({
   const pendingOpenRef = useRef<Record<string, number>>({});
   /** 始终指向最新 openTab: popup 监听 effect 依赖少, 闭包若直接捕获 openTab 会拿到陈旧 tabsBySite 快照, 导致新建标签覆盖已有标签 */
   const openTabRef = useRef<((siteId: string, url: string) => void) | null>(null);
+  const addToTopicRef = useRef<HTMLDivElement | null>(null);
+  const historyMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useClickOutside(addToTopicRef, addToTopicOpen, () => setAddToTopicOpen(false));
+  useClickOutside(historyMenuRef, showHistory, () => setShowHistory(false));
 
   const activeSite = activeSiteProp ?? activeSiteInner;
   const moduleSites = useMemo(() => {
@@ -1226,8 +1233,14 @@ export default function SiteBrowser({
             <IconReload />
           </ToolButton>
           {addressMode ? (
-            <div className="relative">
-              <ToolButton label="添加到主题" onClick={() => setAddToTopicOpen((v) => !v)}>
+            <div ref={addToTopicRef} className="relative">
+              <ToolButton
+                label="添加到主题"
+                onClick={() => {
+                  setShowHistory(false);
+                  setAddToTopicOpen((v) => !v);
+                }}
+              >
                 <IconAdd />
               </ToolButton>
               {addToTopicOpen ? (
@@ -1239,9 +1252,10 @@ export default function SiteBrowser({
                         key={t.id}
                         type="button"
                         onClick={() => void handleAddToTopic(t.id)}
-                        className="block w-full truncate rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
+                        className="flex w-full items-center gap-2 truncate rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
                       >
-                        {t.name}
+                        <span className="shrink-0 text-ink-muted">{topicIcon(t.id)}</span>
+                        <span className="min-w-0 truncate">{t.name}</span>
                       </button>
                     ))
                   ) : (
@@ -1252,10 +1266,11 @@ export default function SiteBrowser({
             </div>
           ) : null}
           <InfoButton tab={activeTabDef} />
-          <div className="relative">
+          <div ref={historyMenuRef} className="relative">
             <ToolButton
               label="历史"
               onClick={() => {
+                setAddToTopicOpen(false);
                 setShowHistory((v) => !v);
               }}
             >

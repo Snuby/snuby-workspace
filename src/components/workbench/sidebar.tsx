@@ -7,6 +7,7 @@ import { useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTopics, type Topic } from "@/components/workbench/topics-context";
+import { topicIcon } from "@/components/workbench/topic-icon";
 import { useClickOutside } from "@/lib/use-click-outside";
 import {
   getAgentRunningCount,
@@ -39,36 +40,6 @@ const ICONS = {
       <circle cx="12" cy="12" r="9" />
       <path d="M3 12h18" />
       <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
-    </svg>
-  ),
-  news: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="M4 5h15v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
-      <path d="M19 8h1a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2" />
-      <path d="M8 9h7" />
-      <path d="M8 13h7" />
-      <path d="M8 17h4" />
-    </svg>
-  ),
-  creator: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="M12 20h9" />
-      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
-    </svg>
-  ),
-  leaderboard: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="M8 21h8" />
-      <path d="M12 17v4" />
-      <path d="M7 4h10" />
-      <path d="M17 4v8a5 5 0 0 1-10 0V4" />
-      <circle cx="12" cy="12" r="2.5" />
-    </svg>
-  ),
-  layers: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
-      <path d="m12 2 10 6-10 6L2 8z" />
-      <path d="m2 14 10 6 10-6" />
     </svg>
   ),
   flask: (
@@ -107,14 +78,6 @@ const NAV: NavLeaf[] = [
   { href: "/browser", label: "Web 访问", icon: ICONS.globe },
   { href: "/settings", label: "设置", icon: ICONS.gear },
 ];
-
-/** 出厂主题图标映射 (新主题用通用 layers 图标) */
-function topicIcon(id: string): React.ReactNode {
-  if (id === "it-news") return ICONS.news;
-  if (id === "creators") return ICONS.creator;
-  if (id === "leaderboard") return ICONS.leaderboard;
-  return ICONS.layers;
-}
 
 function itemClass(active: boolean): string {
   return [

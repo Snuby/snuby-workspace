@@ -10,6 +10,14 @@ import {
 
 const WEEK_HEAD = ["日", "一", "二", "三", "四", "五", "六"] as const;
 
+/** 今年还剩几天（含今天） */
+function daysLeftInYear(now = new Date()): number {
+  const y = now.getFullYear();
+  const end = new Date(y, 11, 31);
+  const today = new Date(y, now.getMonth(), now.getDate());
+  return Math.round((end.getTime() - today.getTime()) / 86_400_000) + 1;
+}
+
 function addMonths(y: number, m: number, delta: number): { y: number; m: number } {
   let ny = y;
   let nm = m + delta;
@@ -42,6 +50,40 @@ function cellTone(day: ChinaDayInfo): string {
   if (day.mark === "work") return "bg-surface-2";
   if (day.festivals.length > 0 || day.jieQi) return "bg-accent-soft/70";
   return "";
+}
+
+function isPastDay(day: ChinaDayInfo, today: ChinaDayInfo): boolean {
+  if (day.y !== today.y) return day.y < today.y;
+  if (day.m !== today.m) return day.m < today.m;
+  return day.d < today.d;
+}
+
+/** 蜡笔斜线：略弯、双笔触，像手划过 */
+function CrayonStrike() {
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0 z-[2] h-full w-full overflow-visible"
+      viewBox="0 0 48 48"
+      aria-hidden
+    >
+      <path
+        d="M7.5 39.5 C16 31 22 24 27 18 C32 12 37.5 9 41 7.5"
+        fill="none"
+        stroke="rgba(192,57,43,0.55)"
+        strokeWidth="3.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8.8 40.8 C17 32.2 23 25 28 19 C33 13 38 10 41.5 8.2"
+        fill="none"
+        stroke="rgba(192,57,43,0.35)"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 function MonthPane({
@@ -86,6 +128,7 @@ function MonthPane({
 
           const isToday = isSameDay(cell, today);
           const isSel = isSameDay(cell, selected);
+          const past = isPastDay(cell, today);
           const tone = cellTone(cell);
           const festHint =
             cell.festivals[0] ??
@@ -112,8 +155,10 @@ function MonthPane({
                 "before:pointer-events-none before:absolute before:inset-0 before:rounded-[6px] before:transition-colors before:duration-150 hover:before:bg-hover",
                 tone,
                 isSel ? "ring-1 ring-inset ring-accent/45" : "",
+                past ? "opacity-70" : "",
               ].join(" ")}
             >
+              {past ? <CrayonStrike /> : null}
               {cell.mark === "rest" ? (
                 <span className="absolute right-0.5 top-0.5 z-[1] text-[9px] font-medium leading-none text-up">
                   休
@@ -131,7 +176,9 @@ function MonthPane({
                     ? "bg-accent font-semibold text-white"
                     : isSel
                       ? "font-semibold text-accent-deep"
-                      : "text-ink",
+                      : past
+                        ? "text-ink-muted"
+                        : "text-ink",
                 ].join(" ")}
               >
                 {cell.d}
@@ -190,11 +237,12 @@ export default function LunarCalendar({
   const shown = hovered ?? selected;
   const previewing = hovered !== null && !isSameDay(hovered, selected);
   const detail = detailLines(shown);
+  const yearDaysLeft = daysLeftInYear();
 
   return (
     <div onClick={goToday}>
       <div
-        className="mb-3 flex items-center justify-between gap-2"
+        className="relative mb-3 flex items-center justify-between gap-2"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-1">
@@ -215,27 +263,43 @@ export default function LunarCalendar({
             ›
           </button>
         </div>
-        <div className="flex items-center gap-3 text-[11px] text-ink-faint">
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block h-2.5 w-2.5 rounded-[3px] bg-up-soft ring-1 ring-up/25" />
-            放假
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block h-2.5 w-2.5 rounded-[3px] bg-surface-2 ring-1 ring-line" />
-            调休上班
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block h-2.5 w-2.5 rounded-[3px] bg-accent-soft ring-1 ring-accent/20" />
-            节日/节气
-          </span>
+        <p className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap text-[12.5px] text-ink-muted">
+          今年还剩{" "}
+          <span
+            className="mx-0.5 inline-block text-[20px] font-bold leading-none text-up"
+            style={{
+              fontFamily:
+                'ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", "Consolas", monospace',
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {yearDaysLeft}
+          </span>{" "}
+          天（含今天）
+        </p>
+        <div className="flex items-center gap-3">
+          <div className="hidden items-center gap-3 text-[11px] text-ink-faint sm:flex">
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-[3px] bg-up-soft ring-1 ring-up/25" />
+              放假
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-[3px] bg-surface-2 ring-1 ring-line" />
+              调休上班
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block h-2.5 w-2.5 rounded-[3px] bg-accent-soft ring-1 ring-accent/20" />
+              节日/节气
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={goToday}
+            className="rounded-[6px] px-2 py-1 text-[12px] text-accent-deep transition-colors duration-150 hover:bg-accent-soft"
+          >
+            今天
+          </button>
         </div>
-        <button
-          type="button"
-          onClick={goToday}
-          className="rounded-[6px] px-2 py-1 text-[12px] text-accent-deep transition-colors duration-150 hover:bg-accent-soft"
-        >
-          今天
-        </button>
       </div>
 
       <div className="flex flex-col gap-6 lg:flex-row lg:gap-8">
