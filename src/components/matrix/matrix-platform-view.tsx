@@ -12,6 +12,11 @@ import {
   type MatrixPlatform,
   type MatrixTab,
 } from "@/lib/matrix-types";
+import {
+  IconUser,
+  tabIconFor,
+} from "@/components/ui/site-favicon";
+import { ContextMenuItem, ContextMenuLayer } from "@/components/ui/context-menu-layer";
 
 type Props = {
   platformId: string;
@@ -30,6 +35,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   const [activeTabByAccount, setActiveTabByAccount] = useState<Record<string, string>>({});
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; accountId: string } | null>(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   /** 标签加载态 (内存, 不落库) */
@@ -287,16 +293,32 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
     }
   };
 
-  const commitRename = async (accountId: string) => {
+  const commitRename = async () => {
+    const accountId = renamingId;
     const name = renameValue.trim();
     setRenamingId(null);
-    if (!name) return;
+    setRenameValue("");
+    if (!accountId || !name) return;
     const r = await fetch("/api/matrix/accounts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "rename", platformId, accountId, displayName: name }),
     });
     if (r.ok) await refreshAccounts();
+  };
+
+  // 顶栏状态提示自动消失, 避免长期残留
+  useEffect(() => {
+    if (!notice) return;
+    const t = window.setTimeout(() => setNotice(""), 2500);
+    return () => window.clearTimeout(t);
+  }, [notice]);
+
+  const openRenameDialog = (accountId: string) => {
+    const acc = accounts.find((a) => a.id === accountId);
+    setCtxMenu(null);
+    setRenamingId(accountId);
+    setRenameValue(acc?.displayName ?? "");
   };
 
   const removeAccount = async (accountId: string) => {
@@ -459,91 +481,144 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
-      {/* 顶栏: 平台名 + 账号切换/添加 (原左侧账号栏上移, 内容区全宽) */}
-      <div className="flex h-[42px] shrink-0 items-center gap-2 border-b border-line bg-surface px-3">
-        <div className="shrink-0 text-[14px] font-bold text-ink">{platform.name}</div>
-        <div className="h-4 w-px shrink-0 bg-line" />
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-          {accounts.length === 0 ? (
-            <span className="px-1 text-[12px] text-ink-faint">还没有账号，点右侧添加后登录</span>
-          ) : (
-            accounts.map((a) => {
-              const selected = a.id === activeAccountId;
-              return (
-                <div
-                  key={a.id}
-                  className={[
-                    "group flex h-7 shrink-0 items-center gap-0.5 rounded-md pl-2 pr-0.5 text-[12.5px] transition-colors",
-                    selected
-                      ? "bg-accent-soft font-medium text-accent-deep"
-                      : "text-ink-muted hover:bg-black/5 hover:text-ink",
-                  ].join(" ")}
+      {/* 顶栏: 与主题站点选项卡同构 (底线激活 + lucide 图标 + 悬停删除 / 右键重命名) */}
+      <div className="flex h-[42px] shrink-0 items-stretch gap-1 overflow-x-auto overflow-y-hidden border-b border-line bg-surface px-4">
+        <span className="mr-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[14px] font-bold text-ink">
+          {tabIconFor(`${platform.id} ${platform.homeUrl} ${platform.name}`, "h-3.5 w-3.5")}
+          {platform.name}
+        </span>
+        {accounts.length === 0 ? (
+          <span className="flex items-center px-1 text-[12px] text-ink-faint">还没有账号，点右侧添加后登录</span>
+        ) : (
+          accounts.map((a) => {
+            const selected = a.id === activeAccountId;
+            return (
+              <div
+                key={a.id}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.getSelection()?.removeAllRanges();
+                  setCtxMenu({ x: e.clientX, y: e.clientY, accountId: a.id });
+                }}
+                className={[
+                  "group relative flex shrink-0 select-none items-center gap-1.5 px-3 text-[13px] transition-colors duration-150",
+                  selected ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
+                ].join(" ")}
+              >
+                <button
+                  type="button"
+                  onClick={() => void selectAccount(a.id)}
+                  className="flex max-w-[140px] items-center gap-1.5 truncate"
+                  title={`${a.displayName}\n右键重命名`}
                 >
-                  {renamingId === a.id ? (
-                    <input
-                      autoFocus
-                      value={renameValue}
-                      onChange={(e) => setRenameValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void commitRename(a.id);
-                        if (e.key === "Escape") setRenamingId(null);
-                      }}
-                      onBlur={() => void commitRename(a.id)}
-                      className="w-[100px] rounded border border-accent/40 bg-white px-1 py-0.5 text-[12px] outline-none"
-                    />
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => void selectAccount(a.id)}
-                      className="max-w-[120px] truncate"
-                      title={a.displayName}
-                    >
-                      {a.displayName}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    aria-label={`重命名 ${a.displayName}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRenamingId(a.id);
-                      setRenameValue(a.displayName);
-                    }}
-                    className="pointer-events-none flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100"
-                    title="重命名"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3">
-                      <path d="M12 20h9" />
-                      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`删除 ${a.displayName}`}
-                    onClick={() => void removeAccount(a.id)}
-                    className="pointer-events-none flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-red-50 hover:text-red-500 group-hover:pointer-events-auto group-hover:opacity-100"
-                    title="删除"
-                  >
-                    ×
-                  </button>
-                </div>
-              );
-            })
-          )}
+                  <IconUser className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{a.displayName}</span>
+                </button>
+                {selected ? (
+                  <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" />
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={`删除 ${a.displayName}`}
+                  onClick={() => void removeAccount(a.id)}
+                  className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-hover hover:text-red-500 group-hover:opacity-100"
+                  title="删除"
+                >
+                  <IconX className="h-3 w-3" />
+                </button>
+              </div>
+            );
+          })
+        )}
+        <div className="relative ml-1 flex shrink-0 items-center">
           <button
             type="button"
             disabled={busy}
+            title="添加账号"
             onClick={() => void addAccount()}
-            className="ml-0.5 shrink-0 rounded-md bg-accent px-2 py-0.5 text-[11.5px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+            className="flex h-6 w-6 items-center justify-center rounded-[6px] text-ink-muted transition-colors duration-150 hover:bg-hover hover:text-ink disabled:opacity-50"
           >
-            + 添加
+            <IconAdd className="h-4 w-4" />
           </button>
         </div>
         {notice ? (
-          <span className="max-w-[200px] shrink-0 truncate text-[11.5px] text-ink-faint">{notice}</span>
+          <span className="ml-auto flex max-w-[200px] shrink-0 items-center truncate text-[11.5px] text-ink-faint">
+            {notice}
+          </span>
         ) : null}
-        <div className="flex shrink-0 items-center gap-1" aria-label="工具条" />
       </div>
+
+      {/* 账号右键菜单 */}
+      {ctxMenu ? (
+        <ContextMenuLayer x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)}>
+          <ContextMenuItem onClick={() => openRenameDialog(ctxMenu.accountId)}>重命名</ContextMenuItem>
+          <ContextMenuItem
+            danger
+            onClick={() => {
+              const id = ctxMenu.accountId;
+              setCtxMenu(null);
+              void removeAccount(id);
+            }}
+          >
+            删除
+          </ContextMenuItem>
+        </ContextMenuLayer>
+      ) : null}
+
+      {/* 重命名弹框 */}
+      {renamingId ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onClick={() => {
+            setRenamingId(null);
+            setRenameValue("");
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="重命名账号"
+            onClick={(e) => e.stopPropagation()}
+            className="w-[360px] max-w-[90vw] rounded-xl border border-line bg-white p-5 shadow-2xl"
+          >
+            <div className="mb-4 text-[14.5px] font-bold text-ink">重命名账号</div>
+            <input
+              autoFocus
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitRename();
+                if (e.key === "Escape") {
+                  setRenamingId(null);
+                  setRenameValue("");
+                }
+              }}
+              placeholder="显示名称"
+              className="mb-4 w-full rounded-lg border border-line bg-surface px-3 py-2 text-[13px] outline-none focus:border-accent"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setRenamingId(null);
+                  setRenameValue("");
+                }}
+                className="rounded-lg px-3 py-1.5 text-[13px] text-ink-muted hover:bg-hover"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void commitRename()}
+                className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* 内容区全宽 */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -553,13 +628,13 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
             </div>
           ) : (
             <>
-              <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-black/[0.03]">
+              <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-surface">
                 <div className="flex shrink-0 items-center border-r border-line px-1.5">
                   <ToolBtn label="回到主页" onClick={goHome}>
                     <IconHome />
                   </ToolBtn>
                 </div>
-                <div className="flex min-w-0 flex-1 items-end gap-[3px] overflow-x-auto overflow-y-hidden px-1.5">
+                <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto overflow-y-hidden px-1.5">
                   {groupTabs.map((t) => {
                     const isActive = t.id === activeTabId;
                     const home = isHomeTabId(t.id);
@@ -586,10 +661,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                         }}
                         title={tabError ? errorByTab[t.id] : t.url}
                         className={[
-                          "group relative z-0 flex h-[30px] min-w-0 shrink-0 cursor-pointer items-center gap-1.5 rounded-t-[7px] border border-line pl-3 pr-1.5 text-[12.5px] transition-colors",
-                          isActive
-                            ? "z-10 -mb-px h-[31px] border-b-0 bg-white font-semibold text-ink shadow-[0_-1px_4px_rgba(0,0,0,0.05)]"
-                            : "bg-black/[0.05] text-ink-muted hover:bg-white/70 hover:text-ink",
+                          "group relative flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 px-2.5 text-[12.5px] transition-colors duration-150",
+                          isActive ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
                         ].join(" ")}
                       >
                         {tabError ? <span className="text-red-500">⚠</span> : null}
@@ -607,13 +680,16 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                               e.stopPropagation();
                               closeTab(activeAccount.id, t.id);
                             }}
-                            className="pointer-events-none flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-red-500 group-hover:pointer-events-auto group-hover:opacity-100"
+                            className="pointer-events-none flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-hover hover:text-red-500 group-hover:pointer-events-auto group-hover:opacity-100"
                           >
                             <IconX className="h-3 w-3" />
                           </button>
                         ) : (
-                          <span className="h-4 w-4 shrink-0" aria-hidden />
+                          <span className="h-3.5 w-3.5 shrink-0" aria-hidden />
                         )}
+                        {isActive ? (
+                          <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" />
+                        ) : null}
                       </div>
                     );
                   })}
@@ -630,7 +706,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                   </ToolBtn>
                 </div>
               </div>
-              <div className="relative min-h-0 flex-1 bg-white">
+              <div className="relative min-h-0 flex-1 bg-surface">
                 {accounts.map((acc) => {
                   const tabs = tabsByAccount[acc.id] ?? [];
                   return tabs.map((t) => (
@@ -657,7 +733,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                   ));
                 })}
                 {showFirstLoadOverlay ? (
-                  <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white">
+                  <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-surface">
                     <span className="h-5 w-5 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
                     <span className="text-[13px] text-ink-muted">页面加载中…</span>
                     <span className="max-w-[360px] truncate px-4 text-center text-[11.5px] text-ink-faint">
@@ -671,7 +747,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                   </div>
                 ) : null}
                 {showErrorOverlay ? (
-                  <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6">
+                  <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-surface px-6">
                     <span className="text-[14px] font-medium text-ink">页面加载失败</span>
                     <p className="max-w-[420px] break-all text-center text-[12px] leading-relaxed text-ink-muted">
                       {activeError}
@@ -721,7 +797,7 @@ function ToolBtn({
       type="button"
       title={label}
       onClick={onClick}
-      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+      className="flex h-7 w-7 items-center justify-center rounded-[6px] text-ink-muted transition-colors duration-150 hover:bg-hover hover:text-ink"
     >
       {children}
     </button>
@@ -771,6 +847,12 @@ const IconX = ({ className }: { className?: string }) => (
   <Icon className={className}>
     <path d="M18 6 6 18" />
     <path d="m6 6 12 12" />
+  </Icon>
+);
+const IconAdd = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M12 5v14" />
+    <path d="M5 12h14" />
   </Icon>
 );
 

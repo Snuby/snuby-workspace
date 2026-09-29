@@ -41,6 +41,7 @@ export type ModelInfo = {
   description?: string;
   supportsImages?: boolean;
   supportsReasoning?: boolean;
+  /** 积分倍数, 如 "x0.21" (网关常放在 _meta.credits / description) */
   credits?: string;
   maxInputTokens?: number;
 };
@@ -52,8 +53,53 @@ export type ConfigOptionInfo = {
   description?: string;
   category?: string;
   currentValue?: string;
-  options?: { value: string; name: string; description?: string }[];
+  options?: { value: string; name: string; description?: string; credits?: string }[];
 };
+
+/** 网关倍数文案: "x0.21" / "x1.20" */
+function isCreditMultiplier(s?: string): s is string {
+  return !!s && /^x\d+(\.\d+)?$/i.test(s.trim());
+}
+
+/** 网关 availableModels 常把 credits 放在 _meta, description 也是倍数; 展平给 UI */
+function normalizeModelInfo(
+  raw: ModelInfo & {
+    _meta?: {
+      credits?: string;
+      supportsImages?: boolean;
+      supportsReasoning?: boolean;
+      maxInputTokens?: number;
+    };
+  },
+): ModelInfo {
+  const meta = raw._meta;
+  const credits =
+    raw.credits ||
+    meta?.credits ||
+    (isCreditMultiplier(raw.description) ? raw.description.trim() : undefined);
+  return {
+    modelId: raw.modelId,
+    name: raw.name,
+    description: raw.description,
+    supportsImages: raw.supportsImages ?? meta?.supportsImages,
+    supportsReasoning: raw.supportsReasoning ?? meta?.supportsReasoning,
+    credits,
+    maxInputTokens: raw.maxInputTokens ?? meta?.maxInputTokens,
+  };
+}
+
+function modelsFromConfigOptions(
+  options: { value: string; name: string; description?: string; credits?: string }[],
+): ModelInfo[] {
+  return options.map((opt) =>
+    normalizeModelInfo({
+      modelId: opt.value,
+      name: opt.name || opt.value,
+      description: opt.description,
+      credits: opt.credits || (isCreditMultiplier(opt.description) ? opt.description.trim() : undefined),
+    }),
+  );
+}
 
 export type AgentStatus = {
   phase: "idle" | "discovering" | "connecting" | "connected" | "error";
@@ -654,10 +700,7 @@ async function ensureSessionOn(cs: ConnState, cwd?: string, opts: { force?: bool
             cs.sessionConfig[o.id] = o;
             // 新网关: 模型清单在 model 配置的 options 里 (result.models 已不再返回)
             if (o.id === "model" && Array.isArray(o.options)) {
-              cs.availableModels = o.options.map((opt) => ({
-                modelId: opt.value,
-                name: opt.name || opt.value,
-              }));
+              cs.availableModels = modelsFromConfigOptions(o.options);
             }
           }
         } else if (up.sessionUpdate === "usage_update") {
@@ -666,7 +709,7 @@ async function ensureSessionOn(cs: ConnState, cwd?: string, opts: { force?: bool
       } else if (r?.result?.sessionId) {
         // 实测: result 直接带 models.availableModels (模型清单)
         if (Array.isArray(r.result.models?.availableModels)) {
-          cs.availableModels = r.result.models!.availableModels!;
+          cs.availableModels = r.result.models!.availableModels!.map(normalizeModelInfo);
         }
         clearTimeout(timer);
         resolve(r.result);
@@ -763,10 +806,7 @@ async function loadSessionOn(cs: ConnState, sessionId: string, cwd?: string): Pr
             cs.sessionConfig[o.id] = o;
             // 新网关: 模型清单在 model 配置的 options 里 (result.models 已不再返回)
             if (o.id === "model" && Array.isArray(o.options)) {
-              cs.availableModels = o.options.map((opt) => ({
-                modelId: opt.value,
-                name: opt.name || opt.value,
-              }));
+              cs.availableModels = modelsFromConfigOptions(o.options);
             }
           }
         } else if (up.sessionUpdate === "usage_update") {
@@ -775,7 +815,7 @@ async function loadSessionOn(cs: ConnState, sessionId: string, cwd?: string): Pr
       } else if (r?.result) {
         // 实测: load 成功 result 直接含 models.availableModels
         if (Array.isArray(r.result.models?.availableModels)) {
-          cs.availableModels = r.result.models!.availableModels!;
+          cs.availableModels = r.result.models!.availableModels!.map(normalizeModelInfo);
         }
         clearTimeout(timer);
         resolve(r.result);
@@ -851,7 +891,7 @@ async function refreshConfigOn(cs: ConnState): Promise<void> {
             const keep = preserved[o.id] ?? prev?.currentValue;
             cs.sessionConfig[o.id] = keep ? { ...o, currentValue: keep } : o;
             if (o.id === "model" && Array.isArray(o.options)) {
-              cs.availableModels = o.options.map((opt) => ({ modelId: opt.value, name: opt.name || opt.value }));
+              cs.availableModels = modelsFromConfigOptions(o.options);
             }
           }
         }
@@ -1114,11 +1154,17 @@ export function status(key?: string): AgentStatus {
     authMethods: cs.authMethods,
     acpSessionId: cs.activeSessionId ?? undefined,
     connectedAt: Date.now(),
-    models: cs.availableModels.length
+    models: (cs.availableModels.length
       ? cs.availableModels
       : Object.values(cs.sessionConfig)
           .find((o) => o.id === "model" && Array.isArray(o.options))
-          ?.options?.map((opt) => ({ modelId: opt.value, name: opt.name || opt.value })) ?? FALLBACK_MODELS,
+          ?.options?.map((opt) => ({
+            modelId: opt.value,
+            name: opt.name || opt.value,
+            description: opt.description,
+            credits: opt.credits,
+          })) ?? FALLBACK_MODELS
+    ).map(normalizeModelInfo),
     sessionConfig: cs.sessionConfig,
     usage: cs.usage ?? undefined,
     queue,
@@ -1563,14 +1609,25 @@ export async function prompt(
         await new Promise<void>((resolve, reject) => {
           // 防御性吞流: cancel 语义不保证; 超时后丢弃转发直至自然结束
           let discarded = false;
+          let settled = false;
+          let sawStop = false;
           let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
           let absoluteTimer: ReturnType<typeof setTimeout> | null = null;
           let swallowTimer: ReturnType<typeof setTimeout> | null = null;
+          /** 网关常在 stopReason 之后才推 usage_update; 结束后再短等一会避免 Token 栏滞后 */
+          let usageGraceTimer: ReturnType<typeof setTimeout> | null = null;
           const clearAllTimers = () => {
             if (inactivityTimer) clearTimeout(inactivityTimer);
             if (absoluteTimer) clearTimeout(absoluteTimer);
             if (swallowTimer) clearTimeout(swallowTimer);
-            inactivityTimer = absoluteTimer = swallowTimer = null;
+            if (usageGraceTimer) clearTimeout(usageGraceTimer);
+            inactivityTimer = absoluteTimer = swallowTimer = usageGraceTimer = null;
+          };
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearAllTimers();
+            resolve();
           };
           const emit = (e: PromptEvent): void => {
             if (!discarded) onEvent(e);
@@ -1722,6 +1779,8 @@ export async function prompt(
               } else if (type === "usage_update") {
                 const usage = applyUsageUpdate(cs, up as Record<string, unknown>);
                 emit({ type: "usage", usage });
+                // stop 后等到用量再收尾, 立刻 finish 让前端 Token 栏跟上
+                if (sawStop) finish();
               } else if (type === "config_option_update") {
                 if (Array.isArray(up.configOptions)) {
                   for (const o of up.configOptions) cs.sessionConfig[o.id] = o;
@@ -1752,7 +1811,9 @@ export async function prompt(
                 clearPoisonedAcpBinding(key, cs, sessionId);
               }
               emit({ type: "done", stopReason, id });
-              resolve();
+              sawStop = true;
+              // 再等一小段: 常见顺序是 end_turn 之后才到 usage_update
+              usageGraceTimer = setTimeout(() => finish(), 900);
             }
           }).catch((e) => {
             clearAllTimers();

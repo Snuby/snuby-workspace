@@ -8,6 +8,7 @@ Snuby 采用 **SDD（Spec-Driven Development, 规格驱动开发）**：每个�
 docs/
 ├── README.md              # 本文件：SDD 流程与规则
 ├── conventions.md         # 全局编码与架构规范（所有 spec 必须遵守）
+├── design-system.md       # 全局视觉规范（创作者专业台 token / 交互同构）
 ├── acp-gateway-capability.md  # ACP 网关能力备忘
 └── specs/
     └── NNN-<slug>/        # 每个 spec 一个目录, 编号递增
@@ -30,12 +31,13 @@ draft → reviewed → implementing → done
 
 ## 一致性规则（强制）
 
-1. **单一事实源**: 需求以 `requirements.md` 为准，技术决策以 `design.md` 为准。代码与文档冲突 = Bug，必须同步修复其中之一。
+1. **单一事实源**: 需求以 `requirements.md` 为准，技术决策以 `design.md` 为准，**视觉以 `design-system.md` + `globals.css` 为准**。代码与文档冲突 = Bug，必须同步修复其中之一。
 2. **术语一致**: 文档与代码使用同一套领域术语（见 `conventions.md` 术语表）。
 3. **接口契约**: API 路由的请求/响应结构必须在对应 `design.md` 中定义，代码注释引用 spec 编号（如 `// Spec: 017-agent-session`）。
 4. **任务可追溯**: `tasks.md` 中的每项任务对应一次可验证的提交，状态只允许 `[ ]` / `[x]` / `[-]`（取消）。
 5. **目录齐备**: 每个 spec 目录必须包含 `README.md` / `requirements.md` / `design.md` / `tasks.md` 四个文件（轻量 spec 的 design 可并入 README，但需在 README 中说明）；缺文件视为规格不完整。
 6. **测试即规格**: 契约类逻辑必须有对应单测，改契约需先改 spec。
+7. **视觉变更**: 改色板 / 选中态 / 圆角 / 壳层密度时，先更新 `docs/design-system.md` 与 token，再改组件；新 UI 不得硬编码强调色 hex。
 
 ## 当前规格索引
 

@@ -118,10 +118,10 @@ function topicIcon(id: string): React.ReactNode {
 
 function itemClass(active: boolean): string {
   return [
-    "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] transition-colors",
+    "flex w-full items-center gap-2.5 rounded-[6px] px-2.5 py-2 text-[13px] transition-colors duration-150",
     active
-      ? "bg-accent-soft font-semibold text-accent-deep"
-      : "text-ink hover:bg-black/5",
+      ? "bg-accent-soft font-medium text-accent-deep"
+      : "text-ink hover:bg-hover",
   ].join(" ");
 }
 
@@ -171,15 +171,15 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="flex h-screen w-56 shrink-0 flex-col border-r border-line bg-surface">
-      <div className="flex items-center gap-2.5 px-4 pb-4 pt-5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-base font-bold text-white">
+    <aside className="app-drag flex h-screen w-[228px] shrink-0 flex-col bg-page pt-[36px]">
+      <div className="app-no-drag flex items-center gap-2.5 px-4 pb-3.5 pt-1">
+        <div className="flex h-7 w-7 items-center justify-center rounded-[6px] bg-accent text-[13px] font-bold text-white">
           S
         </div>
-        <div className="text-[17px] font-semibold tracking-wide">Snuby</div>
+        <div className="text-[15px] font-semibold tracking-wide text-ink">Snuby</div>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 pb-3 pt-1">
+      <nav className="app-no-drag flex-1 overflow-y-auto px-3 pb-3 pt-1">
         {/* 固定区 */}
         {NAV.map((item) => {
           const active = item.match ? item.match.includes(pathname) : pathname === item.href;
@@ -191,6 +191,25 @@ export default function Sidebar() {
           );
         })}
 
+        {/* 自媒体账号矩阵 */}
+        <div className="mb-1 mt-4 px-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+            自媒体账号矩阵
+          </span>
+        </div>
+        <Link href="/matrix/weixin" className={itemClass(pathname === "/matrix/weixin")}>
+          {ICONS.weixin}
+          微信公众号
+        </Link>
+        <Link href="/matrix/toutiao" className={itemClass(pathname === "/matrix/toutiao")}>
+          {ICONS.toutiao}
+          今日头条
+        </Link>
+        <Link href="/matrix/xiaohongshu" className={itemClass(pathname === "/matrix/xiaohongshu")}>
+          {ICONS.xiaohongshu}
+          小红书
+        </Link>
+
         {/* 主题区 */}
         <div className="mb-1 mt-4 flex items-center justify-between px-1">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">主题</span>
@@ -201,7 +220,7 @@ export default function Sidebar() {
               setNewOpen((v) => !v);
               setMenuFor(null);
             }}
-            className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+            className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors duration-150 hover:bg-hover hover:text-ink"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
               <path d="M12 5v14" />
@@ -211,7 +230,7 @@ export default function Sidebar() {
         </div>
 
         {newOpen ? (
-          <div className="mb-1 flex items-center gap-1.5 rounded-lg bg-black/5 p-1.5">
+          <div className="mb-1 flex items-center gap-1.5 rounded-[6px] bg-hover p-1.5">
             <input
               autoFocus
               value={newName}
@@ -221,7 +240,7 @@ export default function Sidebar() {
                 if (e.key === "Escape") setNewOpen(false);
               }}
               placeholder="主题名称"
-              className="min-w-0 flex-1 rounded-md border border-line bg-white px-2 py-1 text-[12.5px] text-ink outline-none focus:border-accent"
+              className="min-w-0 flex-1 rounded-[6px] border border-line bg-surface px-2 py-1 text-[12.5px] text-ink outline-none focus:border-accent"
             />
             <button
               type="button"
@@ -251,7 +270,7 @@ export default function Sidebar() {
                   type="button"
                   aria-label={`管理主题 ${t.name}`}
                   onClick={() => setMenuFor(menuFor === t.id ? null : t.id)}
-                  className="absolute right-1.5 top-1/2 hidden h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-ink group-hover:flex"
+                  className="absolute right-1.5 top-1/2 hidden h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-ink-faint transition-colors hover:bg-hover hover:text-ink group-hover:flex"
                 >
                   <svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5">
                     <circle cx="12" cy="5" r="1.6" />
@@ -289,7 +308,7 @@ export default function Sidebar() {
                             setRenameFor(t.id);
                             setRenameValue(t.name);
                           }}
-                          className="block w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-black/5"
+                          className="block w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
                         >
                           重命名
                         </button>
@@ -309,7 +328,7 @@ export default function Sidebar() {
           })
         )}
 
-        {/* 实验室区 (与主题同级的大板块): 内置实验性子板块, 独立新模式 */}
+        {/* 实验室 */}
         <div className="mb-1 mt-4 px-1">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">实验室</span>
         </div>
@@ -329,28 +348,9 @@ export default function Sidebar() {
             </span>
           )}
         </Link>
-
-        {/* 自媒体账号矩阵: 与主题/实验室同级, 分组标题 + 子项常显 */}
-        <div className="mb-1 mt-4 px-1">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-            自媒体账号矩阵
-          </span>
-        </div>
-        <Link href="/matrix/weixin" className={itemClass(pathname === "/matrix/weixin")}>
-          {ICONS.weixin}
-          微信公众号
-        </Link>
-        <Link href="/matrix/toutiao" className={itemClass(pathname === "/matrix/toutiao")}>
-          {ICONS.toutiao}
-          今日头条
-        </Link>
-        <Link href="/matrix/xiaohongshu" className={itemClass(pathname === "/matrix/xiaohongshu")}>
-          {ICONS.xiaohongshu}
-          小红书
-        </Link>
       </nav>
 
-      <div className="border-t border-line px-4 py-3.5 text-[11px] text-ink-faint">
+      <div className="app-no-drag border-t border-line px-4 py-3.5 text-[11px] text-ink-faint">
         Snuby Workbench v0.1
       </div>
     </aside>

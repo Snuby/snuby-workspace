@@ -320,6 +320,16 @@ app.whenReady().then(async () => {
       height: 960,
       title: APP_TITLE,
       autoHideMenuBar: true,
+      // 隐藏原生标题栏文案 ("Snuby 工作台"); mac 保留红绿灯嵌入内容区
+      ...(process.platform === "darwin"
+        ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 14, y: 14 } }
+        : {
+            titleBarOverlay: {
+              color: "#F2F3F5",
+              symbolColor: "#1C1F24",
+              height: 36,
+            },
+          }),
       // webviewTag: 桌面版榜单以 <webview> 内嵌第三方官网 (spec 013, AC-A)
       // preload: 清矩阵 partition 等桌面能力
       webPreferences: {

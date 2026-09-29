@@ -9,6 +9,8 @@
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTopics } from "@/components/workbench/topics-context";
 import LocalAgentPanel from "@/components/site-browser/local-agent-panel";
+import { tabIconFor } from "@/components/ui/site-favicon";
+import { ContextMenuItem, ContextMenuLayer } from "@/components/ui/context-menu-layer";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -168,6 +170,7 @@ export default function SiteBrowser({
   const [siteLabel, setSiteLabel] = useState("");
   const [addToTopicOpen, setAddToTopicOpen] = useState(false);
   const [siteNotice, setSiteNotice] = useState("");
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; siteId: string } | null>(null);
   const [loaded, setLoaded] = useState(false);
   /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -676,6 +679,13 @@ export default function SiteBrowser({
     setAddSiteOpen(true);
   };
 
+  // 站点栏提示自动消失
+  useEffect(() => {
+    if (!siteNotice) return;
+    const t = window.setTimeout(() => setSiteNotice(""), 2500);
+    return () => window.clearTimeout(t);
+  }, [siteNotice]);
+
   const handleAddSite = async () => {
     const url = siteUrl.trim();
     if (!url) return;
@@ -808,32 +818,23 @@ export default function SiteBrowser({
                 key={s.id}
                 type="button"
                 onClick={() => selectSite(s.id)}
-                onDoubleClick={(e) => {
+                onContextMenu={(e) => {
+                  e.preventDefault();
                   e.stopPropagation();
-                  openEditSite(s.id);
+                  window.getSelection()?.removeAllRanges();
+                  setCtxMenu({ x: e.clientX, y: e.clientY, siteId: s.id });
                 }}
-                title={`${s.label}\n${s.url}\n双击编辑`}
+                title={`${s.label}\n${s.url}\n右键编辑`}
                 className={[
-                  "group relative shrink-0 px-3 text-[13px] transition-colors",
+                  "group relative flex shrink-0 select-none items-center gap-1.5 px-3 text-[13px] transition-colors duration-150",
                   active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
                 ].join(" ")}
               >
-                {s.label}
-                {active ? <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" /> : null}
-                <span
-                  role="button"
-                  aria-label={`编辑站点 ${s.label}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEditSite(s.id);
-                  }}
-                  className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-ink group-hover:opacity-100"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3">
-                    <path d="M12 20h9" />
-                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
-                  </svg>
+                <span className="inline-flex shrink-0 text-current">
+                  {tabIconFor(`${s.url} ${s.label}`, "h-3.5 w-3.5")}
                 </span>
+                <span className="max-w-[140px] truncate">{s.label}</span>
+                {active ? <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" /> : null}
                 {moduleSites.length > 1 ? (
                   <span
                     role="button"
@@ -842,8 +843,7 @@ export default function SiteBrowser({
                       e.stopPropagation();
                       void handleRemoveSite(s.id);
                     }}
-                    // X 常驻占位 (inline-flex + opacity 控制显隐): hover 出现但不撑开宽度, 选项卡不跳变
-                    className="ml-0.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-red-500 group-hover:opacity-100"
+                    className="ml-0.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-hover hover:text-red-500 group-hover:opacity-100"
                   >
                     <IconX className="h-3 w-3" />
                   </span>
@@ -851,12 +851,37 @@ export default function SiteBrowser({
               </button>
             );
           })}
+          {ctxMenu ? (
+            <ContextMenuLayer x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)}>
+              <ContextMenuItem
+                onClick={() => {
+                  const id = ctxMenu.siteId;
+                  setCtxMenu(null);
+                  openEditSite(id);
+                }}
+              >
+                编辑
+              </ContextMenuItem>
+              {moduleSites.length > 1 ? (
+                <ContextMenuItem
+                  danger
+                  onClick={() => {
+                    const id = ctxMenu.siteId;
+                    setCtxMenu(null);
+                    void handleRemoveSite(id);
+                  }}
+                >
+                  删除
+                </ContextMenuItem>
+              ) : null}
+            </ContextMenuLayer>
+          ) : null}
           <div className="relative ml-1 flex shrink-0 items-center">
             <button
               type="button"
               title="添加站点"
               onClick={openAddSite}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-hover hover:text-ink"
             >
               <IconAdd className="h-4 w-4" />
             </button>
@@ -886,7 +911,7 @@ export default function SiteBrowser({
                         setAddSiteOpen(false);
                         setEditingSiteId(null);
                       }}
-                      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+                      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-hover hover:text-ink"
                     >
                       <IconX className="h-4 w-4" />
                     </button>
@@ -914,7 +939,7 @@ export default function SiteBrowser({
                           setAddSiteOpen(false);
                           setEditingSiteId(null);
                         }}
-                        className="rounded-md border border-line bg-surface px-3.5 py-1.5 text-[13px] text-ink-muted hover:bg-black/5"
+                        className="rounded-md border border-line bg-surface px-3.5 py-1.5 text-[13px] text-ink-muted hover:bg-hover"
                       >
                         取消
                       </button>
@@ -937,9 +962,9 @@ export default function SiteBrowser({
         </div>
       )}
 
-      {/* 站内标签页栏 + 工具栏 (Chrome 页签风格) */}
-      <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-black/[0.03]">
-        <div className="flex min-w-0 flex-1 items-end gap-[3px] overflow-x-auto overflow-y-hidden px-1.5">
+      {/* 站内标签页栏 + 工具栏: 与站点选项卡同构底线风格 (圆角壳内不再用 Chrome 浮起页签) */}
+      <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-surface">
+        <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto overflow-y-hidden px-2">
           {groupTabs.map((t) => {
             const active = t.id === activeTabDef.id;
             const isHome = t.id.endsWith(HOME_SUFFIX);
@@ -954,10 +979,8 @@ export default function SiteBrowser({
                 onKeyDown={(e) => e.key === "Enter" && activateTab(groupId, t.id)}
                 title={tabErrMsg || t.url}
                 className={[
-                  "group relative z-0 flex h-[30px] min-w-0 shrink-0 cursor-pointer items-center gap-1.5 rounded-t-[7px] border border-line px-3 text-[12.5px] transition-colors",
-                  active
-                    ? "z-10 -mb-px h-[31px] border-b-0 bg-white font-semibold text-ink shadow-[0_-1px_4px_rgba(0,0,0,0.05)]"
-                    : "bg-black/[0.05] text-ink-muted hover:bg-white/70 hover:text-ink",
+                  "group relative flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 px-2.5 text-[12.5px] transition-colors duration-150",
+                  active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
                 ].join(" ")}
               >
                 {t.error || tabErrMsg ? <span className="text-red-500">⚠</span> : null}
@@ -973,11 +996,12 @@ export default function SiteBrowser({
                       e.stopPropagation();
                       closeTab(groupId, t.id);
                     }}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-red-500"
+                    className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-hover hover:text-red-500 group-hover:opacity-100"
                   >
                     <IconX className="h-3 w-3" />
                   </button>
                 ) : null}
+                {active ? <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" /> : null}
               </div>
             );
           })}
@@ -1008,7 +1032,7 @@ export default function SiteBrowser({
                         key={t.id}
                         type="button"
                         onClick={() => void handleAddToTopic(t.id)}
-                        className="block w-full truncate rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-black/5"
+                        className="block w-full truncate rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
                       >
                         {t.name}
                       </button>
@@ -1046,7 +1070,7 @@ export default function SiteBrowser({
                         key={`${h.closedAt}-${i}`}
                         type="button"
                         onClick={() => openHistoryEntry(groupId, h)}
-                        className="block w-full truncate rounded-md px-2 py-1.5 text-left text-[12.5px] text-ink hover:bg-black/5"
+                        className="block w-full truncate rounded-md px-2 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
                         title={`${h.title || h.url}\n${h.url}`}
                       >
                         {h.title || h.url}
@@ -1201,7 +1225,7 @@ function ToolButton({
       title={label}
       onClick={onClick}
       disabled={disabled}
-      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink disabled:opacity-35"
+      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-35"
     >
       {children}
     </button>
@@ -1246,7 +1270,7 @@ function InfoButton({ tab }: { tab: SiteTab | null }) {
         aria-label="标签页信息"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-hover hover:text-ink"
       >
         <IconInfo />
       </button>
@@ -1260,7 +1284,7 @@ function InfoButton({ tab }: { tab: SiteTab | null }) {
               title="复制链接"
               aria-label="复制链接"
               onClick={() => void copyUrl(tab.url)}
-              className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-accent"
+              className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-hover hover:text-accent"
             >
               {copied ? <IconCheck className="h-3.5 w-3.5" /> : <IconCopy className="h-3.5 w-3.5" />}
             </button>

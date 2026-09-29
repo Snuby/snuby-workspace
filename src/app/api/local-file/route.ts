@@ -72,6 +72,19 @@ export async function GET(req: Request) {
     return new Response("bad path", { status: 400 });
   }
 
+  // 元信息: 预览标题旁展示文件大小等
+  if (url.searchParams.get("stat") === "1") {
+    if (!existsSync(p) || !statSync(p).isFile()) {
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
+    const st = statSync(p);
+    return Response.json({
+      name: basename(p),
+      size: st.size,
+      mtime: st.mtimeMs,
+    });
+  }
+
   // 目录列举: 预览找不到文件时, 前端可提示同目录媒体
   if (url.searchParams.get("list") === "1") {
     if (!existsSync(p) || !statSync(p).isDirectory()) {

@@ -8,7 +8,7 @@
 |----|------|------|
 | 框架 | Electron + Next.js 15 (App Router) + React 19 | **仅桌面 APP**（不维护独立浏览器 Web 版） |
 | 语言 | TypeScript (strict) | 全部业务代码 |
-| 样式 | Tailwind CSS v4 | 不写自定义 CSS 文件（globals.css 仅放 token） |
+| 样式 | Tailwind CSS v4 | 设计 token 仅放 `src/app/globals.css`；视觉规范见 `docs/design-system.md`（创作者专业台 · 方案 B） |
 | 用户数据 | `~/snuby-workspace-data/` | 与软件目录分离；主题库 + Agent 会话（`SNUBY_USER_DATA` 可覆盖） |
 
 ## 分层架构（整洁架构）
@@ -40,15 +40,15 @@ app/(路由+API)  →  application(用例)  →  domain(实体+类型)  ←  inf
 
 ```
 侧边栏（一级菜单）
-├── 工作台        /             首页：模块卡片
-├── （主题区）                 用户动态主题 → /topic/[id]
-├── Web 访问      /browser      简易浏览器
-├── 设置          /settings
-└── （实验室）    /lab/local-agent  本地 Agent
+├── 工作台 / Web 访问 / 设置
+├── 主题区          用户动态主题 → /topic/[id]
+├── 实验室          /lab/local-agent
+└── 自媒体账号矩阵  /matrix/{weixin|toutiao|xiaohongshu}
 ```
 
-- 主题宿主由 `TopicHost` + `/api/topics` 驱动，不在侧边栏硬编码宏观/行情类板块。
+- 主题宿主由 `TopicHost` + `/api/topics` 驱动；矩阵平台页与主题一样常驻切换（opacity + pointer-events）。
 - 一级菜单激活判定：`NavLeaf.match` 列出该菜单对应的全部路径，任一命中即高亮。
+- **视觉一致性**：壳层 / 标签 / 矩阵 / Agent 共用 `docs/design-system.md` 与 globals token，禁止模块私自换强调色。
 
 ## 代码风格
 

@@ -7,10 +7,10 @@ const CARDS = [
     badge: "AI 模型榜单",
     title: "权威榜单",
     desc: "桌面版内嵌官网原页（Artificial Analysis / OpenRouter 用量排名）。",
-    iconBg: "bg-[#E3EEF9]",
-    iconStroke: "#1F5E8E",
-    ctaBg: "bg-[#E3EEF9]",
-    ctaText: "text-[#1F5E8E]",
+    iconBg: "bg-accent-soft",
+    iconStroke: "#1150B0",
+    ctaBg: "bg-accent-soft",
+    ctaText: "text-accent-deep",
     icon: (
       <>
         <path d="M8 21h8" />
@@ -26,10 +26,10 @@ const CARDS = [
     badge: "IT 资讯",
     title: "媒体资讯",
     desc: "权威 IT 媒体内嵌阅读，可添加自定义媒体。",
-    iconBg: "bg-[#FEF3E2]",
-    iconStroke: "#9A6B1F",
-    ctaBg: "bg-[#FEF3E2]",
-    ctaText: "text-[#9A6B1F]",
+    iconBg: "bg-accent-soft",
+    iconStroke: "#1150B0",
+    ctaBg: "bg-accent-soft",
+    ctaText: "text-accent-deep",
     icon: (
       <>
         <path d="M4 5h15v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
@@ -45,10 +45,10 @@ const CARDS = [
     badge: "自媒体",
     title: "创作后台",
     desc: "小红书创作中心与微信公众号后台，登录态持久保留。",
-    iconBg: "bg-[#FDE8E8]",
-    iconStroke: "#B04444",
-    ctaBg: "bg-[#FDE8E8]",
-    ctaText: "text-[#B04444]",
+    iconBg: "bg-accent-soft",
+    iconStroke: "#1150B0",
+    ctaBg: "bg-accent-soft",
+    ctaText: "text-accent-deep",
     icon: (
       <>
         <path d="M12 20h9" />
@@ -61,10 +61,10 @@ const CARDS = [
     badge: "Web 访问",
     title: "简易浏览器",
     desc: "自填网址的简易浏览器（前进 / 后退 / 刷新 / 主页）。",
-    iconBg: "bg-[#E8F5E9]",
-    iconStroke: "#3E7A46",
-    ctaBg: "bg-[#E8F5E9]",
-    ctaText: "text-[#3E7A46]",
+    iconBg: "bg-accent-soft",
+    iconStroke: "#1150B0",
+    ctaBg: "bg-accent-soft",
+    ctaText: "text-accent-deep",
     icon: (
       <>
         <circle cx="12" cy="12" r="9" />
@@ -79,9 +79,9 @@ const CARDS = [
     title: "WorkBuddy 协作",
     desc: "对接本机 ACP 网关，多会话隔离的本地 Agent 工作台。",
     iconBg: "bg-accent-soft",
-    iconStroke: "#185FA5",
+    iconStroke: "#1150B0",
     ctaBg: "bg-accent-soft",
-    ctaText: "text-accent",
+    ctaText: "text-accent-deep",
     icon: (
       <>
         <path d="M9 3h6" />
@@ -107,10 +107,10 @@ export default function HomePage() {
               <Link
                 key={c.href}
                 href={c.href}
-                className="rounded-xl border border-line bg-surface p-5 transition hover:-translate-y-px hover:shadow-md"
+                className="rounded-[8px] border border-line bg-surface p-5 transition-colors duration-150 hover:border-accent/30"
               >
                 <div className="mb-3 flex items-start justify-between gap-2">
-                  <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${c.iconBg}`}>
+                  <div className={`flex h-9 w-9 items-center justify-center rounded-[6px] ${c.iconBg}`}>
                     <svg
                       viewBox="0 0 24 24"
                       fill="none"
@@ -123,13 +123,13 @@ export default function HomePage() {
                       {c.icon}
                     </svg>
                   </div>
-                  <span className="rounded-md bg-black/[0.04] px-1.5 py-0.5 text-[10.5px] text-ink-faint">
+                  <span className="rounded-[6px] bg-hover px-1.5 py-0.5 text-[10.5px] text-ink-faint">
                     {c.badge}
                   </span>
                 </div>
                 <div className="mb-1.5 text-[14.5px] font-semibold">{c.title}</div>
                 <p className="text-[12.5px] leading-relaxed text-ink-muted">{c.desc}</p>
-                <span className={`mt-3 inline-block rounded-md px-2 py-0.5 text-[11px] ${c.ctaBg} ${c.ctaText}`}>
+                <span className={`mt-3 inline-block rounded-[6px] px-2 py-0.5 text-[11px] ${c.ctaBg} ${c.ctaText}`}>
                   进入
                 </span>
               </Link>

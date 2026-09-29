@@ -33,7 +33,7 @@ type AgentStatus = {
   authMethods?: string[];
   acpSessionId?: string;
   lastError?: string;
-  models?: { modelId: string; name: string; description?: string }[];
+  models?: { modelId: string; name: string; description?: string; credits?: string }[];
   sessionConfig?: Record<
     string,
     { id: string; name: string; description?: string; currentValue?: string; options?: { value: string; name: string; description?: string }[] }
@@ -144,7 +144,10 @@ type StoredMsg = {
   interrupted?: boolean;
   ts: number;
   extra?: { title: string; text: string }[];
+  resources?: MsgResource[];
 };
+
+type MsgResource = { name: string; path: string; kind: "image" | "file" };
 
 /** 磁盘消息 → 面板消息 */
 function storedToMsg(m: StoredMsg): Msg {
@@ -163,6 +166,7 @@ function storedToMsg(m: StoredMsg): Msg {
     error: m.error,
     interrupted: m.interrupted,
     extra: m.extra,
+    resources: m.resources,
     streaming: false,
     finishedAt: m.ts,
     ts: m.ts,
@@ -198,6 +202,8 @@ type Msg = {
   finishedAt?: number;
   ts?: number;
   extra?: { title: string; text: string }[];
+  /** 用户附带资源 (会话 resources/ 绝对路径) */
+  resources?: MsgResource[];
 };
 
 const PHASE_META: Record<Phase, { label: string; color: string; dot: string }> = {
@@ -315,7 +321,26 @@ export default function LocalAgentPanel() {
   const [busy, setBusy] = useState(false);
   const [input, setInput] = useState("");
   const inputValueRef = useRef("");
-  inputValueRef.current = input;  const [msgs, setMsgs] = useState<Msg[]>([]);
+  inputValueRef.current = input;
+  /** 待发送附件 (本地绝对路径; Electron 直接取 file.path, 否则先上传到会话 attachments/) */
+  type PendingAttach = {
+    id: string;
+    name: string;
+    kind: "image" | "file";
+    path?: string;
+    previewUrl?: string;
+    file?: File;
+  };
+  const [attachments, setAttachments] = useState<PendingAttach[]>([]);
+  /** 输入框上方待发送图片的轻量预览 */
+  const [attachImgPreview, setAttachImgPreview] = useState<{ url: string; name: string } | null>(null);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const filePickRef = useRef<HTMLInputElement | null>(null);
+  const imagePickRef = useRef<HTMLInputElement | null>(null);
+  const attachMenuRef = useRef<HTMLDivElement | null>(null);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const [msgs, setMsgs] = useState<Msg[]>([]);
   /** 运行中/排队中的会话 (全局串行: 同时可有多个 queued, 至多一个真正执行) */
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   /** 排队提示: sessionId -> 前序会话标题 */
@@ -347,7 +372,6 @@ export default function LocalAgentPanel() {
     : null;
   const previewCanBack = linkNav.index > 0;
   const previewCanForward = linkNav.index < linkNav.stack.length - 1;
-  const [extraView, setExtraView] = useState<{ title: string; items: { title: string; text: string }[] } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; src: string; name: string } | null>(null);
   const [ctxToast, setCtxToast] = useState<string | null>(null);
   /** 本地会话: 列表 / 当前会话 / 历史加载中 */
@@ -397,11 +421,6 @@ export default function LocalAgentPanel() {
   /** 状态信息下拉 */
   const infoRef = useRef<HTMLDivElement | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [sysOpen, setSysOpen] = useState(false);
-  const [sysText, setSysText] = useState("");
-  const [sysDraft, setSysDraft] = useState("");
-  const [sysSaving, setSysSaving] = useState(false);
-  const sysLoadedRef = useRef(false);
   /** 模型外其余会话配置 (权限/思考深度/沙箱等) 对话框 */
   const [configOpen, setConfigOpen] = useState(false);
   /** 网关工具权限请求 (Always Ask 时弹窗) */
@@ -480,55 +499,6 @@ export default function LocalAgentPanel() {
     };
   }, [runningIds]);
 
-  // 挂载即加载工作约定: 发送时附加信息 / 打开编辑器都依赖它
-  useEffect(() => {
-    void (async () => {
-      try {
-        const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
-        const j = (await r.json()) as { prompt?: string };
-        if (j.prompt) {
-          setSysText(j.prompt);
-          setSysDraft(j.prompt);
-          sysLoadedRef.current = true;
-        }
-      } catch {
-        // 读取失败保持空白
-      }
-    })();
-  }, []);
-
-  /** 打开约定编辑对话框: 首次加载当前约定 */
-  const openSysEditor = async () => {
-    setSysOpen(true);
-    if (!sysLoadedRef.current) {
-      try {
-        const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
-        const j = (await r.json()) as { prompt?: string };
-        setSysText(j.prompt ?? "");
-        setSysDraft(j.prompt ?? "");
-        sysLoadedRef.current = true;
-      } catch {
-        // 读取失败, 空白
-      }
-    }
-  };
-  /** 保存约定 (下次激活会话时注入) */
-  const saveSysPrompt = async () => {
-    setSysSaving(true);
-    try {
-      const r = await fetch("/api/agent/system-prompt", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: sysDraft }),
-      });
-      if (r.ok) {
-        setSysText(sysDraft);
-        setSysOpen(false);
-      }
-    } finally {
-      setSysSaving(false);
-    }
-  };
   useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
 
   /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
@@ -1085,6 +1055,7 @@ export default function LocalAgentPanel() {
         interrupted: msg.interrupted,
         ts: Date.now(),
         extra: msg.extra,
+        resources: msg.resources,
       }),
     });
     bumpSessionActivity(sid, role === "user" ? msg.text : undefined);
@@ -1209,9 +1180,48 @@ export default function LocalAgentPanel() {
   const send = async (text?: string) => {
     const sid = currentId;
     const task = (text ?? input).trim();
-    if (!task || !sid || runningIds.has(sid)) return;
+    if ((!task && attachments.length === 0) || !sid || runningIds.has(sid)) return;
+
+    // 一律落到会话 resources/: 有 File 上传; 仅有绝对路径则服务端复制
+    const resolved: MsgResource[] = [];
+    for (const a of attachments) {
+      try {
+        const fd = new FormData();
+        fd.set("sessionId", sid);
+        if (a.file) {
+          fd.set("file", a.file, a.name);
+        } else if (a.path) {
+          fd.set("sourcePath", a.path);
+        } else {
+          continue;
+        }
+        const r = await fetch("/api/agent/attachments", { method: "POST", body: fd });
+        const j = (await r.json()) as { ok?: boolean; path?: string; name?: string; error?: string };
+        if (!r.ok || !j.path) throw new Error(j.error || "上传失败");
+        resolved.push({ name: j.name || a.name, path: j.path, kind: a.kind });
+      } catch (e) {
+        setCtxToast(e instanceof Error ? e.message : "附件上传失败");
+        return;
+      }
+    }
+
+    let promptText = task;
+    if (resolved.length) {
+      const lines = resolved.map((f) =>
+        f.kind === "image" ? `- 图片 [${f.name}](${f.path})` : `- 文件 [${f.name}](${f.path})`,
+      );
+      const block = `【用户附带资源 · 已保存在会话 resources/ · 请用 Read 读取绝对路径】\n${lines.join("\n")}`;
+      promptText = task ? `${task}\n\n${block}` : block;
+    }
+
     setInput("");
     writeInputDraft(sid, "");
+    for (const a of attachments) {
+      if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
+    setAttachments([]);
+    setAttachImgPreview(null);
+    setAttachMenuOpen(false);
     setRunningIds((prev) => new Set(prev).add(sid));
     const id = Date.now();
     // extra 仅 UI/落盘排障用, 不会发给网关。勿塞「工作约定」全文:
@@ -1221,8 +1231,24 @@ export default function LocalAgentPanel() {
     if (cwd) extra.push({ title: "会话工作目录", text: cwd });
     const mdl = gwRef.current.get(sid)?.sessionConfig?.model?.currentValue;
     if (mdl) extra.push({ title: "会话模型", text: mdl });
-    commitMsgs(sid, (prev) => [...prev, { id, role: "user", text: task, ts: id, extra: extra.length ? extra : undefined }]);
-    persist(sid, "user", { text: task, ...(extra.length ? { extra } : {}) });
+    // 气泡展示用户原文; 附件用 resources 字段回显缩略图/文件卡
+    const bubbleText = task;
+    commitMsgs(sid, (prev) => [
+      ...prev,
+      {
+        id,
+        role: "user",
+        text: bubbleText,
+        ts: id,
+        extra: extra.length ? extra : undefined,
+        resources: resolved.length ? resolved : undefined,
+      },
+    ]);
+    persist(sid, "user", {
+      text: bubbleText,
+      ...(extra.length ? { extra } : {}),
+      ...(resolved.length ? { resources: resolved } : {}),
+    });
     const agentMsg: Msg = {
       id: id + 1,
       role: "agent",
@@ -1267,7 +1293,7 @@ export default function LocalAgentPanel() {
       const res = await fetch("/api/agent/prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: task, localSessionId: sid }),
+        body: JSON.stringify({ text: promptText, localSessionId: sid }),
         signal: ac.signal,
       });
       if (!res.ok || !res.body) throw new Error("任务启动失败");
@@ -1406,6 +1432,9 @@ export default function LocalAgentPanel() {
         }
       }
       void loadGw(sid);
+      // 网关 usage_update 偶发晚于 done; 短延迟再拉一次, 避免 Token 栏停在上一轮
+      window.setTimeout(() => void loadGw(sid), 500);
+      window.setTimeout(() => void loadGw(sid), 1200);
     } catch (e) {
       if ((e as Error).name !== "AbortError") {
         update((r) => {
@@ -1598,6 +1627,13 @@ export default function LocalAgentPanel() {
   useEffect(() => {
     if (currentId) setInput(readInputDraft(currentId));
     else setInput("");
+    setAttachments((prev) => {
+      for (const a of prev) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      return [];
+    });
+    setAttachImgPreview(null);
+    setAttachMenuOpen(false);
+    setModelMenuOpen(false);
   }, [currentId]);
   useEffect(() => {
     return () => {
@@ -1605,6 +1641,62 @@ export default function LocalAgentPanel() {
       if (sid) writeInputDraft(sid, inputValueRef.current);
     };
   }, []);
+
+  // 附件 / 模型上拉菜单: 点击外部关闭
+  useEffect(() => {
+    if (!attachMenuOpen && !modelMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (attachMenuOpen && attachMenuRef.current && !attachMenuRef.current.contains(t)) {
+        setAttachMenuOpen(false);
+      }
+      if (modelMenuOpen && modelMenuRef.current && !modelMenuRef.current.contains(t)) {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [attachMenuOpen, modelMenuOpen]);
+
+  // 待发送图片预览: Esc 关闭
+  useEffect(() => {
+    if (!attachImgPreview) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAttachImgPreview(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [attachImgPreview]);
+
+  const addFilesFromList = (list: FileList | File[] | null, forceKind?: "image" | "file") => {
+    if (!list || list.length === 0) return;
+    const next: PendingAttach[] = [];
+    for (const file of Array.from(list)) {
+      const isImg = forceKind === "image" || (forceKind !== "file" && /^image\//.test(file.type));
+      const electronPath = (file as File & { path?: string }).path;
+      next.push({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        name: file.name || (isImg ? "粘贴图片.png" : "附件"),
+        kind: isImg ? "image" : "file",
+        path: electronPath && electronPath.startsWith("/") ? electronPath : undefined,
+        previewUrl: isImg ? URL.createObjectURL(file) : undefined,
+        // 始终保留 File: 发送时上传到会话 resources/, 历史统一引用
+        file,
+      });
+    }
+    setAttachments((prev) => [...prev, ...next].slice(0, 12));
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => {
+      const hit = prev.find((a) => a.id === id);
+      if (hit?.previewUrl) {
+        URL.revokeObjectURL(hit.previewUrl);
+        setAttachImgPreview((cur) => (cur?.url === hit.previewUrl ? null : cur));
+      }
+      return prev.filter((a) => a.id !== id);
+    });
+  };
 
   // 输入框自动撑高: 内容增高 → 高度跟随, 达到上限后滚动
   useEffect(() => {
@@ -1618,7 +1710,7 @@ export default function LocalAgentPanel() {
   const caps = status?.capabilities;
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-page">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-surface">
       {auditWarn && (
         <div className="flex items-center justify-between gap-3 border-b border-up/30 bg-up-soft px-4 py-1.5 text-[11.5px] text-up">
           <span>{auditWarn}</span>
@@ -1656,7 +1748,7 @@ export default function LocalAgentPanel() {
             {runningIds.size > 1 ? ` · ${runningIds.size}` : ""}
           </div>
         )}
-        <div className="flex min-w-0 flex-1 items-center gap-x-4 text-[11.5px] text-ink-muted">
+        <div className="flex min-w-0 flex-1 items-center gap-x-4 self-stretch text-[11.5px] text-ink-muted">
           {status?.discovered ? (
             <>
               <span className="whitespace-nowrap">
@@ -1680,91 +1772,20 @@ export default function LocalAgentPanel() {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* 已连接: 模型选择放状态行右侧; 其余配置进对话框 */}
+          {/* ACP 参数 / 目录 / 约定 / 状态 — 模型与 Token 已下移到输入框底栏 */}
           {phase === "connected" && (gw?.sessionConfig || gw?.models?.length) ? (
-            <>
-              {gw.usage &&
-              (gw.usage.lastTotalTokens ||
-                gw.usage.sessionTotalTokens ||
-                gw.usage.used ||
-                gw.usage.lastCost) ? (
-                <span
-                  className="hidden max-w-[280px] truncate text-[11px] tabular-nums text-ink-muted sm:inline"
-                  title={
-                    [
-                      gw.usage.lastPromptTokens != null
-                        ? `本轮提示 ${fmtTokens(gw.usage.lastPromptTokens)}`
-                        : null,
-                      gw.usage.lastCompletionTokens != null
-                        ? `本轮补全 ${fmtTokens(gw.usage.lastCompletionTokens)}`
-                        : null,
-                      gw.usage.sessionTotalTokens != null
-                        ? `本连接累计 ${fmtTokens(gw.usage.sessionTotalTokens)}`
-                        : null,
-                      gw.usage.size > 0
-                        ? `上下文 ${fmtTokens(gw.usage.used)} / ${fmtTokens(gw.usage.size)}`
-                        : gw.usage.lastPromptTokens != null
-                          ? `上下文 ${fmtTokens(gw.usage.lastPromptTokens)}`
-                          : null,
-                      gw.usage.lastCost != null && gw.usage.lastCost > 0
-                        ? `cost ${fmtCost(gw.usage.lastCost)}`
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ") || "Token 用量"
-                  }
-                >
-                  Token{" "}
-                  <b className="font-semibold text-ink">
-                    {fmtTokens(gw.usage.lastTotalTokens ?? gw.usage.used)}
-                  </b>
-                  {gw.usage.sessionTotalTokens != null &&
-                  gw.usage.sessionTotalTokens !== (gw.usage.lastTotalTokens ?? gw.usage.used) ? (
-                    <span className="text-ink-faint"> · 累计 {fmtTokens(gw.usage.sessionTotalTokens)}</span>
-                  ) : null}
-                  {gw.usage.size > 0 ? (
-                    <span className="text-ink-faint">
-                      {" "}
-                      · 上下文 {fmtTokens(gw.usage.used)}/{fmtTokens(gw.usage.size)}
-                    </span>
-                  ) : gw.usage.lastPromptTokens != null ? (
-                    <span className="text-ink-faint"> · 上下文 {fmtTokens(gw.usage.lastPromptTokens)}</span>
-                  ) : null}
-                  {fmtCost(gw.usage.lastCost) ? (
-                    <span className="text-ink-faint"> · cost {fmtCost(gw.usage.lastCost)}</span>
-                  ) : null}
-                </span>
-              ) : null}
-              <CtlSelect
-                value={gw.sessionConfig?.model?.currentValue ?? ""}
-                options={
-                  gw.models?.map((m) => ({
-                    value: m.modelId,
-                    label: `${m.name}${m.description ? ` · ${m.description}` : ""}`,
-                  })) ??
-                  gw.sessionConfig?.model?.options?.map((o) => ({
-                    value: o.value,
-                    label: o.name || o.value,
-                  })) ??
-                  []
-                }
-                disabled={busy}
-                onChange={(v) => void applyModel(v)}
-                title="切换会话模型"
-              />
-              <button
-                type="button"
-                aria-label="ACP 参数"
-                title="ACP 参数（权限模式 / 思考深度 / 沙箱等）"
-                onClick={() => setConfigOpen(true)}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" />
-                </svg>
-              </button>
-            </>
+            <button
+              type="button"
+              aria-label="ACP 参数"
+              title="ACP 参数（权限模式 / 思考深度 / 沙箱等）"
+              onClick={() => setConfigOpen(true)}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" />
+              </svg>
+            </button>
           ) : null}
           {/* 打开会话工作目录 (Finder / 资源管理器) */}
           <button
@@ -1779,19 +1800,30 @@ export default function LocalAgentPanel() {
               <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
             </svg>
           </button>
-          {/* 工作约定按钮: 查看/编辑全局工作约定 (激活会话时注入给 WorkBuddy) */}
+          {/* 预览本会话 messages.jsonl */}
           <button
             type="button"
-            aria-label="工作约定"
-            title="工作约定（激活会话时注入给 WorkBuddy）"
-            onClick={() => void openSysEditor()}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+            aria-label="查看消息列表"
+            title={
+              docHints[0]
+                ? `查看消息列表\n${docHints[0]}/messages.jsonl`
+                : "查看消息列表（需先有会话）"
+            }
+            disabled={!docHints[0]}
+            onClick={() => {
+              const cwd = docHints[0];
+              if (!cwd) return;
+              openDoc(`${cwd}/messages.jsonl`, "messages.jsonl");
+            }}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
-              <path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
-              <path d="M9 8h6" />
-              <path d="M9 12h6" />
-              <path d="M9 16h4" />
+              <path d="M8 6h13" />
+              <path d="M8 12h13" />
+              <path d="M8 18h13" />
+              <path d="M3 6h.01" />
+              <path d="M3 12h.01" />
+              <path d="M3 18h.01" />
             </svg>
           </button>
           {/* 状态信息按钮: 未连接也可查看发现态 (进程/心跳); 已连接再补会话与能力 */}
@@ -1919,7 +1951,7 @@ export default function LocalAgentPanel() {
             </svg>
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-2 pb-3">
+        <div className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-3">
           {!histLoaded ? (
             <div className="px-2 py-2 text-[11.5px] text-ink-faint">加载中…</div>
           ) : sessions.length === 0 ? (
@@ -1943,6 +1975,15 @@ export default function LocalAgentPanel() {
                 }`}
                 title={editingTitleId === sd.id ? undefined : `${sd.title}\n悬停右侧 ⋯ 可重命名或删除`}
               >
+                <SessionIcon
+                  className={[
+                    "h-3.5 w-3.5 shrink-0",
+                    sd.id === currentId ? "text-accent" : "text-ink-faint",
+                    runningIds.has(sd.id) ? "text-accent" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                />
                 {editingTitleId === sd.id ? (
                   <input
                     ref={editTitleRef}
@@ -2031,9 +2072,9 @@ export default function LocalAgentPanel() {
           )}
         </div>
       </aside>
-        <div className="flex min-w-0 flex-1 flex-col">
-      {/* ── 协作演示区 ── */}
-      <div ref={msgBoxRef} onScroll={onMsgScroll} onContextMenu={onCtxMenu} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="flex min-w-0 flex-1 flex-col bg-surface">
+      {/* ── 协作演示区 (IM 气泡: 白底 / Agent 左灰泡 / 用户右浅蓝泡) ── */}
+      <div ref={msgBoxRef} onScroll={onMsgScroll} onContextMenu={onCtxMenu} className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         {msgs.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
             <div className="text-[15px] font-semibold text-ink">本地 Agent 协作演示</div>
@@ -2048,7 +2089,7 @@ export default function LocalAgentPanel() {
                   key={t}
                   onClick={() => send(t)}
                   disabled={runningIds.has(currentId ?? "")}
-                  className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] text-accent hover:bg-accent-soft disabled:opacity-40"
+                  className="rounded-full border border-line bg-page px-3 py-1.5 text-[12px] text-accent-deep hover:bg-accent-soft disabled:opacity-40"
                 >
                   {t}
                 </button>
@@ -2056,58 +2097,88 @@ export default function LocalAgentPanel() {
             </div>
           </div>
         ) : (
-          <div className="mx-auto space-y-4" style={{ width: "min(max(980px, 88vw), 100%)" }}>
+          <div className="mx-auto space-y-5" style={{ width: "min(max(980px, 88vw), 100%)" }}>
             {msgs.map((m) => (
               <div key={m.id}>
                 {m.role === "user" ? (
-                  <div className="flex flex-col items-end gap-1">
-                    <div className="flex items-center gap-1.5">
-                      {m.extra && m.extra.length > 0 && (
-                        <button
-                          type="button"
-                          title="查看本条消息自动附带的信息 (排障用)"
-                          onClick={() => setExtraView({ title: "附加信息", items: m.extra! })}
-                          className="rounded border border-line bg-surface px-1.5 py-px text-[10px] text-ink-muted transition-colors hover:bg-page hover:text-ink"
-                        >
-                          附加信息
-                        </button>
-                      )}
-                      <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
-                    </div>
-                    <div className="flex items-end gap-2">
+                  <div className="flex justify-end gap-2.5">
+                    <div className="flex max-w-[min(640px,78%)] flex-col items-end gap-1">
+                      <div className="flex items-center gap-1.5 px-0.5">
+                        <span className="text-[11px] font-medium text-ink-faint">我</span>
+                        <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
+                      </div>
                       <div className="group flex items-end justify-end gap-1.5">
                         <CopyBtn text={m.text} />
-                        <div className="max-w-[640px] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[13px] leading-relaxed text-white">
-                          {m.text}
+                        <div className="rounded-2xl bg-accent-soft px-3.5 py-2.5 text-[13px] leading-relaxed text-ink shadow-[0_1px_2px_rgba(28,31,36,0.04)]">
+                          {m.resources && m.resources.length > 0 ? (
+                            <div className={`flex flex-wrap gap-2 ${m.text ? "mb-2" : ""}`}>
+                              {m.resources.map((r) =>
+                                r.kind === "image" ? (
+                                  <button
+                                    key={r.path}
+                                    type="button"
+                                    title={r.path}
+                                    onClick={() => openDoc(r.path, r.name)}
+                                    className="block overflow-hidden rounded-xl border border-line/60 bg-white"
+                                  >
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                    <img
+                                      src={`/api/local-file?path=${encodeURIComponent(r.path)}`}
+                                      alt={r.name}
+                                      className="max-h-[220px] max-w-[280px] object-contain"
+                                    />
+                                  </button>
+                                ) : (
+                                  <button
+                                    key={r.path}
+                                    type="button"
+                                    title={r.path}
+                                    onClick={() => openDoc(r.path, r.name)}
+                                    className="flex max-w-[240px] items-center gap-2 rounded-lg border border-line bg-white px-2.5 py-1.5 text-left text-[12px] text-ink hover:bg-page"
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5 shrink-0 text-ink-muted">
+                                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                                      <path d="M14 2v6h6" />
+                                    </svg>
+                                    <span className="min-w-0 truncate">{r.name}</span>
+                                  </button>
+                                ),
+                              )}
+                            </div>
+                          ) : null}
+                          {m.text ? <div className="whitespace-pre-wrap break-words">{m.text}</div> : null}
+                          {!m.text && !(m.resources && m.resources.length) ? (
+                            <span className="text-ink-faint">…</span>
+                          ) : null}
                         </div>
                       </div>
-                      <Avatar who="user" />
                     </div>
+                    <Avatar who="user" />
                   </div>
                 ) : (
-                  <div className="flex items-start gap-2">
+                  <div className="flex justify-start gap-2.5">
                     <Avatar who="agent" />
-                    <div className="min-w-0 flex-1">
-                    <div className="mb-1 flex items-center gap-1.5">
-                      <span className="text-[11px] font-medium text-ink">本地 Agent</span>
-                      <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
-                      {m.streaming && (
-                        <span className="text-[11px] text-accent">
-                          {m.thinking ? "思考中…" : "正在生成…"}
-                        </span>
-                      )}
-                      {m.interrupted && (
-                        <span
-                          className="rounded bg-black/[0.06] px-1.5 py-px text-[10px] font-medium text-ink-muted"
-                          title="任务已被手动取消（本地停止），已产出的内容已保留"
-                        >
-                          已取消
-                        </span>
-                      )}
-                    </div>
-                    <ToolStrip m={m} />
-                    <div className="group flex items-start gap-1.5">
-                      <div className="inline-block max-w-full rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
+                    <div className="flex min-w-0 max-w-[min(720px,85%)] flex-1 flex-col items-start gap-1">
+                      <div className="flex items-center gap-1.5 px-0.5">
+                        <span className="text-[11px] font-medium text-ink-muted">本地 Agent</span>
+                        <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
+                        {m.streaming && (
+                          <span className="text-[11px] text-accent">
+                            {m.thinking ? "思考中…" : "正在生成…"}
+                          </span>
+                        )}
+                        {m.interrupted && (
+                          <span
+                            className="rounded bg-black/[0.06] px-1.5 py-px text-[10px] font-medium text-ink-muted"
+                            title="任务已被手动取消（本地停止），已产出的内容已保留"
+                          >
+                            已取消
+                          </span>
+                        )}
+                      </div>
+                      <ToolStrip m={m} />
+                      <div className="group flex w-full items-start gap-1.5">
+                        <div className="inline-block max-w-full rounded-2xl bg-page px-3.5 py-2.5 text-[13px] leading-relaxed text-ink shadow-[0_1px_2px_rgba(28,31,36,0.04)]">
                       {(() => {
                         const errOnly =
                           !!m.error &&
@@ -2141,9 +2212,9 @@ export default function LocalAgentPanel() {
                           </>
                         );
                       })()}
+                        </div>
+                        <CopyBtn text={m.text} />
                       </div>
-                      <CopyBtn text={m.text} />
-                    </div>
                     </div>
                   </div>
                 )}
@@ -2154,15 +2225,72 @@ export default function LocalAgentPanel() {
         <div ref={bottomRef} />
       </div>
 
-      {/* ── 输入区 ── */}
-      <div className="border-t border-line bg-surface px-4 py-3">
+      {/* ── 输入区 (Cursor 风格作曲框: 附件条 + 文本 + 底栏工具) ── */}
+      <div className="border-t border-line bg-surface px-5 py-3.5">
         {currentId && queueHint[currentId] && (
           <div className="mx-auto mb-2 text-[11.5px] text-accent-deep" style={{ width: "min(max(820px, 80vw), 100%)" }}>
             {queueHint[currentId]}
             <span className="ml-2 text-ink-faint">可点「取消排队」放弃</span>
           </div>
         )}
-        <div className="mx-auto flex items-center gap-2" style={{ width: "min(max(820px, 80vw), 100%)" }}>
+        <div
+          className="relative mx-auto rounded-2xl border border-line bg-page shadow-[0_1px_2px_rgba(28,31,36,0.04)] focus-within:border-accent/50"
+          style={{ width: "min(max(820px, 80vw), 100%)" }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (phase !== "connected" || runningIds.has(currentId ?? "")) return;
+            addFilesFromList(e.dataTransfer.files);
+          }}
+        >
+          {attachments.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5 border-b border-line/70 px-3 pt-2.5">
+              {attachments.map((a) => (
+                <div
+                  key={a.id}
+                  className="group/att relative flex max-w-[180px] items-center gap-1.5 rounded-lg border border-line bg-surface px-1.5 py-1 text-[11.5px] text-ink"
+                >
+                  {a.kind === "image" && a.previewUrl ? (
+                    <button
+                      type="button"
+                      title={`预览 ${a.name}`}
+                      aria-label={`预览 ${a.name}`}
+                      onClick={() => setAttachImgPreview({ url: a.previewUrl!, name: a.name })}
+                      className="shrink-0 overflow-hidden rounded ring-accent/0 transition hover:ring-2 hover:ring-accent/40"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={a.previewUrl} alt="" className="h-7 w-7 object-cover" />
+                    </button>
+                  ) : (
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded bg-hover text-ink-muted">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                        <path d="M14 2v6h6" />
+                      </svg>
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1 truncate" title={a.path || a.name}>
+                    {a.name}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`移除 ${a.name}`}
+                    onClick={() => removeAttachment(a.id)}
+                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint hover:bg-hover hover:text-ink"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="h-3 w-3">
+                      <path d="M18 6 6 18" />
+                      <path d="m6 6 12 12" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <textarea
             ref={taRef}
             value={input}
@@ -2170,6 +2298,21 @@ export default function LocalAgentPanel() {
               const v = e.target.value;
               setInput(v);
               if (currentId) writeInputDraft(currentId, v);
+            }}
+            onPaste={(e) => {
+              const items = e.clipboardData?.items;
+              if (!items) return;
+              const files: File[] = [];
+              for (const it of Array.from(items)) {
+                if (it.kind === "file") {
+                  const f = it.getAsFile();
+                  if (f) files.push(f);
+                }
+              }
+              if (files.length) {
+                e.preventDefault();
+                addFilesFromList(files);
+              }
             }}
             onKeyDown={(e) => {
               // 输入法组字中按 Enter 是确认候选, 不要当成发送
@@ -2189,35 +2332,234 @@ export default function LocalAgentPanel() {
             disabled={phase !== "connected" || runningIds.has(currentId ?? "")}
             rows={1}
             style={{ maxHeight: INPUT_MAX_H }}
-            className="min-h-[38px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-page px-3 py-2 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
+            className="min-h-[44px] w-full resize-none overflow-y-auto bg-transparent px-3.5 pb-1.5 pt-3 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint disabled:opacity-50"
           />
-          {runningIds.has(currentId ?? "") ? (
-            <button
-              onClick={stop}
-              title={
-                currentId && queueHint[currentId]
-                  ? "取消排队"
-                  : "已停止显示；网关侧可能仍在收尾"
-              }
-              className="shrink-0 rounded-lg bg-up px-4 py-2 text-[12.5px] font-medium text-white hover:opacity-90"
-            >
-              {currentId && queueHint[currentId] ? "取消排队" : "停止"}
-            </button>
-          ) : (
-            <button
-              onClick={() => void send()}
-              disabled={phase !== "connected" || runningIds.has(currentId ?? "") || !input.trim()}
-              className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-medium text-white hover:bg-accent-deep disabled:opacity-40"
-            >
-              发送
-            </button>
-          )}
-        </div>
-        <div className="mx-auto mt-1.5 text-[10.5px] text-ink-faint" style={{ width: "min(max(820px, 80vw), 100%)" }}>
-          ACP over HTTP+SSE · 连接令牌仅保存在本机内存
-          {gw?.sessionConfig?.mode?.currentValue
-            ? ` · 权限：${gw.sessionConfig.mode.options?.find((o) => o.value === gw.sessionConfig?.mode?.currentValue)?.name ?? gw.sessionConfig.mode.currentValue}`
-            : ""}
+          <div className="flex items-center gap-1 px-2.5 pb-2 pt-0.5">
+            <div className="relative" ref={attachMenuRef}>
+              <button
+                type="button"
+                title="添加文件或图片"
+                disabled={phase !== "connected" || runningIds.has(currentId ?? "")}
+                onClick={() => {
+                  setModelMenuOpen(false);
+                  setAttachMenuOpen((v) => !v);
+                }}
+                className="flex h-7 w-7 items-center justify-center rounded-full text-ink-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-4 w-4">
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+              </button>
+              {attachMenuOpen ? (
+                <div className="absolute bottom-[calc(100%+6px)] left-0 z-50 min-w-[148px] overflow-hidden rounded-lg border border-line bg-white py-1 shadow-lg">
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
+                    onClick={() => {
+                      setAttachMenuOpen(false);
+                      filePickRef.current?.click();
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5 text-ink-muted">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                      <path d="M14 2v6h6" />
+                    </svg>
+                    添加文件
+                  </button>
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink hover:bg-hover"
+                    onClick={() => {
+                      setAttachMenuOpen(false);
+                      imagePickRef.current?.click();
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5 text-ink-muted">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <circle cx="9" cy="9" r="2" />
+                      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+                    </svg>
+                    添加图片
+                  </button>
+                </div>
+              ) : null}
+              <input
+                ref={filePickRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  addFilesFromList(e.target.files, "file");
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={imagePickRef}
+                type="file"
+                multiple
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  addFilesFromList(e.target.files, "image");
+                  e.target.value = "";
+                }}
+              />
+            </div>
+            {phase === "connected" && (gw?.models?.length || gw?.sessionConfig?.model) ? (
+              <div className="relative" ref={modelMenuRef}>
+                <button
+                  type="button"
+                  title="切换模型"
+                  disabled={busy}
+                  onClick={() => {
+                    setAttachMenuOpen(false);
+                    setModelMenuOpen((v) => !v);
+                  }}
+                  className="flex h-7 max-w-[180px] items-center gap-1 rounded-full px-2 text-[11.5px] font-medium text-ink-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
+                >
+                  <span className="truncate">
+                    {gw.models?.find((m) => m.modelId === gw.sessionConfig?.model?.currentValue)?.name ||
+                      gw.sessionConfig?.model?.options?.find((o) => o.value === gw.sessionConfig?.model?.currentValue)
+                        ?.name ||
+                      gw.sessionConfig?.model?.currentValue ||
+                      "选择模型"}
+                  </span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3 shrink-0">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
+                {modelMenuOpen ? (
+                  <div className="absolute bottom-[calc(100%+6px)] left-0 z-50 max-h-[280px] min-w-[260px] overflow-y-auto rounded-xl border border-line bg-white p-1.5 shadow-xl">
+                    {(
+                      gw.models?.map((m) => ({
+                        value: m.modelId,
+                        label: m.name,
+                        credits: m.credits || (/^x\d+(\.\d+)?$/i.test(m.description ?? "") ? m.description : undefined),
+                      })) ??
+                      gw.sessionConfig?.model?.options?.map((o) => ({
+                        value: o.value,
+                        label: o.name || o.value,
+                        credits:
+                          (o as { credits?: string }).credits ||
+                          (/^x\d+(\.\d+)?$/i.test(o.description ?? "") ? o.description : undefined),
+                      })) ??
+                      []
+                    ).map((opt) => {
+                      const active = opt.value === (gw.sessionConfig?.model?.currentValue ?? "");
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          className={[
+                            "flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
+                            active ? "bg-accent-soft" : "hover:bg-accent-soft/60",
+                          ].join(" ")}
+                          onClick={() => {
+                            setModelMenuOpen(false);
+                            void applyModel(opt.value);
+                          }}
+                        >
+                          <ModelListIcon name={opt.label} className="h-4 w-4 shrink-0 text-ink-muted" />
+                          <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{opt.label}</span>
+                          {opt.credits ? (
+                            <span className="shrink-0 text-[11.5px] tabular-nums text-ink-faint">{opt.credits}</span>
+                          ) : null}
+                          {active ? (
+                            <svg
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.4"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className="h-4 w-4 shrink-0 text-accent"
+                              aria-hidden
+                            >
+                              <path d="M20 6 9 17l-5-5" />
+                            </svg>
+                          ) : (
+                            <span className="h-4 w-4 shrink-0" aria-hidden />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {phase === "connected" &&
+            gw?.usage &&
+            (gw.usage.lastTotalTokens || gw.usage.sessionTotalTokens || gw.usage.used || gw.usage.lastCost) ? (
+              <span
+                className="hidden max-w-[220px] truncate text-[10.5px] tabular-nums text-ink-faint sm:inline"
+                title={
+                  [
+                    gw.usage.lastPromptTokens != null
+                      ? `本轮提示 ${fmtTokens(gw.usage.lastPromptTokens)}`
+                      : null,
+                    gw.usage.lastCompletionTokens != null
+                      ? `本轮补全 ${fmtTokens(gw.usage.lastCompletionTokens)}`
+                      : null,
+                    gw.usage.sessionTotalTokens != null
+                      ? `本连接累计 ${fmtTokens(gw.usage.sessionTotalTokens)}`
+                      : null,
+                    gw.usage.size > 0
+                      ? `上下文 ${fmtTokens(gw.usage.used)} / ${fmtTokens(gw.usage.size)}`
+                      : gw.usage.lastPromptTokens != null
+                        ? `上下文 ${fmtTokens(gw.usage.lastPromptTokens)}`
+                        : null,
+                    gw.usage.lastCost != null && gw.usage.lastCost > 0
+                      ? `cost ${fmtCost(gw.usage.lastCost)}`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || "Token 用量"
+                }
+              >
+                Token{" "}
+                <b className="font-medium text-ink-muted">
+                  {fmtTokens(gw.usage.lastTotalTokens ?? gw.usage.used)}
+                </b>
+                {gw.usage.size > 0 ? (
+                  <span>
+                    {" "}
+                    · {fmtTokens(gw.usage.used)}/{fmtTokens(gw.usage.size)}
+                  </span>
+                ) : null}
+                {fmtCost(gw.usage.lastCost) ? <span> · {fmtCost(gw.usage.lastCost)}</span> : null}
+              </span>
+            ) : null}
+            <div className="flex-1" />
+            {runningIds.has(currentId ?? "") ? (
+              <button
+                type="button"
+                onClick={stop}
+                title={currentId && queueHint[currentId] ? "取消排队" : "停止"}
+                className="flex h-8 items-center gap-1.5 rounded-full bg-up px-3 text-[12px] font-medium text-white hover:opacity-90"
+              >
+                {currentId && queueHint[currentId] ? "取消排队" : "停止"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void send()}
+                disabled={
+                  phase !== "connected" ||
+                  runningIds.has(currentId ?? "") ||
+                  (!input.trim() && attachments.length === 0)
+                }
+                title="发送"
+                aria-label="发送"
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-accent text-white transition-colors hover:bg-accent-deep disabled:opacity-35"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                  <path d="M12 19V5" />
+                  <path d="m5 12 7-7 7 7" />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
       </div>
         </div>
@@ -2379,65 +2721,6 @@ export default function LocalAgentPanel() {
           </div>
         </div>
       )}
-      {/* ── 工作约定编辑对话框 ── */}
-      {sysOpen && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setSysOpen(false);
-          }}
-        >
-          <div className="flex w-[560px] max-w-[90vw] flex-col rounded-xl border border-line bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-line px-4 py-3">
-              <span className="text-[13px] font-semibold text-ink">工作约定（系统提示词）</span>
-              <button
-                type="button"
-                aria-label="关闭"
-                onClick={() => setSysOpen(false)}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
-                  <path d="M6 6l12 12" />
-                  <path d="M18 6L6 18" />
-                </svg>
-              </button>
-            </div>
-            <div className="px-4 py-3">
-              <textarea
-                value={sysDraft}
-                onChange={(e) => setSysDraft(e.target.value)}
-                spellCheck={false}
-                className="h-[260px] w-full resize-none rounded-lg border border-line bg-page px-3 py-2 font-mono text-[12px] leading-relaxed text-ink outline-none focus:border-accent"
-                placeholder="在此编辑工作约定…（激活会话时作为首条消息注入给 WorkBuddy）"
-              />
-              <div className="mt-2 text-[10.5px] leading-relaxed text-ink-faint">
-                约定只在<u>首次激活 / 重连后对齐 / 约定内容变更</u>时注入一次，不会拼进每条用户消息。包括 Markdown
-                格式、图片/文件引用方式等。
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setSysDraft(sysText);
-                  setSysOpen(false);
-                }}
-                className="rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={() => void saveSysPrompt()}
-                disabled={sysSaving}
-                className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
-              >
-                {sysSaving ? "保存中…" : "保存"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
       {deleteConfirmId ? (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/35 p-4">
           <div
@@ -2473,6 +2756,45 @@ export default function LocalAgentPanel() {
           </div>
         </div>
       ) : null}
+      {attachImgPreview ? (
+        <div
+          className="fixed inset-0 z-[70] flex flex-col bg-black/75"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`预览 ${attachImgPreview.name}`}
+          onClick={() => setAttachImgPreview(null)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setAttachImgPreview(null);
+          }}
+        >
+          <div
+            className="flex shrink-0 items-center gap-2 px-4 py-2.5 text-white/90"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{attachImgPreview.name}</span>
+            <button
+              type="button"
+              aria-label="关闭预览"
+              onClick={() => setAttachImgPreview(null)}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="h-4 w-4">
+                <path d="M6 6l12 12" />
+                <path d="M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+          <div className="flex min-h-0 flex-1 items-center justify-center p-4 pt-0">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={attachImgPreview.url}
+              alt={attachImgPreview.name}
+              className="max-h-full max-w-full object-contain"
+              onClick={(e) => e.stopPropagation()}
+            />
+          </div>
+        </div>
+      ) : null}
       {linkView ? (
         <LinkPreviewModal
           view={linkView}
@@ -2498,15 +2820,27 @@ export default function LocalAgentPanel() {
         <>
           <div
             className="fixed inset-0 z-[60]"
-            onMouseDown={() => setCtxMenu(null)}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setCtxMenu(null);
+            }}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setCtxMenu(null);
+            }}
             onContextMenu={(e) => {
               e.preventDefault();
+              e.stopPropagation();
               setCtxMenu(null);
             }}
           />
           <div
-            className="fixed z-[61] min-w-[150px] overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-xl"
+            className="fixed z-[61] min-w-[150px] select-none overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-xl"
             style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 110) }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
           >
             <button
               type="button"
@@ -2537,44 +2871,6 @@ export default function LocalAgentPanel() {
       {ctxToast && (
         <div className="pointer-events-none fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-full bg-ink px-4 py-1.5 text-[12px] text-white shadow-lg">
           {ctxToast}
-        </div>
-      )}
-      {extraView && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setExtraView(null);
-          }}
-        >
-          <div className="flex h-[70vh] w-[min(720px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
-            <div className="flex items-center gap-2 border-b border-line bg-page px-3.5 py-2">
-              <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
-                📎 {extraView.title}
-              </span>
-              <button
-                type="button"
-                title="关闭"
-                aria-label="关闭附加信息"
-                onClick={() => setExtraView(null)}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
-                  <path d="M6 6l12 12" />
-                  <path d="M18 6L6 18" />
-                </svg>
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-              {extraView.items.map((it, i) => (
-                <div key={i} className="mb-3 last:mb-0">
-                  <div className="mb-1 text-[11px] font-semibold text-ink-muted">{it.title}</div>
-                  <pre className="max-h-[38vh] overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-page px-3 py-2 text-[12px] leading-relaxed text-ink">
-                    {it.text}
-                  </pre>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       )}
     </div>
@@ -2938,6 +3234,14 @@ const PREVIEW_FONT_KEY = "snuby:preview-font-size";
 /** 基准字号; Markdown 标题/代码等用 em 相对缩放, 一并跟随 */
 const PREVIEW_FONT_PX: Record<PreviewFontSize, number> = { sm: 13, md: 15, lg: 17 };
 
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 function LinkPreviewModal({
   view,
   stack,
@@ -2971,6 +3275,7 @@ function LinkPreviewModal({
 }) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [fileSize, setFileSize] = useState<number | null>(null);
   const [copiedKind, setCopiedKind] = useState<"content" | "path" | null>(null);
   const [fontSize, setFontSize] = useState<PreviewFontSize>(() => {
     try {
@@ -2988,6 +3293,7 @@ function LinkPreviewModal({
   const location = view.kind === "url" ? view.url : view.path;
   const canCopyContent = view.kind === "file" && !isImg && !isDoc && !!text;
   const basePx = PREVIEW_FONT_PX[fontSize];
+  const sizeLabel = fileSize != null ? fmtBytes(fileSize) : "";
 
   const stackLoc = (v: LinkView) => (v.kind === "url" ? v.url : v.path);
   // 后退列表: 当前之前的条目, 最近的在上
@@ -2999,6 +3305,30 @@ function LinkPreviewModal({
   const forwardItems = stack
     .slice(stackIndex + 1)
     .map((v, i) => ({ index: stackIndex + 1 + i, title: v.title, location: stackLoc(v) }));
+
+  useEffect(() => {
+    if (view.kind !== "file") {
+      setFileSize(null);
+      return;
+    }
+    let dead = false;
+    setFileSize(null);
+    void (async () => {
+      try {
+        const r = await fetch(`/api/local-file?path=${encodeURIComponent(view.path)}&stat=1`, {
+          cache: "no-store",
+        });
+        if (!r.ok) return;
+        const j = (await r.json()) as { size?: number };
+        if (!dead && typeof j.size === "number") setFileSize(j.size);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [view]);
 
   useEffect(() => {
     if (view.kind !== "file") return;
@@ -3129,6 +3459,11 @@ function LinkPreviewModal({
 
             <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink" title={location}>
               {view.title}
+              {view.kind === "file" && sizeLabel ? (
+                <span className="ml-2 font-normal tabular-nums text-ink-faint" style={{ fontSize: "11px" }}>
+                  {sizeLabel}
+                </span>
+              ) : null}
             </span>
 
             <div className="flex items-center gap-0.5">
@@ -3265,15 +3600,96 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-/** 复制按钮: hover 显示, 点击复制消息原文 (Markdown) */
+/** 会话列表前缀图标 (对话气泡) */
+function SessionIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className ?? "h-3.5 w-3.5"}
+      aria-hidden
+    >
+      <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+    </svg>
+  );
+}
+
+/** WorkBuddy 风格模型行图标 (按名称启发式, 无品牌资产时用 lucide 形) */
+function ModelListIcon({ name, className }: { name: string; className?: string }) {
+  const n = name.toLowerCase();
+  const cls = className ?? "h-4 w-4";
+  if (/快速|fast/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="currentColor" className={cls} aria-hidden>
+        <path d="M13 2 4 14h7l-1 8 10-14h-7l0-6z" />
+      </svg>
+    );
+  }
+  if (/均衡|balanc/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m8 12 2.5 2.5L16 9" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (/极致|extreme|deep-model|pro(?!ject)/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+        <path d="M6 3h12l4 6-10 12L2 9z" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (/hy\d|hunyuan|混元/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+        <path d="M12 3c4 3 6 6 6 9a6 6 0 1 1-12 0c0-3 2-6 6-9Z" />
+        <path d="M12 12c2 0 3.5 1.2 3.5 3S14 18 12 18" />
+      </svg>
+    );
+  }
+  if (/deepseek|ds-/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+        <path d="M4 12c2-5 6-8 10-8 2 0 4 .7 5.5 2.2C16 8 13 10 10 11c-2 .7-4 1.5-6 3Z" />
+        <path d="M8 14c2 3 5 5 9 5 1.5 0 3-.4 4-1.2" />
+        <circle cx="9" cy="10" r="1" fill="currentColor" stroke="none" />
+      </svg>
+    );
+  }
+  if (/glm|智谱/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+        <path d="M5 5h10l4 7-4 7H5l4-7Z" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  if (/kimi|moonshot/.test(n)) {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+        <path d="M20 14.5A8.5 8.5 0 1 1 11 4.2 7 7 0 0 0 20 14.5Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={cls} aria-hidden>
+      <path d="m12 3 1.8 5.5L19 10l-5.2 1.5L12 17l-1.8-5.5L5 10l5.2-1.5Z" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 /** IM 气泡头像: user = 品牌色「我」, agent = 浅色机器人图标 */
 function Avatar({ who }: { who: "user" | "agent" }) {
   return who === "user" ? (
-    <div className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
+    <div className="mt-5 flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
       我
     </div>
   ) : (
-    <div className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full bg-accent-soft text-accent">
+    <div className="mt-5 flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-full bg-accent-soft text-accent">
       <svg
         viewBox="0 0 24 24"
         fill="none"

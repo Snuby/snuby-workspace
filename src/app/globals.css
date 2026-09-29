@@ -1,24 +1,45 @@
 @import "tailwindcss";
 
-/* 设计 token — Snuby 工作台 (浅色) */
+/* 设计 token — Snuby「创作者专业台」(方案 B)
+ * 单一事实源: docs/design-system.md
+ * Variance 低 / Motion 低 / Density 中高；冷灰底 + 钢蓝强调；全 App 共用。
+ */
 @theme {
-  --color-ink: #2c2c2a;
-  --color-ink-muted: #5f5e5a;
-  --color-ink-faint: #888780;
+  --color-ink: #1c1f24;
+  --color-ink-muted: #5c6370;
+  --color-ink-faint: #8b929e;
   --color-surface: #ffffff;
-  --color-page: #f6f5f0;
-  --color-line: rgba(0, 0, 0, 0.08);
-  --color-accent: #185fa5;
-  --color-accent-soft: #e6f1fb;
-  --color-accent-deep: #0c447c;
+  --color-surface-2: #ebedf0;
+  --color-page: #f2f3f5;
+  --color-line: rgba(28, 31, 36, 0.1);
+  --color-hover: rgba(28, 31, 36, 0.05);
+  --color-accent: #1f6feb;
+  --color-accent-soft: #e8f1fe;
+  --color-accent-deep: #1150b0;
   /* 涨跌色 — 遵循中国习惯「红涨绿跌」(spec 009 决策 9), 与合并图的资产分类色语义分离 */
   --color-up: #c0392b;
   --color-down: #0f7b4f;
   --color-up-soft: rgba(192, 57, 43, 0.1);
   --color-down-soft: rgba(15, 123, 79, 0.1);
+
+  --radius-control: 6px;
+  --radius-tab: 7px;
+  --radius-panel: 8px;
+  /* 主内容壳: 相对侧栏/页底浮起的圆角 (参考 IM/工作台内容区) */
+  --radius-shell: 12px;
 }
 
 body {
   @apply bg-page text-ink antialiased;
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, "SF Pro Text", "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+/* Electron hiddenInset: 仅侧栏顶部可拖窗; 内容区优先保证可交互, 不设 drag */
+.app-drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }

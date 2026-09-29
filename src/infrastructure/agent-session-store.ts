@@ -43,6 +43,8 @@ export type AgentMessage = {
   ts: number;
   /** 自动附带的信息 (如工作约定/会话工作目录/模型), 排障用 */
   extra?: { title: string; text: string }[];
+  /** 用户附带资源 (落在会话 resources/ 下, 历史可引用绝对路径) */
+  resources?: { name: string; path: string; kind: "image" | "file" }[];
 };
 
 export type AgentSessionMeta = {
@@ -254,6 +256,7 @@ export function createSession(acpCwd?: string, model?: string): AgentSessionMeta
   } while (existsSync(dirOf(id)));
   const wd = workDirOf(id);
   mkdirSync(path.join(wd, "artifacts"), { recursive: true });
+  mkdirSync(path.join(wd, "resources"), { recursive: true });
   const now = Date.now();
   const meta: AgentSessionMeta = {
     id,
