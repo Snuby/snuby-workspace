@@ -22,9 +22,14 @@ npm-debug.log*
 # typescript
 *.tsbuildinfo
 
-# data (本地数据库不入库, 由 scripts/fetch_data.py 重建)
+# 仓库内遗留 data/ (运行时已迁至 ~/snuby-workspace-data, 不入库)
 /data/*.db
 /data/*.db-journal
+/data/agent-sessions/
+/data/site_tabs.db
+
+# electron 打包产物 (spec 012, 由 npm run dist 重建)
+/dist
 
 # python
 __pycache__/
