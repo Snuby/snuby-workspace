@@ -70,9 +70,9 @@ Snuby 工作台 · 自媒体创作者与本地 Agent 协作 · Linear / Arc 式�
 |------|------|
 | 侧栏 | 与窗体底同色 `page`；分组标题 `ink-faint`；激活项 accent 规则 |
 | 主内容壳 | `my-2 mr-2` + `rounded-[var(--radius-shell)]` + `border-line` + `bg-surface`；`overflow-hidden` 裁切 webview |
-| 顶栏 / 矩阵账号条 | chip 同侧栏选中；`+添加` 实心 accent |
+| 顶栏 / 矩阵账号条 | 标题左内边距统一 `px-4`；chip 同侧栏选中；`+添加` 实心 accent |
 | 标签栏 | `surface-2` 轨道 + `surface` 激活页签；关闭钮预留位 + hover 显隐 |
-| 首页卡片 | 单一 accent-soft 图标底；无彩色多强调；轻边框 hover |
+| 首页氛围 | 问候 + 大号电子钟 + 农历/休班月历 + 天气；不做功能入口卡；休用 `up` 角标 |
 | Agent / 设置 | 表单与按钮套同一 token，禁止另起灰蓝 |
 
 ## 与方案 A 的差异（备忘）

@@ -79,6 +79,12 @@ export async function POST(req: Request) {
       const activeSite = typeof body.activeSite === "string" && body.activeSite ? body.activeSite : null;
       const webviewMinKeep = Number(body.webviewMinKeep);
       const webviewRetentionHours = Number(body.webviewRetentionHours);
+      const homeUrl =
+        typeof body.homeUrl === "string"
+          ? body.homeUrl.trim() || null
+          : body.homeUrl === null
+            ? null
+            : undefined;
       const st: SiteSettings = {
         maxTabs: Number.isInteger(maxTabs) ? maxTabs : 10,
         maxHistory: Number.isInteger(maxHistory) ? maxHistory : 100,
@@ -86,6 +92,7 @@ export async function POST(req: Request) {
         // 未显式传入的字段保持 undefined → repository 保留库内旧值
         ...(Number.isInteger(webviewMinKeep) ? { webviewMinKeep } : {}),
         ...(Number.isInteger(webviewRetentionHours) ? { webviewRetentionHours } : {}),
+        ...(homeUrl !== undefined ? { homeUrl } : {}),
       };
       setSettings(moduleKey, st);
       return NextResponse.json({ ok: true });

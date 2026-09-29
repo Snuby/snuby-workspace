@@ -35,7 +35,12 @@ export type SiteHistoryEntry = {
   closedAt: number;
 };
 
-type SiteSettings = { maxTabs: number; maxHistory: number; activeSite?: string | null };
+type SiteSettings = {
+  maxTabs: number;
+  maxHistory: number;
+  activeSite?: string | null;
+  homeUrl?: string | null;
+};
 type TabView = { siteId: string; tabId: string };
 
 const HOME_SUFFIX = "::home";
@@ -115,6 +120,54 @@ const IconAdd = ({ className }: { className?: string }) => (
     <path d="M5 12h14" />
   </Icon>
 );
+const IconHome = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    <path d="M9 22V12h6v10" />
+  </Icon>
+);
+const IconGlobe = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18" />
+    <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
+  </Icon>
+);
+
+const DEFAULT_BROWSER_HOME = "https://www.google.com/";
+
+function normalizeHttpUrl(raw: string): string | null {
+  const t = raw.trim();
+  if (!t) return null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(t)) return t;
+  return `https://${t}`;
+}
+
+function urlKey(url: string): string {
+  return url.split("#")[0].replace(/\/$/, "");
+}
+
+function hostnameLabel(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "") || "主页";
+  } catch {
+    return "主页";
+  }
+}
+
+function isSameHomeUrl(current: string, homeUrl: string): boolean {
+  if (!current || current === "about:blank") return false;
+  if (current === homeUrl) return true;
+  try {
+    const a = new URL(current);
+    const b = new URL(homeUrl);
+    if (a.origin !== b.origin) return false;
+    const norm = (p: string) => p.replace(/\/+$/, "") || "/";
+    return norm(a.pathname) === norm(b.pathname);
+  } catch {
+    return false;
+  }
+}
 
 function isElectronEnv() {
   return typeof navigator !== "undefined" && /electron/i.test(navigator.userAgent);
@@ -171,6 +224,12 @@ export default function SiteBrowser({
   const [addToTopicOpen, setAddToTopicOpen] = useState(false);
   const [siteNotice, setSiteNotice] = useState("");
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; siteId: string } | null>(null);
+  /** 地址栏模式: 可编辑主页 URL / 显示名 (优先于 props.sites[0]) */
+  const [browserHome, setBrowserHome] = useState(sites[0]?.url ?? DEFAULT_BROWSER_HOME);
+  const [browserHomeTitle, setBrowserHomeTitle] = useState(sites[0]?.label || "主页");
+  const [editHomeOpen, setEditHomeOpen] = useState(false);
+  const [editHomeUrl, setEditHomeUrl] = useState("");
+  const [homeTabMenu, setHomeTabMenu] = useState<{ x: number; y: number } | null>(null);
   const [loaded, setLoaded] = useState(false);
   /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -183,7 +242,11 @@ export default function SiteBrowser({
   const openTabRef = useRef<((siteId: string, url: string) => void) | null>(null);
 
   const activeSite = activeSiteProp ?? activeSiteInner;
-  const moduleSites = useMemo(() => sites, [sites]);
+  const moduleSites = useMemo(() => {
+    if (!addressMode) return sites;
+    const base = sites[0] ?? { id: "default", label: "主页", url: DEFAULT_BROWSER_HOME };
+    return [{ ...base, url: browserHome, label: browserHomeTitle || "主页" }];
+  }, [sites, addressMode, browserHome, browserHomeTitle]);
   // 卸载 (切走模块/关窗) 前把最新内存态 (含页面加载后的真实标题) 落库,
   // 否则标签标题只在 openTab 时持久化 (当时为 "…"), 切回模块恢复的标签全是 "…"
   const tabsBySiteRef = useRef(tabsBySite);
@@ -265,6 +328,10 @@ export default function SiteBrowser({
           if (!activeSiteProp && typeof data.settings.activeSite === "string") {
             setActiveSiteInner(data.settings.activeSite);
           }
+          if (addressMode && typeof data.settings.homeUrl === "string" && data.settings.homeUrl) {
+            setBrowserHome(data.settings.homeUrl);
+            setBrowserHomeTitle(hostnameLabel(data.settings.homeUrl));
+          }
         }
         if (data.tabs) {
           // 只去重同 URL 重复(保留标题完整者); 孤立的 "…" 标签保留 — URL 有效, 激活渲染后标题会自然更新
@@ -291,7 +358,69 @@ export default function SiteBrowser({
         setLoaded(true);
       }
     })();
-  }, [moduleKey]);
+  }, [moduleKey, activeSiteProp, addressMode]);
+
+  const applyBrowserHome = useCallback(
+    async (raw: string, titleHint?: string) => {
+      const full = normalizeHttpUrl(raw);
+      if (!full) {
+        setSiteNotice("主页地址无效");
+        return false;
+      }
+      const key = urlKey(full);
+      const title =
+        titleHint && titleHint !== LOADING_DOT && titleHint.trim()
+          ? titleHint.trim()
+          : hostnameLabel(full);
+      setBrowserHome(full);
+      setBrowserHomeTitle(title);
+      const homeId = `default${HOME_SUFFIX}`;
+      // 只保留非主页标签, 并去掉与新主页同 URL 的普通标签
+      let nextRest: SiteTab[] = [];
+      setTabsBySite((prev) => {
+        const group = prev.default ?? [];
+        nextRest = group.filter(
+          (t) => !t.id.endsWith(HOME_SUFFIX) && urlKey(t.url) !== key,
+        );
+        return { ...prev, default: nextRest };
+      });
+      const el = webviewRefs.current[homeId] as
+        | (HTMLElement & { loadURL?: (u: string) => void })
+        | null
+        | undefined;
+      el?.loadURL?.(full);
+      setActiveTab({ siteId: "default", tabId: homeId });
+      setCurrentUrl(full);
+      try {
+        await fetch("/api/site-tabs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            module: moduleKey,
+            action: "settings",
+            maxTabs: settings.maxTabs,
+            maxHistory: settings.maxHistory,
+            homeUrl: full,
+          }),
+        });
+        await fetch("/api/site-tabs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            module: moduleKey,
+            action: "save",
+            site: "default",
+            tabs: nextRest,
+          }),
+        });
+      } catch {
+        /* 本地已更新 */
+      }
+      setSiteNotice("主页已更新");
+      return true;
+    },
+    [moduleKey, settings.maxTabs, settings.maxHistory],
+  );
 
   // —— popup: 主进程通知 (webview 内 target=_blank → 站内标签页) ——
   useEffect(() => {
@@ -345,7 +474,9 @@ export default function SiteBrowser({
     (siteId: string): SiteTab[] => {
       const site = moduleSites.find((s) => s.id === siteId);
       if (!site) return [];
-      return [homeTab(site), ...(tabsBySite[siteId] ?? [])];
+      // 主页由 site 派生, 不与 tabsBySite 里可能残留的 ::home 叠成两个标签
+      const rest = (tabsBySite[siteId] ?? []).filter((t) => !t.id.endsWith(HOME_SUFFIX));
+      return [homeTab(site), ...rest];
     },
     [moduleSites, tabsBySite],
   );
@@ -537,12 +668,15 @@ export default function SiteBrowser({
     };
     const onTitle = (e: Event) => {
       const t = (e as unknown as { title?: string }).title;
-      if (t) {
-        setTabsBySite((prev) => ({
-          ...prev,
-          [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, title: t } : x)),
-        }));
+      if (!t) return;
+      // 地址栏模式主页标题由 site.label 派生, 需同步 browserHomeTitle
+      if (tabId.endsWith(HOME_SUFFIX)) {
+        setBrowserHomeTitle(t);
       }
+      setTabsBySite((prev) => ({
+        ...prev,
+        [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, title: t } : x)),
+      }));
     };
     const onStart = () => {
       setLoadingByTab((prev) => ({ ...prev, [tabId]: true }));
@@ -603,6 +737,36 @@ export default function SiteBrowser({
     }
   };
 
+  /** 回到当前站点主页默认地址 (对齐矩阵: 先切主标签再按需 loadURL) */
+  const goHome = useCallback(() => {
+    const site = moduleSites.find((s) => s.id === groupId) ?? moduleSites[0];
+    if (!site) return;
+    const homeId = `${site.id}${HOME_SUFFIX}`;
+    const homeUrl = site.url;
+    setActiveSiteInner(site.id);
+    setActiveTab({ siteId: site.id, tabId: homeId });
+    setShowHistory(false);
+    onActiveSiteChange?.(site.id);
+    window.setTimeout(() => {
+      const el = webviewRefs.current[homeId] as
+        | (HTMLElement & { loadURL?: (u: string) => void; getURL?: () => string })
+        | null
+        | undefined;
+      if (!el?.loadURL) return;
+      try {
+        const cur = el.getURL?.() ?? "";
+        if (isSameHomeUrl(cur, homeUrl)) {
+          setCurrentUrl(homeUrl);
+          return;
+        }
+        el.loadURL(homeUrl);
+      } catch {
+        el.loadURL(homeUrl);
+      }
+      setCurrentUrl(homeUrl);
+    }, 60);
+  }, [moduleSites, groupId, onActiveSiteChange]);
+
   const retryActiveTab = () => {
     const tabId = activeTabIdRef.current;
     if (!tabId) return;
@@ -643,8 +807,10 @@ export default function SiteBrowser({
     return () => document.removeEventListener("keydown", onKey);
   }, [addSiteOpen]);
 
-  // 站点配置变更后同步主页标签的 url/title (主页 id = siteId::home)
+  // 站点配置变更后同步主页标签 url/title (非地址栏模式)
+  // 地址栏模式主页标题走 browserHomeTitle, 由 tabsOf→homeTab(site.label) 派生, 勿写入 tabsBySite
   useEffect(() => {
+    if (addressMode) return;
     setTabsBySite((prev) => {
       let changed = false;
       const next: Record<string, SiteTab[]> = { ...prev };
@@ -662,7 +828,7 @@ export default function SiteBrowser({
       }
       return changed ? next : prev;
     });
-  }, [moduleSites]);
+  }, [moduleSites, addressMode]);
 
   const openAddSite = () => {
     setEditingSiteId(null);
@@ -964,7 +1130,37 @@ export default function SiteBrowser({
 
       {/* 站内标签页栏 + 工具栏: 与站点选项卡同构底线风格 (圆角壳内不再用 Chrome 浮起页签) */}
       <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-surface">
-        <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto overflow-y-hidden px-2">
+        <div className="flex shrink-0 items-center border-r border-line px-1.5">
+          <ToolButton label="回到主页" onClick={goHome} disabled={!moduleSites.length}>
+            <IconHome />
+          </ToolButton>
+        </div>
+        <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto overflow-y-hidden px-1.5">
+          {homeTabMenu ? (
+            <ContextMenuLayer x={homeTabMenu.x} y={homeTabMenu.y} onClose={() => setHomeTabMenu(null)}>
+              <ContextMenuItem
+                onClick={() => {
+                  setHomeTabMenu(null);
+                  setEditHomeUrl(browserHome);
+                  setEditHomeOpen(true);
+                }}
+              >
+                编辑主页
+              </ContextMenuItem>
+              <ContextMenuItem
+                onClick={() => {
+                  setHomeTabMenu(null);
+                  const hint =
+                    activeTabDef && !activeTabDef.id.endsWith(HOME_SUFFIX)
+                      ? activeTabDef.title
+                      : undefined;
+                  void applyBrowserHome(currentUrl || browserHome, hint);
+                }}
+              >
+                将当前页设为主页
+              </ContextMenuItem>
+            </ContextMenuLayer>
+          ) : null}
           {groupTabs.map((t) => {
             const active = t.id === activeTabDef.id;
             const isHome = t.id.endsWith(HOME_SUFFIX);
@@ -977,7 +1173,18 @@ export default function SiteBrowser({
                 tabIndex={0}
                 onClick={() => activateTab(groupId, t.id)}
                 onKeyDown={(e) => e.key === "Enter" && activateTab(groupId, t.id)}
-                title={tabErrMsg || t.url}
+                onContextMenu={(e) => {
+                  if (!addressMode || !isHome) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.getSelection()?.removeAllRanges();
+                  setHomeTabMenu({ x: e.clientX, y: e.clientY });
+                }}
+                title={
+                  addressMode && isHome
+                    ? `${tabErrMsg || t.url}\n右键编辑主页`
+                    : tabErrMsg || t.url
+                }
                 className={[
                   "group relative flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 px-2.5 text-[12.5px] transition-colors duration-150",
                   active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
@@ -1164,6 +1371,70 @@ export default function SiteBrowser({
           </div>
         ) : null}
       </div>
+
+      {editHomeOpen ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onClick={() => setEditHomeOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="编辑主页"
+            onClick={(e) => e.stopPropagation()}
+            className="w-[440px] max-w-[90vw] rounded-xl border border-line bg-white p-5 shadow-2xl"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <span className="text-[14.5px] font-bold text-ink">编辑主页</span>
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setEditHomeOpen(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-hover hover:text-ink"
+              >
+                <IconX className="h-4 w-4" />
+              </button>
+            </div>
+            <input
+              autoFocus
+              value={editHomeUrl}
+              onChange={(e) => setEditHomeUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  void (async () => {
+                    const ok = await applyBrowserHome(editHomeUrl);
+                    if (ok) setEditHomeOpen(false);
+                  })();
+                }
+                if (e.key === "Escape") setEditHomeOpen(false);
+              }}
+              placeholder="主页地址，如 https://www.google.com/"
+              className="w-full rounded-md border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent"
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditHomeOpen(false)}
+                className="rounded-md border border-line bg-surface px-3.5 py-1.5 text-[13px] text-ink-muted hover:bg-hover"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void (async () => {
+                    const ok = await applyBrowserHome(editHomeUrl);
+                    if (ok) setEditHomeOpen(false);
+                  })();
+                }}
+                className="rounded-md bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1311,31 +1582,32 @@ function AddressBar({
   }, [currentUrl]);
 
   function submit() {
-    const raw = value.trim();
-    if (!raw) return;
-    let url = raw;
-    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url)) {
-      url = `https://${url}`;
-    }
+    const url = normalizeHttpUrl(value);
+    if (!url) return;
     onNavigate(url);
   }
 
   return (
-    <div className="flex h-[42px] shrink-0 items-center gap-2 border-b border-line bg-surface px-3">
+    <div className="flex h-[42px] shrink-0 items-center gap-2.5 bg-surface px-4">
       {title ? (
         <span className="shrink-0 whitespace-nowrap text-[14px] font-bold text-ink">{title}</span>
       ) : null}
-      <input
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        placeholder="输入网址，回车访问"
-        className="h-8 flex-1 rounded-md border border-line bg-white px-3 text-[12.5px] outline-none focus:border-accent"
-      />
+      <div className="relative flex h-8 min-w-0 flex-1 items-center">
+        <span className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-ink-muted">
+          <IconGlobe className="h-4 w-4" />
+        </span>
+        <input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="输入网址，回车访问"
+          className="h-full w-full border-0 border-b border-line bg-transparent py-0 pl-6 pr-1 text-[12.5px] text-ink outline-none transition-colors duration-150 placeholder:text-ink-faint focus:border-accent"
+        />
+      </div>
       <button
         type="button"
         onClick={submit}
-        className="h-8 shrink-0 rounded-md bg-accent px-3 text-[12.5px] font-medium text-white hover:opacity-90"
+        className="h-7 shrink-0 rounded-[6px] px-2.5 text-[12.5px] font-medium text-accent-deep transition-colors duration-150 hover:bg-accent-soft"
       >
         前往
       </button>

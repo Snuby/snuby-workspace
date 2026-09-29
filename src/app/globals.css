@@ -43,3 +43,17 @@ body {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
+
+/* 主页氛围钟：冒号轻呼吸 */
+@keyframes home-clock-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.28;
+  }
+}
+.home-clock-colon {
+  animation: home-clock-blink 1s steps(1, end) infinite;
+}

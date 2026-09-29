@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from "react";
 import { useClickOutside } from "@/lib/use-click-outside";
+import { openInSystemBrowser } from "@/lib/open-external";
 import { setAgentRunningCount } from "@/infrastructure/agent-run-presence";
 
 type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
@@ -3412,7 +3413,10 @@ function LinkPreviewModal({
   };
 
   const openExternal = () => {
-    if (view.kind === "url") window.open(view.url, "_blank", "noopener");
+    if (view.kind !== "url") return;
+    void openInSystemBrowser(view.url).catch((e) => {
+      onToast?.(e instanceof Error ? e.message : "打开失败");
+    });
   };
 
   return (

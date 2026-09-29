@@ -15,6 +15,8 @@ export type SiteSettings = {
   /** 全局 WebView 保留策略 (存 module=webview 行, 其他模块行为 null 表示沿用库内值) */
   webviewMinKeep?: number | null;
   webviewRetentionHours?: number | null;
+  /** Web 访问等地址栏模式的主页 URL */
+  homeUrl?: string | null;
 };
 
 const DEFAULT_SETTINGS: SiteSettings = {
@@ -87,6 +89,9 @@ function getDb(): DatabaseSync {
   if (!cols.some((c) => c.name === "webview_retention_hours")) {
     db.exec("ALTER TABLE site_settings ADD COLUMN webview_retention_hours INTEGER NOT NULL DEFAULT 3");
   }
+  if (!cols.some((c) => c.name === "home_url")) {
+    db.exec("ALTER TABLE site_settings ADD COLUMN home_url TEXT");
+  }
   // 出厂主题幂等种子 (首次打开库时写入; 之后 topics 非空即跳过)
   ensureTopicsSeeded(db);
   // 自媒体账号矩阵表 + 平台种子 (同库, 避免循环依赖不调 matrix-repository)
@@ -143,7 +148,7 @@ function ensureMatrixSchema(d: DatabaseSync): void {
 export function getSettings(module: string): SiteSettings {
   const row = getDb()
     .prepare(
-      "SELECT max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours FROM site_settings WHERE module = ?",
+      "SELECT max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours, home_url FROM site_settings WHERE module = ?",
     )
     .get(module) as
     | {
@@ -152,6 +157,7 @@ export function getSettings(module: string): SiteSettings {
         active_site: string | null;
         webview_min_keep: number;
         webview_retention_hours: number;
+        home_url: string | null;
       }
     | undefined;
   if (!row) {
@@ -164,6 +170,7 @@ export function getSettings(module: string): SiteSettings {
     activeSite: row.active_site,
     webviewMinKeep: row.webview_min_keep,
     webviewRetentionHours: row.webview_retention_hours,
+    homeUrl: row.home_url,
   };
 }
 
@@ -171,22 +178,29 @@ export function setSettings(module: string, s: SiteSettings): void {
   // webview 保留策略是全局配置 (module=webview 行): 其他模块保存设置时未显式传入,
   // 必须保留库内已有值, 不得被默认值覆盖
   const existing = getDb()
-    .prepare("SELECT webview_min_keep, webview_retention_hours FROM site_settings WHERE module = ?")
-    .get(module) as { webview_min_keep: number; webview_retention_hours: number } | undefined;
+    .prepare(
+      "SELECT webview_min_keep, webview_retention_hours, home_url FROM site_settings WHERE module = ?",
+    )
+    .get(module) as
+    | { webview_min_keep: number; webview_retention_hours: number; home_url: string | null }
+    | undefined;
   const minKeep = s.webviewMinKeep ?? existing?.webview_min_keep ?? 5;
   const retention = s.webviewRetentionHours ?? existing?.webview_retention_hours ?? 3;
+  const homeUrl =
+    s.homeUrl !== undefined ? s.homeUrl : (existing?.home_url ?? null);
   getDb()
     .prepare(
-      `INSERT INTO site_settings (module, max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO site_settings (module, max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours, home_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(module) DO UPDATE SET
          max_tabs = excluded.max_tabs,
          max_history = excluded.max_history,
          active_site = excluded.active_site,
          webview_min_keep = excluded.webview_min_keep,
-         webview_retention_hours = excluded.webview_retention_hours`,
+         webview_retention_hours = excluded.webview_retention_hours,
+         home_url = excluded.home_url`,
     )
-    .run(module, s.maxTabs, s.maxHistory, s.activeSite ?? null, minKeep, retention);
+    .run(module, s.maxTabs, s.maxHistory, s.activeSite ?? null, minKeep, retention, homeUrl);
 }
 
 /** 读取某模块全部站点组的标签与历史 */
