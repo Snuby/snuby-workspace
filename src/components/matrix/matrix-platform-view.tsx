@@ -1,0 +1,810 @@
+"use client";
+
+// 自媒体账号矩阵 · 平台工作台
+// 布局: 顶栏(平台/账号切换/添加) · 下方全宽多标签 WebView (一账号一 persist partition)
+// 主标签不可关; 切账号常驻不销毁 webview, 登录态互不影响。
+
+import { createElement, useCallback, useEffect, useRef, useState } from "react";
+import {
+  homeTabIdOf,
+  isHomeTabId,
+  type MatrixAccount,
+  type MatrixPlatform,
+  type MatrixTab,
+} from "@/lib/matrix-types";
+
+type Props = {
+  platformId: string;
+  active: boolean;
+};
+
+function isElectronEnv(): boolean {
+  return typeof navigator !== "undefined" && /Electron/i.test(navigator.userAgent);
+}
+
+export default function MatrixPlatformView({ platformId, active }: Props) {
+  const [platform, setPlatform] = useState<MatrixPlatform | null>(null);
+  const [accounts, setAccounts] = useState<MatrixAccount[]>([]);
+  const [activeAccountId, setActiveAccountId] = useState<string | null>(null);
+  const [tabsByAccount, setTabsByAccount] = useState<Record<string, MatrixTab[]>>({});
+  const [activeTabByAccount, setActiveTabByAccount] = useState<Record<string, string>>({});
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  /** 标签加载态 (内存, 不落库) */
+  const [loadingByTab, setLoadingByTab] = useState<Record<string, boolean>>({});
+  /** 标签是否已成功完成过至少一次加载 — 首屏白屏才盖全屏提示 */
+  const [readyByTab, setReadyByTab] = useState<Record<string, boolean>>({});
+  const [errorByTab, setErrorByTab] = useState<Record<string, string>>({});
+
+  const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
+  const tabAccountRef = useRef<Record<string, string>>({});
+  const activeTabIdRef = useRef<string | null>(null);
+  const tabsByAccountRef = useRef(tabsByAccount);
+  tabsByAccountRef.current = tabsByAccount;
+  /** popup 监听 effect 依赖少: 用 ref 避免闭包拿到陈旧 openTab / 错误账号 */
+  const openTabRef = useRef<((accountId: string, url: string) => void) | null>(null);
+  const persistTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
+  const groupTabs = activeAccountId ? (tabsByAccount[activeAccountId] ?? []) : [];
+  const activeTabId =
+    (activeAccountId && activeTabByAccount[activeAccountId]) || groupTabs[0]?.id || null;
+  activeTabIdRef.current = activeTabId;
+  const activeLoading = !!(activeTabId && loadingByTab[activeTabId]);
+  const activeReady = !!(activeTabId && readyByTab[activeTabId]);
+  const activeError = activeTabId ? errorByTab[activeTabId] : undefined;
+  const showFirstLoadOverlay = activeLoading && !activeReady && !activeError;
+  const showErrorOverlay = !!activeError;
+
+  const refreshAccounts = useCallback(async () => {
+    const r = await fetch(`/api/matrix/accounts?platform=${encodeURIComponent(platformId)}`, {
+      cache: "no-store",
+    });
+    const j = (await r.json()) as {
+      accounts?: MatrixAccount[];
+      activeAccountId?: string | null;
+    };
+    const list = j.accounts ?? [];
+    setAccounts(list);
+    const aid = j.activeAccountId && list.some((a) => a.id === j.activeAccountId)
+      ? j.activeAccountId
+      : list[0]?.id ?? null;
+    setActiveAccountId(aid);
+    return { list, aid };
+  }, [platformId]);
+
+  const loadTabsFor = useCallback(
+    async (accountId: string) => {
+      const r = await fetch(
+        `/api/matrix/tabs?platform=${encodeURIComponent(platformId)}&account=${encodeURIComponent(accountId)}`,
+        { cache: "no-store" },
+      );
+      const j = (await r.json()) as { tabs?: MatrixTab[] };
+      const tabs = j.tabs ?? [];
+      setTabsByAccount((prev) => ({ ...prev, [accountId]: tabs }));
+      setActiveTabByAccount((prev) => ({
+        ...prev,
+        [accountId]: prev[accountId] && tabs.some((t) => t.id === prev[accountId])
+          ? prev[accountId]!
+          : tabs[0]?.id ?? homeTabIdOf(accountId),
+      }));
+    },
+    [platformId],
+  );
+
+  const persistTabs = useCallback(
+    async (accountId: string, tabs: MatrixTab[]) => {
+      await fetch("/api/matrix/tabs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platformId, accountId, tabs }),
+      });
+    },
+    [platformId],
+  );
+
+  /** 标题/URL 变更后防抖落盘, 避免只靠卸载落库 — 强杀时标题会停在「…」 */
+  const schedulePersist = useCallback(
+    (accountId: string, tabsSnapshot?: MatrixTab[]) => {
+      const prev = persistTimerRef.current[accountId];
+      if (prev) clearTimeout(prev);
+      persistTimerRef.current[accountId] = setTimeout(() => {
+        const tabs = tabsSnapshot ?? tabsByAccountRef.current[accountId];
+        if (tabs?.length) void persistTabs(accountId, tabs);
+      }, 400);
+    },
+    [persistTabs],
+  );
+
+  // 首屏: 平台元数据 + 账号
+  useEffect(() => {
+    void (async () => {
+      try {
+        const pr = await fetch("/api/matrix/platforms", { cache: "no-store" });
+        const pj = (await pr.json()) as { platforms?: MatrixPlatform[] };
+        setPlatform(pj.platforms?.find((p) => p.id === platformId) ?? null);
+        const { list, aid } = await refreshAccounts();
+        await Promise.all(list.map((a) => loadTabsFor(a.id)));
+        if (aid) {
+          // loadTabsFor already set
+        }
+      } catch {
+        setNotice("加载失败");
+      }
+    })();
+  }, [platformId, refreshAccounts, loadTabsFor]);
+
+  // 卸载前落盘当前所有账号标签
+  useEffect(() => {
+    return () => {
+      for (const t of Object.values(persistTimerRef.current)) clearTimeout(t);
+      persistTimerRef.current = {};
+      for (const [aid, tabs] of Object.entries(tabsByAccountRef.current)) {
+        if (tabs.length) void persistTabs(aid, tabs);
+      }
+    };
+  }, [persistTabs]);
+
+  // webview 可见性 (同 SiteBrowser: opacity + pe, 按激活标签精确设置)
+  useEffect(() => {
+    if (!isElectronEnv()) return;
+    for (const [tabId, el] of Object.entries(webviewRefs.current)) {
+      if (!el) continue;
+      const accId = tabAccountRef.current[tabId];
+      if (!accId) continue;
+      const show = active && accId === activeAccountId && tabId === activeTabId;
+      el.style.opacity = show ? "1" : "0";
+      el.style.pointerEvents = show ? "auto" : "none";
+    }
+  }, [active, activeAccountId, activeTabId, tabsByAccount, accounts]);
+
+  // popup → 新标签 (与 SiteBrowser 同策略: 按 guestId 精确归属, 多平台常驻时互不抢)
+  useEffect(() => {
+    if (!isElectronEnv()) return;
+    const onPopup = (e: Event) => {
+      const detail = (e as CustomEvent<{ url?: string; guestId?: number }>).detail;
+      if (!detail?.url || typeof detail.guestId !== "number") return;
+      let hit: Element | null = null;
+      for (const w of document.querySelectorAll<Element>("webview")) {
+        const wv = w as unknown as { getWebContentsId?: () => number };
+        if (typeof wv.getWebContentsId === "function" && wv.getWebContentsId() === detail.guestId) {
+          hit = w;
+          break;
+        }
+      }
+      if (!hit) return;
+      // 只处理本平台 webview; 微信/头条视图都在听同一 window 事件, 必须按 platform 过滤
+      if (hit.getAttribute("data-platform-id") !== platformId) return;
+      const accountId = hit.getAttribute("data-account-id");
+      if (!accountId) return;
+      openTabRef.current?.(accountId, detail.url);
+    };
+    window.addEventListener("snuby-webview-popup", onPopup);
+    return () => window.removeEventListener("snuby-webview-popup", onPopup);
+  }, [platformId]);
+
+  const registerGuest = useCallback(
+    (el: HTMLElement | null, accountId: string, tabId: string) => {
+      webviewRefs.current[tabId] = el;
+      tabAccountRef.current[tabId] = accountId;
+      if (!el) return;
+      const onTitle = (e: Event) => {
+        const t = (e as unknown as { title?: string }).title;
+        if (!t) return;
+        setTabsByAccount((prev) => {
+          const tabs = prev[accountId];
+          if (!tabs) return prev;
+          const next = tabs.map((x) => (x.id === tabId ? { ...x, title: t } : x));
+          schedulePersist(accountId, next);
+          return { ...prev, [accountId]: next };
+        });
+      };
+      const onNav = () => {
+        const url = (el as unknown as { getURL?: () => string }).getURL?.();
+        if (!url || isHomeTabId(tabId)) return;
+        setTabsByAccount((prev) => {
+          const tabs = prev[accountId];
+          if (!tabs) return prev;
+          const next = tabs.map((x) => (x.id === tabId ? { ...x, url } : x));
+          schedulePersist(accountId, next);
+          return { ...prev, [accountId]: next };
+        });
+      };
+      const onStart = () => {
+        setLoadingByTab((prev) => ({ ...prev, [tabId]: true }));
+        setErrorByTab((prev) => {
+          if (!prev[tabId]) return prev;
+          const next = { ...prev };
+          delete next[tabId];
+          return next;
+        });
+      };
+      const onStop = () => {
+        setLoadingByTab((prev) => ({ ...prev, [tabId]: false }));
+        setReadyByTab((prev) => (prev[tabId] ? prev : { ...prev, [tabId]: true }));
+      };
+      const onFail = (e: Event) => {
+        // 子 frame / 被取消的导航常误报 (如微信小程序客服 wujie iframe); 只提示主文档真失败
+        const detail = e as unknown as {
+          errorCode?: number;
+          errorDescription?: string;
+          validatedURL?: string;
+          isMainFrame?: boolean;
+        };
+        if (detail.isMainFrame === false) return;
+        if (detail.errorCode === -3 /* ERR_ABORTED */) return;
+        setLoadingByTab((prev) => ({ ...prev, [tabId]: false }));
+        const tip = detail.errorDescription || "页面加载失败";
+        const msg = detail.validatedURL ? `${tip} · ${detail.validatedURL}` : tip;
+        setErrorByTab((prev) => ({ ...prev, [tabId]: msg }));
+      };
+      if (!el.getAttribute("data-snuby-bound")) {
+        el.setAttribute("data-snuby-bound", "1");
+        // 挂载到首次 stop 前视为加载中, 避免 did-start 前长时间白屏无反馈
+        setLoadingByTab((prev) => (tabId in prev ? prev : { ...prev, [tabId]: true }));
+        el.addEventListener("page-title-updated", onTitle);
+        el.addEventListener("did-navigate", onNav);
+        el.addEventListener("did-navigate-in-page", onNav);
+        el.addEventListener("did-start-loading", onStart);
+        el.addEventListener("did-stop-loading", onStop);
+        el.addEventListener("did-fail-load", onFail);
+      }
+    },
+    [schedulePersist],
+  );
+
+  const selectAccount = async (accountId: string) => {
+    setActiveAccountId(accountId);
+    await fetch("/api/matrix/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "activate", platformId, accountId }),
+    });
+    if (!tabsByAccount[accountId]) await loadTabsFor(accountId);
+  };
+
+  const addAccount = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/matrix/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", platformId }),
+      });
+      const j = (await r.json()) as { account?: MatrixAccount; error?: string };
+      if (!j.account) {
+        setNotice(j.error ?? "添加失败");
+        return;
+      }
+      await refreshAccounts();
+      await loadTabsFor(j.account.id);
+      await selectAccount(j.account.id);
+      setNotice("已添加账号，请登录");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const commitRename = async (accountId: string) => {
+    const name = renameValue.trim();
+    setRenamingId(null);
+    if (!name) return;
+    const r = await fetch("/api/matrix/accounts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "rename", platformId, accountId, displayName: name }),
+    });
+    if (r.ok) await refreshAccounts();
+  };
+
+  const removeAccount = async (accountId: string) => {
+    const acc = accounts.find((a) => a.id === accountId);
+    if (
+      !window.confirm(
+        `删除账号「${acc?.displayName ?? accountId}」？\n该账号的登录态与本地存储将一并清除，且不可恢复。`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      // 先卸 webview 引用
+      const tabs = tabsByAccount[accountId] ?? [];
+      for (const t of tabs) {
+        delete webviewRefs.current[t.id];
+        delete tabAccountRef.current[t.id];
+      }
+      const r = await fetch("/api/matrix/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", platformId, accountId }),
+      });
+      const j = (await r.json()) as { ok?: boolean; partitionKey?: string; error?: string };
+      if (!j.ok) {
+        setNotice(j.error ?? "删除失败");
+        return;
+      }
+      if (j.partitionKey && window.snubyDesktop?.clearPartition) {
+        try {
+          await window.snubyDesktop.clearPartition(j.partitionKey);
+        } catch {
+          setNotice("账号已删，但清理本地存储失败（可重启后再试）");
+        }
+      }
+      setTabsByAccount((prev) => {
+        const next = { ...prev };
+        delete next[accountId];
+        return next;
+      });
+      const { list, aid } = await refreshAccounts();
+      if (aid) await loadTabsFor(aid);
+      else setActiveAccountId(null);
+      setNotice(list.length ? "账号已删除并清理登录态" : "账号已删除");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openTab = (accountId: string, url: string) => {
+    const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const tab: MatrixTab = { id, url, title: "…" };
+    setTabsByAccount((prev) => {
+      const next = [...(prev[accountId] ?? []), tab];
+      void persistTabs(accountId, next);
+      return { ...prev, [accountId]: next };
+    });
+    setActiveTabByAccount((prev) => ({ ...prev, [accountId]: id }));
+    setLoadingByTab((prev) => ({ ...prev, [id]: true }));
+    // 后台账号弹出的标签: 切到该账号, 避免「开了但看不见」
+    setActiveAccountId((cur) => (cur === accountId ? cur : accountId));
+  };
+  openTabRef.current = openTab;
+
+  const closeTab = (accountId: string, tabId: string) => {
+    if (isHomeTabId(tabId)) return;
+    setTabsByAccount((prev) => {
+      const tabs = prev[accountId] ?? [];
+      const idx = tabs.findIndex((t) => t.id === tabId);
+      const next = tabs.filter((t) => t.id !== tabId);
+      void persistTabs(accountId, next);
+      setActiveTabByAccount((ap) => {
+        if (ap[accountId] !== tabId) return ap;
+        const fallback = next[Math.min(idx, next.length - 1)] ?? next[0];
+        return { ...ap, [accountId]: fallback?.id ?? homeTabIdOf(accountId) };
+      });
+      delete webviewRefs.current[tabId];
+      delete tabAccountRef.current[tabId];
+      return { ...prev, [accountId]: next };
+    });
+    setLoadingByTab((prev) => {
+      if (!(tabId in prev)) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+    setReadyByTab((prev) => {
+      if (!(tabId in prev)) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+    setErrorByTab((prev) => {
+      if (!(tabId in prev)) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  };
+
+  const nav = (fn: "goBack" | "goForward" | "reload") => {
+    const el = activeTabId ? webviewRefs.current[activeTabId] : null;
+    if (el && typeof (el as unknown as Record<string, () => void>)[fn] === "function") {
+      (el as unknown as Record<string, () => void>)[fn]();
+    }
+  };
+
+  const retryActive = () => {
+    if (!activeTabId) return;
+    setErrorByTab((prev) => {
+      if (!prev[activeTabId]) return prev;
+      const next = { ...prev };
+      delete next[activeTabId];
+      return next;
+    });
+    setLoadingByTab((prev) => ({ ...prev, [activeTabId]: true }));
+    const el = webviewRefs.current[activeTabId] as
+      | (HTMLElement & { reload?: () => void; loadURL?: (url: string) => void })
+      | null
+      | undefined;
+    if (el?.reload) {
+      el.reload();
+      return;
+    }
+    const tab = activeAccountId
+      ? (tabsByAccount[activeAccountId] ?? []).find((t) => t.id === activeTabId)
+      : null;
+    if (tab?.url && el?.loadURL) el.loadURL(tab.url);
+  };
+
+  /** 回到主页: 先切到主标签并等可见, 再按需导航 (隐藏态 loadURL 易导致 Electron webview 白屏) */
+  const goHome = () => {
+    if (!activeAccount || !platform) return;
+    const accountId = activeAccount.id;
+    const homeId = homeTabIdOf(accountId);
+    const homeUrl = platform.homeUrl;
+    setActiveTabByAccount((prev) => ({ ...prev, [accountId]: homeId }));
+    window.setTimeout(() => {
+      const el = webviewRefs.current[homeId] as
+        | (HTMLElement & { loadURL?: (url: string) => void; getURL?: () => string })
+        | null
+        | undefined;
+      if (!el?.loadURL) return;
+      try {
+        const cur = el.getURL?.() ?? "";
+        if (isSameHomeUrl(cur, homeUrl)) return;
+        el.loadURL(homeUrl);
+      } catch {
+        el.loadURL(homeUrl);
+      }
+    }, 60);
+  };
+
+  if (!platform) {
+    return (
+      <div className="flex h-full items-center justify-center text-[13px] text-ink-faint">加载中…</div>
+    );
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-surface">
+      {/* 顶栏: 平台名 + 账号切换/添加 (原左侧账号栏上移, 内容区全宽) */}
+      <div className="flex h-[42px] shrink-0 items-center gap-2 border-b border-line bg-surface px-3">
+        <div className="shrink-0 text-[14px] font-bold text-ink">{platform.name}</div>
+        <div className="h-4 w-px shrink-0 bg-line" />
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+          {accounts.length === 0 ? (
+            <span className="px-1 text-[12px] text-ink-faint">还没有账号，点右侧添加后登录</span>
+          ) : (
+            accounts.map((a) => {
+              const selected = a.id === activeAccountId;
+              return (
+                <div
+                  key={a.id}
+                  className={[
+                    "group flex h-7 shrink-0 items-center gap-0.5 rounded-md pl-2 pr-0.5 text-[12.5px] transition-colors",
+                    selected
+                      ? "bg-accent-soft font-medium text-accent-deep"
+                      : "text-ink-muted hover:bg-black/5 hover:text-ink",
+                  ].join(" ")}
+                >
+                  {renamingId === a.id ? (
+                    <input
+                      autoFocus
+                      value={renameValue}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void commitRename(a.id);
+                        if (e.key === "Escape") setRenamingId(null);
+                      }}
+                      onBlur={() => void commitRename(a.id)}
+                      className="w-[100px] rounded border border-accent/40 bg-white px-1 py-0.5 text-[12px] outline-none"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void selectAccount(a.id)}
+                      className="max-w-[120px] truncate"
+                      title={a.displayName}
+                    >
+                      {a.displayName}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    aria-label={`重命名 ${a.displayName}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRenamingId(a.id);
+                      setRenameValue(a.displayName);
+                    }}
+                    className="pointer-events-none flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100"
+                    title="重命名"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`删除 ${a.displayName}`}
+                    onClick={() => void removeAccount(a.id)}
+                    className="pointer-events-none flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-red-50 hover:text-red-500 group-hover:pointer-events-auto group-hover:opacity-100"
+                    title="删除"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void addAccount()}
+            className="ml-0.5 shrink-0 rounded-md bg-accent px-2 py-0.5 text-[11.5px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+          >
+            + 添加
+          </button>
+        </div>
+        {notice ? (
+          <span className="max-w-[200px] shrink-0 truncate text-[11.5px] text-ink-faint">{notice}</span>
+        ) : null}
+        <div className="flex shrink-0 items-center gap-1" aria-label="工具条" />
+      </div>
+
+      {/* 内容区全宽 */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {!activeAccount ? (
+            <div className="flex flex-1 items-center justify-center text-[13px] text-ink-faint">
+              请先在顶栏添加并选择账号
+            </div>
+          ) : (
+            <>
+              <div className="flex h-[38px] shrink-0 items-stretch border-b border-line bg-black/[0.03]">
+                <div className="flex shrink-0 items-center border-r border-line px-1.5">
+                  <ToolBtn label="回到主页" onClick={goHome}>
+                    <IconHome />
+                  </ToolBtn>
+                </div>
+                <div className="flex min-w-0 flex-1 items-end gap-[3px] overflow-x-auto overflow-y-hidden px-1.5">
+                  {groupTabs.map((t) => {
+                    const isActive = t.id === activeTabId;
+                    const home = isHomeTabId(t.id);
+                    const tabLoading = !!loadingByTab[t.id];
+                    const tabError = !!errorByTab[t.id];
+                    return (
+                      <div
+                        key={t.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() =>
+                          setActiveTabByAccount((prev) => ({
+                            ...prev,
+                            [activeAccount.id]: t.id,
+                          }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            setActiveTabByAccount((prev) => ({
+                              ...prev,
+                              [activeAccount.id]: t.id,
+                            }));
+                          }
+                        }}
+                        title={tabError ? errorByTab[t.id] : t.url}
+                        className={[
+                          "group relative z-0 flex h-[30px] min-w-0 shrink-0 cursor-pointer items-center gap-1.5 rounded-t-[7px] border border-line pl-3 pr-1.5 text-[12.5px] transition-colors",
+                          isActive
+                            ? "z-10 -mb-px h-[31px] border-b-0 bg-white font-semibold text-ink shadow-[0_-1px_4px_rgba(0,0,0,0.05)]"
+                            : "bg-black/[0.05] text-ink-muted hover:bg-white/70 hover:text-ink",
+                        ].join(" ")}
+                      >
+                        {tabError ? <span className="text-red-500">⚠</span> : null}
+                        <span className="max-w-[140px] truncate">
+                          {home ? platform.homeTitle : t.title || "…"}
+                        </span>
+                        {tabLoading && isActive ? (
+                          <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
+                        ) : null}
+                        {!home ? (
+                          <button
+                            type="button"
+                            aria-label="关闭标签"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              closeTab(activeAccount.id, t.id);
+                            }}
+                            className="pointer-events-none flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-red-500 group-hover:pointer-events-auto group-hover:opacity-100"
+                          >
+                            <IconX className="h-3 w-3" />
+                          </button>
+                        ) : (
+                          <span className="h-4 w-4 shrink-0" aria-hidden />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex shrink-0 items-center gap-0.5 border-l border-line pl-1.5 pr-2">
+                  <ToolBtn label="后退" onClick={() => nav("goBack")}>
+                    <IconBack />
+                  </ToolBtn>
+                  <ToolBtn label="前进" onClick={() => nav("goForward")}>
+                    <IconForward />
+                  </ToolBtn>
+                  <ToolBtn label="刷新" onClick={() => nav("reload")}>
+                    <IconReload />
+                  </ToolBtn>
+                </div>
+              </div>
+              <div className="relative min-h-0 flex-1 bg-white">
+                {accounts.map((acc) => {
+                  const tabs = tabsByAccount[acc.id] ?? [];
+                  return tabs.map((t) => (
+                    <div
+                      key={`${acc.id}:${t.id}`}
+                      className="absolute inset-0"
+                      style={{
+                        // 容器层也跟可见性走; 精确 pe 仍由 effect 打在 webview 上
+                        opacity: acc.id === activeAccountId && t.id === activeTabId ? 1 : 0,
+                        pointerEvents:
+                          acc.id === activeAccountId && t.id === activeTabId ? "auto" : "none",
+                        zIndex: acc.id === activeAccountId && t.id === activeTabId ? 2 : 0,
+                      }}
+                    >
+                      <AccountWebview
+                        src={t.url}
+                        platformId={platformId}
+                        accountId={acc.id}
+                        tabId={t.id}
+                        partition={acc.partitionKey}
+                        onRef={registerGuest}
+                      />
+                    </div>
+                  ));
+                })}
+                {showFirstLoadOverlay ? (
+                  <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white">
+                    <span className="h-5 w-5 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+                    <span className="text-[13px] text-ink-muted">页面加载中…</span>
+                    <span className="max-w-[360px] truncate px-4 text-center text-[11.5px] text-ink-faint">
+                      网络较慢时请稍候
+                    </span>
+                  </div>
+                ) : null}
+                {activeLoading && activeReady && !activeError ? (
+                  <div className="pointer-events-none absolute left-0 right-0 top-0 z-20 h-0.5 overflow-hidden bg-black/[0.04]">
+                    <div className="h-full w-1/3 animate-pulse bg-accent" />
+                  </div>
+                ) : null}
+                {showErrorOverlay ? (
+                  <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6">
+                    <span className="text-[14px] font-medium text-ink">页面加载失败</span>
+                    <p className="max-w-[420px] break-all text-center text-[12px] leading-relaxed text-ink-muted">
+                      {activeError}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={retryActive}
+                      className="mt-1 rounded-md bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
+                    >
+                      重新加载
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          )}
+      </div>
+    </div>
+  );
+}
+
+function isSameHomeUrl(current: string, homeUrl: string): boolean {
+  if (!current || current === "about:blank") return false;
+  if (current === homeUrl) return true;
+  try {
+    const a = new URL(current);
+    const b = new URL(homeUrl);
+    if (a.origin !== b.origin) return false;
+    const norm = (p: string) => p.replace(/\/+$/, "") || "/";
+    return norm(a.pathname) === norm(b.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function ToolBtn({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      onClick={onClick}
+      className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Icon({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className ?? "h-3.5 w-3.5"}
+    >
+      {children}
+    </svg>
+  );
+}
+const IconBack = () => (
+  <Icon>
+    <path d="m12 19-7-7 7-7" />
+    <path d="M19 12H5" />
+  </Icon>
+);
+const IconForward = () => (
+  <Icon>
+    <path d="M5 12h14" />
+    <path d="m12 5 7 7-7 7" />
+  </Icon>
+);
+const IconReload = () => (
+  <Icon>
+    <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+    <path d="M21 3v5h-5" />
+  </Icon>
+);
+const IconHome = () => (
+  <Icon>
+    <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    <path d="M9 22V12h6v10" />
+  </Icon>
+);
+const IconX = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </Icon>
+);
+
+function AccountWebview({
+  src,
+  platformId,
+  accountId,
+  tabId,
+  partition,
+  onRef,
+}: {
+  src: string;
+  platformId: string;
+  accountId: string;
+  tabId: string;
+  partition: string;
+  onRef: (el: HTMLElement | null, accountId: string, tabId: string) => void;
+}) {
+  const [initialSrc] = useState(src);
+  const setEl = useCallback(
+    (el: HTMLElement | null) => onRef(el, accountId, tabId),
+    [onRef, accountId, tabId],
+  );
+  return createElement("div", { className: "h-full w-full" }, [
+    createElement("webview", {
+      ref: setEl,
+      src: initialSrc,
+      partition,
+      allowpopups: "true",
+      "data-platform-id": platformId,
+      "data-account-id": accountId,
+      "data-tab-id": tabId,
+      className: "h-full w-full border-0",
+      style: { width: "100%", height: "100%" },
+    }),
+  ]);
+}

@@ -4,7 +4,7 @@
 //   用户数据根 = ~/snuby-workspace-data (SNUBY_USER_DATA 可覆盖)
 //   含主题库 + Agent 会话与工作区; 启动时从旧路径幂等迁移。
 
-const { app, BrowserWindow, dialog, session, utilityProcess, Menu, clipboard } = require("electron");
+const { app, BrowserWindow, dialog, session, utilityProcess, Menu, clipboard, ipcMain } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -321,7 +321,13 @@ app.whenReady().then(async () => {
       title: APP_TITLE,
       autoHideMenuBar: true,
       // webviewTag: 桌面版榜单以 <webview> 内嵌第三方官网 (spec 013, AC-A)
-      webPreferences: { contextIsolation: true, nodeIntegration: false, webviewTag: true },
+      // preload: 清矩阵 partition 等桌面能力
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        webviewTag: true,
+        preload: path.join(__dirname, "preload.js"),
+      },
     });
     await loadURLWithRetry(win, `http://127.0.0.1:${port}/`);
   } catch (err) {
@@ -343,3 +349,18 @@ app.on("second-instance", () => {
 });
 
 app.on("window-all-closed", () => app.quit()); // macOS 也退出 (单窗口工具型应用)
+
+// 自媒体账号矩阵: 删除账号时清干净对应 persist partition (仅允许 snuby-matrix 命名空间)
+ipcMain.handle("snuby:clear-partition", async (_event, partition) => {
+  if (typeof partition !== "string" || !partition.startsWith("persist:snuby-matrix:")) {
+    throw new Error("非法 partition");
+  }
+  const ses = session.fromPartition(partition);
+  await ses.clearStorageData();
+  try {
+    await ses.clearCache();
+  } catch {
+    // 部分 Electron 版本 clearCache 行为差异, 存储已清即可
+  }
+  return { ok: true };
+});

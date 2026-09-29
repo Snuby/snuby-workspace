@@ -89,7 +89,54 @@ function getDb(): DatabaseSync {
   }
   // 出厂主题幂等种子 (首次打开库时写入; 之后 topics 非空即跳过)
   ensureTopicsSeeded(db);
+  // 自媒体账号矩阵表 + 平台种子 (同库, 避免循环依赖不调 matrix-repository)
+  ensureMatrixSchema(db);
   return db;
+}
+
+/** 供其它 repository 复用同一 SQLite 连接 (同进程单例) */
+export function getSiteTabsDb(): DatabaseSync {
+  return getDb();
+}
+
+function ensureMatrixSchema(d: DatabaseSync): void {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS matrix_platforms (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      home_url   TEXT NOT NULL,
+      home_title TEXT NOT NULL DEFAULT '',
+      sort       INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS matrix_accounts (
+      id            TEXT PRIMARY KEY,
+      platform_id   TEXT NOT NULL,
+      display_name  TEXT NOT NULL,
+      partition_key TEXT NOT NULL UNIQUE,
+      sort          INTEGER NOT NULL DEFAULT 0,
+      created_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_matrix_accounts_platform ON matrix_accounts (platform_id, sort);
+    CREATE TABLE IF NOT EXISTS matrix_account_tabs (
+      platform   TEXT NOT NULL,
+      account    TEXT NOT NULL,
+      tab_id     TEXT NOT NULL,
+      url        TEXT NOT NULL,
+      title      TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (platform, account, tab_id)
+    );
+    CREATE TABLE IF NOT EXISTS matrix_platform_state (
+      platform_id       TEXT PRIMARY KEY,
+      active_account_id TEXT
+    );
+  `);
+  const seed = d.prepare(
+    "INSERT OR IGNORE INTO matrix_platforms (id, name, home_url, home_title, sort) VALUES (?, ?, ?, ?, ?)",
+  );
+  seed.run("weixin", "微信公众号", "https://mp.weixin.qq.com/", "公众号主页", 0);
+  seed.run("toutiao", "今日头条", "https://mp.toutiao.com/profile_v4/index", "头条创作主页", 1);
+  seed.run("xiaohongshu", "小红书", "https://creator.xiaohongshu.com/", "小红书创作主页", 2);
 }
 
 /** 读取模块设置, 无记录则落默认值并返回 */
@@ -421,6 +468,29 @@ export function removeSite(topicId: string, siteId: string): void {
     d.exec("ROLLBACK");
     throw e;
   }
+}
+
+/** 更新站点名称/地址; 至少提供一项。返回是否命中行。 */
+export function updateSite(
+  topicId: string,
+  siteId: string,
+  patch: { url?: string; label?: string },
+): boolean {
+  const d = getDb();
+  const row = d
+    .prepare("SELECT url, label FROM sites WHERE id = ? AND topic_id = ?")
+    .get(siteId, topicId) as { url: string; label: string } | undefined;
+  if (!row) return false;
+  const url = patch.url !== undefined ? patch.url.trim() : row.url;
+  const label = patch.label !== undefined ? patch.label.trim() || url : row.label;
+  if (!url) return false;
+  d.prepare("UPDATE sites SET url = ?, label = ? WHERE id = ? AND topic_id = ?").run(
+    url,
+    label,
+    siteId,
+    topicId,
+  );
+  return true;
 }
 
 /** 重排站点: orderedIds 为新的 id 顺序, 按数组下标重写 sort */

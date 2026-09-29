@@ -14,6 +14,7 @@ import {
   type ReactNode,
 } from "react";
 import { useClickOutside } from "@/lib/use-click-outside";
+import { setAgentRunningCount } from "@/infrastructure/agent-run-presence";
 
 type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
 
@@ -420,6 +421,11 @@ export default function LocalAgentPanel() {
   const permAnsweredRef = useRef(false);
 
   // 任务运行中轮询未决权限 (NDJSON 在服务端阻塞等待时可能迟迟刷不出 permission 事件)
+  useEffect(() => {
+    setAgentRunningCount(runningIds.size);
+  }, [runningIds]);
+  useEffect(() => () => setAgentRunningCount(0), []);
+
   useEffect(() => {
     if (runningIds.size === 0) return;
     let alive = true;
@@ -1453,12 +1459,13 @@ export default function LocalAgentPanel() {
           const ar = await fetch("/api/agent/audit", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: sid }),
+            // 只扫本轮任务开始后的写入, 避免其他会话 meta/落盘误报
+            body: JSON.stringify({ id: sid, sinceMs: run.startedAt }),
           });
           const aj = (await ar.json()) as { violations?: { path: string; mtime: number; size: number }[] };
           if (aj.violations?.length) {
             setAuditWarn(
-              `⚠ 检测到 ${aj.violations.length} 处工作区越界写入: WorkBuddy 可能读写到了其他会话目录（见控制台/审计接口）`,
+              `⚠ 检测到 ${aj.violations.length} 处工作区越界写入: WorkBuddy 可能把产物写到了其他会话目录（见控制台/审计接口）`,
             );
           } else {
             setAuditWarn(null);
@@ -1632,6 +1639,23 @@ export default function LocalAgentPanel() {
           <span className={`h-2 w-2 rounded-full ${pm.dot}`} />
           {pm.label}
         </div>
+        {runningIds.size > 0 && (
+          <div
+            className="flex shrink-0 items-center gap-1.5 rounded-full border border-accent/25 bg-accent-soft px-2.5 py-1 text-[11.5px] font-medium text-accent-deep"
+            title={
+              currentId && queueHint[currentId]
+                ? queueHint[currentId]!
+                : "本地 Agent 正在执行任务；切到其他模块后仍会继续"
+            }
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+            </span>
+            {currentId && queueHint[currentId] ? "排队中" : "任务进行中"}
+            {runningIds.size > 1 ? ` · ${runningIds.size}` : ""}
+          </div>
+        )}
         <div className="flex min-w-0 flex-1 items-center gap-x-4 text-[11.5px] text-ink-muted">
           {status?.discovered ? (
             <>
@@ -2148,6 +2172,8 @@ export default function LocalAgentPanel() {
               if (currentId) writeInputDraft(currentId, v);
             }}
             onKeyDown={(e) => {
+              // 输入法组字中按 Enter 是确认候选, 不要当成发送
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void send();

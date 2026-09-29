@@ -7,6 +7,7 @@ import {
   listSites,
   removeSite,
   reorderSites,
+  updateSite,
   type SiteRow,
 } from "@/infrastructure/site-tabs-repository";
 
@@ -47,6 +48,25 @@ export async function POST(req: Request) {
       const siteId = typeof body.siteId === "string" ? body.siteId : "";
       if (!topicId || !siteId) return NextResponse.json({ error: "缺少 topicId 或 siteId" }, { status: 400 });
       removeSite(topicId, siteId);
+      return NextResponse.json({ ok: true });
+    }
+    if (action === "update") {
+      const topicId = typeof body.topicId === "string" ? body.topicId : "";
+      const siteId = typeof body.siteId === "string" ? body.siteId : "";
+      const url = typeof body.url === "string" ? body.url.trim() : undefined;
+      const label = typeof body.label === "string" ? body.label.trim() : undefined;
+      if (!topicId || !siteId) return NextResponse.json({ error: "缺少 topicId 或 siteId" }, { status: 400 });
+      if (url === undefined && label === undefined) {
+        return NextResponse.json({ error: "缺少 url 或 label" }, { status: 400 });
+      }
+      const full =
+        url === undefined
+          ? undefined
+          : /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url)
+            ? url
+            : `https://${url}`;
+      const ok = updateSite(topicId, siteId, { url: full, label });
+      if (!ok) return NextResponse.json({ error: "站点不存在" }, { status: 404 });
       return NextResponse.json({ ok: true });
     }
     if (action === "reorder") {

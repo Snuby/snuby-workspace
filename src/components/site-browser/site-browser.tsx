@@ -154,12 +154,16 @@ export default function SiteBrowser({
   const [historyBySite, setHistoryBySite] = useState<Record<string, SiteHistoryEntry[]>>({});
   const [activeSiteInner, setActiveSiteInner] = useState<string>(sites[0]?.id ?? "default");
   const [activeTab, setActiveTab] = useState<TabView | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingByTab, setLoadingByTab] = useState<Record<string, boolean>>({});
+  const [readyByTab, setReadyByTab] = useState<Record<string, boolean>>({});
+  const [errorMsgByTab, setErrorMsgByTab] = useState<Record<string, string>>({});
   const [currentUrl, setCurrentUrl] = useState("");
   const [showHistory, setShowHistory] = useState(false);
   // —— 站点管理 (topic 动态配置): 添加站点表单 / Web 访问"添加到主题" ——
-  const { topics, addSite, removeSite } = useTopics();
+  const { topics, addSite, updateSite, removeSite } = useTopics();
   const [addSiteOpen, setAddSiteOpen] = useState(false);
+  /** 编辑中的站点 id; null 表示对话框处于「添加」模式 */
+  const [editingSiteId, setEditingSiteId] = useState<string | null>(null);
   const [siteUrl, setSiteUrl] = useState("");
   const [siteLabel, setSiteLabel] = useState("");
   const [addToTopicOpen, setAddToTopicOpen] = useState(false);
@@ -407,8 +411,27 @@ export default function SiteBrowser({
       setTabsBySite((prev) => ({ ...prev, [siteId]: next }));
       if (evicted) {
         appendHistory(siteId, [{ url: evicted.url, title: evicted.title, closedAt: Date.now() }]);
+        setLoadingByTab((prev) => {
+          if (!(evicted!.id in prev)) return prev;
+          const n = { ...prev };
+          delete n[evicted!.id];
+          return n;
+        });
+        setReadyByTab((prev) => {
+          if (!(evicted!.id in prev)) return prev;
+          const n = { ...prev };
+          delete n[evicted!.id];
+          return n;
+        });
+        setErrorMsgByTab((prev) => {
+          if (!(evicted!.id in prev)) return prev;
+          const n = { ...prev };
+          delete n[evicted!.id];
+          return n;
+        });
       }
       persistTabs(siteId, next);
+      setLoadingByTab((prev) => ({ ...prev, [tab.id]: true }));
       setActiveTab({ siteId, tabId: tab.id });
       setActiveSiteInner(siteId);
     },
@@ -426,6 +449,24 @@ export default function SiteBrowser({
       setTabsBySite((prev) => ({ ...prev, [siteId]: next }));
       appendHistory(siteId, [{ url: closed.url, title: closed.title, closedAt: Date.now() }]);
       persistTabs(siteId, next);
+      setLoadingByTab((prev) => {
+        if (!(tabId in prev)) return prev;
+        const n = { ...prev };
+        delete n[tabId];
+        return n;
+      });
+      setReadyByTab((prev) => {
+        if (!(tabId in prev)) return prev;
+        const n = { ...prev };
+        delete n[tabId];
+        return n;
+      });
+      setErrorMsgByTab((prev) => {
+        if (!(tabId in prev)) return prev;
+        const n = { ...prev };
+        delete n[tabId];
+        return n;
+      });
       if (activeTab?.siteId === siteId && activeTab.tabId === tabId) {
         // 关闭激活标签 → 激活相邻 (右侧优先, 无右侧则左侧); 无剩余 → 主页
         const target = next[Math.min(idx, next.length - 1)] ?? homeTab(moduleSites.find((s) => s.id === siteId)!);
@@ -500,10 +541,39 @@ export default function SiteBrowser({
         }));
       }
     };
-    const onStart = () => setLoading(true);
-    const onStop = () => setLoading(false);
-    const onFail = () => {
-      setLoading(false);
+    const onStart = () => {
+      setLoadingByTab((prev) => ({ ...prev, [tabId]: true }));
+      setErrorMsgByTab((prev) => {
+        if (!prev[tabId]) return prev;
+        const n = { ...prev };
+        delete n[tabId];
+        return n;
+      });
+      setTabsBySite((prev) => ({
+        ...prev,
+        [siteId]: (prev[siteId] ?? []).map((x) =>
+          x.id === tabId && x.error ? { ...x, error: false } : x,
+        ),
+      }));
+    };
+    const onStop = () => {
+      setLoadingByTab((prev) => ({ ...prev, [tabId]: false }));
+      setReadyByTab((prev) => (prev[tabId] ? prev : { ...prev, [tabId]: true }));
+    };
+    const onFail = (e: Event) => {
+      const detail = e as unknown as {
+        errorCode?: number;
+        errorDescription?: string;
+        validatedURL?: string;
+        isMainFrame?: boolean;
+      };
+      // 子 frame / 取消导航常误报, 与矩阵侧一致只认主文档真失败
+      if (detail.isMainFrame === false) return;
+      if (detail.errorCode === -3 /* ERR_ABORTED */) return;
+      setLoadingByTab((prev) => ({ ...prev, [tabId]: false }));
+      const tip = detail.errorDescription || "页面加载失败";
+      const msg = detail.validatedURL ? `${tip} · ${detail.validatedURL}` : tip;
+      setErrorMsgByTab((prev) => ({ ...prev, [tabId]: msg }));
       setTabsBySite((prev) => ({
         ...prev,
         [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, error: true } : x)),
@@ -511,6 +581,7 @@ export default function SiteBrowser({
     };
     if (!el.getAttribute("data-snuby-bound")) {
       el.setAttribute("data-snuby-bound", "1");
+      setLoadingByTab((prev) => (tabId in prev ? prev : { ...prev, [tabId]: true }));
       el.addEventListener("did-navigate", onNavigateFull);
       el.addEventListener("did-navigate-in-page", onNavigateInPage);
       el.addEventListener("page-title-updated", onTitle);
@@ -529,21 +600,111 @@ export default function SiteBrowser({
     }
   };
 
+  const retryActiveTab = () => {
+    const tabId = activeTabIdRef.current;
+    if (!tabId) return;
+    setErrorMsgByTab((prev) => {
+      if (!prev[tabId]) return prev;
+      const n = { ...prev };
+      delete n[tabId];
+      return n;
+    });
+    setLoadingByTab((prev) => ({ ...prev, [tabId]: true }));
+    setTabsBySite((prev) => {
+      const next = { ...prev };
+      for (const sid of Object.keys(next)) {
+        next[sid] = (next[sid] ?? []).map((x) =>
+          x.id === tabId ? { ...x, error: false } : x,
+        );
+      }
+      return next;
+    });
+    const el = webviewRefs.current[tabId] as
+      | (HTMLElement & { reload?: () => void })
+      | null
+      | undefined;
+    el?.reload?.();
+  };
+
   // —— 站点管理动作 ——
-  // ESC 关闭添加站点对话框 (焦点不在输入框时也生效)
+  // ESC 关闭添加/编辑站点对话框
   useEffect(() => {
     if (!addSiteOpen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setAddSiteOpen(false);
+      if (e.key === "Escape") {
+        setAddSiteOpen(false);
+        setEditingSiteId(null);
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [addSiteOpen]);
 
+  // 站点配置变更后同步主页标签的 url/title (主页 id = siteId::home)
+  useEffect(() => {
+    setTabsBySite((prev) => {
+      let changed = false;
+      const next: Record<string, SiteTab[]> = { ...prev };
+      for (const s of moduleSites) {
+        const tabs = next[s.id];
+        if (!tabs?.length) continue;
+        const homeId = `${s.id}${HOME_SUFFIX}`;
+        const mapped = tabs.map((t) => {
+          if (t.id !== homeId) return t;
+          if (t.url === s.url && t.title === s.label) return t;
+          changed = true;
+          return { ...t, url: s.url, title: s.label };
+        });
+        next[s.id] = mapped;
+      }
+      return changed ? next : prev;
+    });
+  }, [moduleSites]);
+
+  const openAddSite = () => {
+    setEditingSiteId(null);
+    setSiteUrl("");
+    setSiteLabel("");
+    setAddSiteOpen(true);
+  };
+  const openEditSite = (siteId: string) => {
+    const s = moduleSites.find((x) => x.id === siteId);
+    if (!s) return;
+    setEditingSiteId(siteId);
+    setSiteUrl(s.url);
+    setSiteLabel(s.label);
+    setAddSiteOpen(true);
+  };
+
   const handleAddSite = async () => {
     const url = siteUrl.trim();
     if (!url) return;
     const full = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(url) ? url : `https://${url}`;
+    if (editingSiteId) {
+      const prev = moduleSites.find((s) => s.id === editingSiteId);
+      const ok = await updateSite(moduleKey, editingSiteId, {
+        url: full,
+        label: siteLabel.trim(),
+      });
+      if (ok) {
+        // 地址变更时让主页 webview 跟进导航
+        if (prev && prev.url !== full) {
+          const homeId = `${editingSiteId}${HOME_SUFFIX}`;
+          const el = webviewRefs.current[homeId];
+          if (el && typeof (el as unknown as { loadURL: (u: string) => void }).loadURL === "function") {
+            (el as unknown as { loadURL: (u: string) => void }).loadURL(full);
+          }
+        }
+        setSiteUrl("");
+        setSiteLabel("");
+        setEditingSiteId(null);
+        setAddSiteOpen(false);
+        setSiteNotice("站点已更新");
+      } else {
+        setSiteNotice("更新失败，请重试");
+      }
+      return;
+    }
     const id = await addSite(moduleKey, full, siteLabel.trim());
     if (id) {
       setSiteUrl("");
@@ -610,6 +771,12 @@ export default function SiteBrowser({
       : groupTabs[0];
   const activeHistory = historyBySite[groupId] ?? [];
   activeTabIdRef.current = activeTabDef?.id ?? null;
+  const activeTabId = activeTabDef?.id ?? null;
+  const activeLoading = !!(activeTabId && loadingByTab[activeTabId]);
+  const activeReady = !!(activeTabId && readyByTab[activeTabId]);
+  const activeErrorMsg = activeTabId ? errorMsgByTab[activeTabId] : undefined;
+  const showFirstLoadOverlay = activeLoading && !activeReady && !activeErrorMsg;
+  const showErrorOverlay = !!activeErrorMsg;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
@@ -641,6 +808,11 @@ export default function SiteBrowser({
                 key={s.id}
                 type="button"
                 onClick={() => selectSite(s.id)}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  openEditSite(s.id);
+                }}
+                title={`${s.label}\n${s.url}\n双击编辑`}
                 className={[
                   "group relative shrink-0 px-3 text-[13px] transition-colors",
                   active ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",
@@ -648,6 +820,20 @@ export default function SiteBrowser({
               >
                 {s.label}
                 {active ? <span className="absolute inset-x-1.5 -bottom-px h-[2px] rounded-full bg-accent" /> : null}
+                <span
+                  role="button"
+                  aria-label={`编辑站点 ${s.label}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEditSite(s.id);
+                  }}
+                  className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-ink group-hover:opacity-100"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+                  </svg>
+                </span>
                 {moduleSites.length > 1 ? (
                   <span
                     role="button"
@@ -657,7 +843,7 @@ export default function SiteBrowser({
                       void handleRemoveSite(s.id);
                     }}
                     // X 常驻占位 (inline-flex + opacity 控制显隐): hover 出现但不撑开宽度, 选项卡不跳变
-                    className="ml-1.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-red-500 group-hover:opacity-100"
+                    className="ml-0.5 inline-flex h-3.5 w-3.5 items-center justify-center rounded text-ink-faint opacity-0 transition-opacity hover:bg-black/10 hover:text-red-500 group-hover:opacity-100"
                   >
                     <IconX className="h-3 w-3" />
                   </span>
@@ -669,7 +855,7 @@ export default function SiteBrowser({
             <button
               type="button"
               title="添加站点"
-              onClick={() => setAddSiteOpen((v) => !v)}
+              onClick={openAddSite}
               className="flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
             >
               <IconAdd className="h-4 w-4" />
@@ -677,21 +863,29 @@ export default function SiteBrowser({
             {addSiteOpen ? (
               <div
                 className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
-                onClick={() => setAddSiteOpen(false)}
+                onClick={() => {
+                  setAddSiteOpen(false);
+                  setEditingSiteId(null);
+                }}
               >
                 <div
                   role="dialog"
                   aria-modal="true"
-                  aria-label="添加站点"
+                  aria-label={editingSiteId ? "编辑站点" : "添加站点"}
                   onClick={(e) => e.stopPropagation()}
                   className="w-[440px] max-w-[90vw] rounded-xl border border-line bg-white p-5 shadow-2xl"
                 >
                   <div className="mb-4 flex items-center justify-between">
-                    <span className="text-[14.5px] font-bold text-ink">添加站点</span>
+                    <span className="text-[14.5px] font-bold text-ink">
+                      {editingSiteId ? "编辑站点" : "添加站点"}
+                    </span>
                     <button
                       type="button"
                       aria-label="关闭"
-                      onClick={() => setAddSiteOpen(false)}
+                      onClick={() => {
+                        setAddSiteOpen(false);
+                        setEditingSiteId(null);
+                      }}
                       className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
                     >
                       <IconX className="h-4 w-4" />
@@ -716,7 +910,10 @@ export default function SiteBrowser({
                     <div className="mt-1 flex justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => setAddSiteOpen(false)}
+                        onClick={() => {
+                          setAddSiteOpen(false);
+                          setEditingSiteId(null);
+                        }}
                         className="rounded-md border border-line bg-surface px-3.5 py-1.5 text-[13px] text-ink-muted hover:bg-black/5"
                       >
                         取消
@@ -726,7 +923,7 @@ export default function SiteBrowser({
                         onClick={() => void handleAddSite()}
                         className="rounded-md bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
                       >
-                        添加
+                        {editingSiteId ? "保存" : "添加"}
                       </button>
                     </div>
                   </div>
@@ -746,6 +943,8 @@ export default function SiteBrowser({
           {groupTabs.map((t) => {
             const active = t.id === activeTabDef.id;
             const isHome = t.id.endsWith(HOME_SUFFIX);
+            const tabLoading = !!loadingByTab[t.id];
+            const tabErrMsg = errorMsgByTab[t.id];
             return (
               <div
                 key={t.id}
@@ -753,7 +952,7 @@ export default function SiteBrowser({
                 tabIndex={0}
                 onClick={() => activateTab(groupId, t.id)}
                 onKeyDown={(e) => e.key === "Enter" && activateTab(groupId, t.id)}
-                title={t.url}
+                title={tabErrMsg || t.url}
                 className={[
                   "group relative z-0 flex h-[30px] min-w-0 shrink-0 cursor-pointer items-center gap-1.5 rounded-t-[7px] border border-line px-3 text-[12.5px] transition-colors",
                   active
@@ -761,9 +960,11 @@ export default function SiteBrowser({
                     : "bg-black/[0.05] text-ink-muted hover:bg-white/70 hover:text-ink",
                 ].join(" ")}
               >
-                {t.error ? <span className="text-red-500">⚠</span> : null}
+                {t.error || tabErrMsg ? <span className="text-red-500">⚠</span> : null}
                 <span className="max-w-[140px] truncate">{t.title}</span>
-                {loading && active ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" /> : null}
+                {tabLoading && active ? (
+                  <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
+                ) : null}
                 {!isHome ? (
                   <button
                     type="button"
@@ -909,6 +1110,35 @@ export default function SiteBrowser({
             </div>
           );
         })}
+        {showFirstLoadOverlay ? (
+          <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-white">
+            <span className="h-5 w-5 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+            <span className="text-[13px] text-ink-muted">页面加载中…</span>
+            <span className="max-w-[360px] truncate px-4 text-center text-[11.5px] text-ink-faint">
+              网络较慢时请稍候
+            </span>
+          </div>
+        ) : null}
+        {activeLoading && activeReady && !activeErrorMsg ? (
+          <div className="pointer-events-none absolute left-0 right-0 top-0 z-30 h-0.5 overflow-hidden bg-black/[0.04]">
+            <div className="h-full w-1/3 animate-pulse bg-accent" />
+          </div>
+        ) : null}
+        {showErrorOverlay ? (
+          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-white px-6">
+            <span className="text-[14px] font-medium text-ink">页面加载失败</span>
+            <p className="max-w-[420px] break-all text-center text-[12px] leading-relaxed text-ink-muted">
+              {activeErrorMsg}
+            </p>
+            <button
+              type="button"
+              onClick={retryActiveTab}
+              className="mt-1 rounded-md bg-accent px-3.5 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
+            >
+              重新加载
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

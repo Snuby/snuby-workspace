@@ -3,11 +3,15 @@
 // 灵活工作台: 左侧菜单 = 固定区 (工作台/Web访问/设置)
 // + 主题区 (用户动态创建的主题, 来自 /api/topics; 主题 = 可配置的站点集合)
 
-import { useRef, useState } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTopics, type Topic } from "@/components/workbench/topics-context";
 import { useClickOutside } from "@/lib/use-click-outside";
+import {
+  getAgentRunningCount,
+  subscribeAgentRunning,
+} from "@/infrastructure/agent-run-presence";
 
 type NavLeaf = {
   href: string;
@@ -74,6 +78,27 @@ const ICONS = {
       <path d="M7 15h10" />
     </svg>
   ),
+  weixin: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+      <path d="M8.5 14.5c-3 0-5.5-2-5.5-4.5S5.5 5.5 8.5 5.5 14 7.5 14 10c0 .6-.1 1.1-.3 1.6" />
+      <path d="M15.5 19.5c3.3 0 6-2.2 6-5s-2.7-5-6-5-6 2.2-6 5c0 1.2.5 2.3 1.4 3.1L10 20l2.2-1.2c1 .4 2.1.7 3.3.7Z" />
+    </svg>
+  ),
+  toutiao: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+      <path d="M4 7h16" />
+      <path d="M4 12h16" />
+      <path d="M4 17h10" />
+    </svg>
+  ),
+  xiaohongshu: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+      <path d="M8 7h8" />
+      <path d="M8 11h6" />
+    </svg>
+  ),
 };
 
 /** 固定区导航 (主题区动态渲染在下) */
@@ -104,6 +129,11 @@ export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { topics, createTopic, renameTopic, deleteTopic } = useTopics();
+  const agentRunning = useSyncExternalStore(
+    subscribeAgentRunning,
+    getAgentRunningCount,
+    () => 0,
+  );
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
   /** 当前展开 ⋯ 菜单的主题 id (null = 无) */
@@ -215,9 +245,6 @@ export default function Sidebar() {
                 <Link href={`/topic/${t.id}`} className={itemClass(active)}>
                   {topicIcon(t.id)}
                   <span className="min-w-0 flex-1 truncate">{t.name}</span>
-                  {t.isPreset ? (
-                    <span className="shrink-0 text-[10px] text-ink-faint">出厂</span>
-                  ) : null}
                 </Link>
                 {/* hover ⋯ 菜单 */}
                 <button
@@ -288,7 +315,38 @@ export default function Sidebar() {
         </div>
         <Link href="/lab/local-agent" className={itemClass(pathname.startsWith("/lab"))}>
           {ICONS.flask}
-          本地 Agent
+          <span className="min-w-0 flex-1 truncate">本地 Agent</span>
+          {agentRunning > 0 && (
+            <span
+              className="ml-auto flex shrink-0 items-center gap-1 rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent-deep"
+              title="本地 Agent 有任务正在执行"
+            >
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
+              </span>
+              进行中
+            </span>
+          )}
+        </Link>
+
+        {/* 自媒体账号矩阵: 与主题/实验室同级, 分组标题 + 子项常显 */}
+        <div className="mb-1 mt-4 px-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+            自媒体账号矩阵
+          </span>
+        </div>
+        <Link href="/matrix/weixin" className={itemClass(pathname === "/matrix/weixin")}>
+          {ICONS.weixin}
+          微信公众号
+        </Link>
+        <Link href="/matrix/toutiao" className={itemClass(pathname === "/matrix/toutiao")}>
+          {ICONS.toutiao}
+          今日头条
+        </Link>
+        <Link href="/matrix/xiaohongshu" className={itemClass(pathname === "/matrix/xiaohongshu")}>
+          {ICONS.xiaohongshu}
+          小红书
         </Link>
       </nav>
 

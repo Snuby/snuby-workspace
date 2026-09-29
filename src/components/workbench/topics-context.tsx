@@ -41,6 +41,11 @@ type TopicsContextValue = {
   renameTopic: (id: string, name: string) => Promise<boolean>;
   deleteTopic: (id: string) => Promise<boolean>;
   addSite: (topicId: string, url: string, label: string) => Promise<string | null>;
+  updateSite: (
+    topicId: string,
+    siteId: string,
+    patch: { url?: string; label?: string },
+  ) => Promise<boolean>;
   removeSite: (topicId: string, siteId: string) => Promise<boolean>;
 };
 
@@ -157,6 +162,24 @@ export function TopicsProvider({ children }: { children: React.ReactNode }) {
     [refreshSites],
   );
 
+  const updateSite = useCallback(
+    async (topicId: string, siteId: string, patch: { url?: string; label?: string }) => {
+      try {
+        const res = await fetch("/api/sites", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "update", topicId, siteId, ...patch }),
+        });
+        if (!res.ok) return false;
+        await refreshSites(topicId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [refreshSites],
+  );
+
   const removeSite = useCallback(
     async (topicId: string, siteId: string) => {
       try {
@@ -185,6 +208,7 @@ export function TopicsProvider({ children }: { children: React.ReactNode }) {
       renameTopic,
       deleteTopic,
       addSite,
+      updateSite,
       removeSite,
     }),
     [
@@ -196,6 +220,7 @@ export function TopicsProvider({ children }: { children: React.ReactNode }) {
       renameTopic,
       deleteTopic,
       addSite,
+      updateSite,
       removeSite,
     ],
   );

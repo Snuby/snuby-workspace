@@ -466,18 +466,22 @@ export function listArtifacts(id: string): { name: string; size: number; mtime: 
 
 /**
  * 越界写入审计 (软隔离兜底): 扫兄弟会话目录近期新写入。
- * 忽略本会话目录, 以及 sessions 根下的全局配置文件。
+ * 忽略本会话目录、点文件、以及 Snuby 自管的 meta/messages (切换会话/落盘会写这些, 不是 Agent 越界)。
+ * 真正要抓的是 Agent 写到了别的会话 artifacts/ 或会话根下的产物文件。
  */
 export function auditWorkspaceViolations(
   id: string,
-  opts?: { cutoffMs?: number },
+  opts?: { cutoffMs?: number; sinceMs?: number },
 ): { path: string; mtime: number; size: number }[] {
   const out: { path: string; mtime: number; size: number }[] = [];
-  const cutoff = Date.now() - (opts?.cutoffMs ?? 5 * 60_000);
+  const cutoff = opts?.sinceMs ?? Date.now() - (opts?.cutoffMs ?? 5 * 60_000);
   const ownWork = workDirOf(id);
+  const isBookkeeping = (name: string) =>
+    name.startsWith(".") || name === "meta.json" || name === "messages.jsonl";
   const walk = (dir: string): void => {
     if (!existsSync(dir)) return;
     for (const name of readdirSync(dir)) {
+      if (isBookkeeping(name)) continue;
       const p = path.join(dir, name);
       if (p === ownWork) continue;
       try {
@@ -494,7 +498,7 @@ export function auditWorkspaceViolations(
   };
   if (!existsSync(ROOT)) return out;
   for (const name of readdirSync(ROOT)) {
-    if (name.startsWith(".")) continue;
+    if (name.startsWith(".") || isBookkeeping(name)) continue;
     const p = path.join(ROOT, name);
     try {
       if (!statSync(p).isDirectory()) continue;
