@@ -1,0 +1,3934 @@
+"use client";
+
+// 实验室 · 本地 Agent — WorkBuddy ACP 网关协作测试 demo
+// 连接可视化: 网关发现 → 建连 → initialize → 会话, 分阶段可见状态
+// 协作演示: 发送任务, WorkBuddy 回复经 ACP SSE 流式渲染 (打字机效果)
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import { useClickOutside } from "@/lib/use-click-outside";
+
+type Phase = "idle" | "discovering" | "connecting" | "connected" | "error";
+
+type AgentStatus = {
+  phase: Phase;
+  discovered?: { pid: number; port: number; sessionId: string; cwd: string; heartbeatMsAgo: number };
+  connectionIdMasked?: string;
+  protocolVersion?: number;
+  capabilities?: {
+    promptCapabilities?: { image?: boolean; embeddedContext?: boolean };
+    mcpCapabilities?: { http?: boolean; sse?: boolean };
+    loadSession?: boolean;
+    multitaskSupport?: boolean;
+    delegateToolsSupport?: boolean;
+  };
+  authMethods?: string[];
+  acpSessionId?: string;
+  lastError?: string;
+  models?: { modelId: string; name: string; description?: string }[];
+  sessionConfig?: Record<
+    string,
+    { id: string; name: string; description?: string; currentValue?: string; options?: { value: string; name: string; description?: string }[] }
+  >;
+  usage?: {
+    used: number;
+    size: number;
+    lastPromptTokens?: number;
+    lastCompletionTokens?: number;
+    lastTotalTokens?: number;
+    sessionTotalTokens?: number;
+    lastCost?: number;
+    sessionCost?: number;
+  };
+};
+
+function fmtTokens(n: number | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+function fmtCost(n: number | undefined): string {
+  if (n == null || !Number.isFinite(n) || n <= 0) return "";
+  return n >= 1 ? n.toFixed(2) : n.toFixed(3);
+}
+
+
+type ToolEv = { tool: string; state: string; detail?: string; toolCallId?: string; ts?: number; endTs?: number };
+
+const TOOL_DETAIL_MAX = 240;
+
+function clipToolDetail(s: string | undefined): string {
+  if (!s) return "";
+  return s.length > TOOL_DETAIL_MAX ? `${s.slice(0, TOOL_DETAIL_MAX)}…` : s;
+}
+
+/** 流式 tool 更新按 toolCallId 合并, 避免数千次 push 把历史撑爆 */
+function upsertTool(tools: ToolEv[], ev: { tool?: string; state?: string; detail?: string; toolCallId?: string }): void {
+  const id = ev.toolCallId ?? "";
+  const detail = clipToolDetail(ev.detail);
+  const now = Date.now();
+  const idx = id ? tools.findIndex((t) => t.toolCallId === id) : -1;
+  if (idx >= 0) {
+    const prev = tools[idx];
+    tools[idx] = {
+      ...prev,
+      tool: ev.tool || prev.tool,
+      state: ev.state || prev.state,
+      detail: detail || prev.detail,
+      endTs: now,
+    };
+    return;
+  }
+  tools.push({
+    tool: ev.tool ?? "",
+    state: ev.state ?? "",
+    detail,
+    toolCallId: id,
+    ts: now,
+    endTs: now,
+  });
+}
+/** 本地会话元信息 (磁盘持久化) */
+type SessionInfo = {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  acpSessionId?: string;
+  /** 本地会话工作目录 (与注入给 WorkBuddy 的约定一致) */
+  acpCwd?: string;
+};
+
+/** 会话维度的网关态 (per-session): 从 AgentStatus 拆出的非全局字段。
+ * 全局字段 (phase/discovered/lastError) 保留在 status; 这里只放「归属于某个会话」的状态。 */
+type GatewayInfo = {
+  connectionIdMasked?: string;
+  protocolVersion?: number;
+  acpSessionId?: string;
+  authMethods?: string[];
+  models?: AgentStatus["models"];
+  sessionConfig?: AgentStatus["sessionConfig"];
+  usage?: AgentStatus["usage"];
+};
+
+/** 会话视图态 (AgentSessionUi): 该会话的内存消息缓存与分页游标。
+ * 切走/切回不重拉磁盘: 已加载的直接复用; LRU 超限淘汰非活跃项 (运行中不淘汰)。 */
+type SessionUi = {
+  msgs: Msg[];
+  cursor: number | null;
+  hasMore: boolean;
+  loaded: boolean;
+  loading: boolean;
+  lastUsed: number;
+};
+
+/** 会话视图 LRU 上限: 内存中最多保留的会话消息缓存数 (超出淘汰最久未用; 运行中强制保活) */
+const UI_CACHE_MAX = 10;
+
+/** 磁盘存储的消息形态 (messages.jsonl 单行) */
+type StoredMsg = {
+  role: "user" | "assistant";
+  text: string;
+  tools?: { tool: string; state?: string; detail?: string; toolCallId?: string; ts?: number; endTs?: number }[];
+  error?: boolean;
+  interrupted?: boolean;
+  ts: number;
+  extra?: { title: string; text: string }[];
+};
+
+/** 磁盘消息 → 面板消息 */
+function storedToMsg(m: StoredMsg): Msg {
+  return {
+    id: m.ts,
+    role: m.role === "user" ? "user" : "agent",
+    text: m.text,
+    tools: (m.tools ?? []).map((t) => ({
+      tool: t.tool,
+      state: t.state ?? "",
+      detail: clipToolDetail(t.detail),
+      toolCallId: t.toolCallId ?? "",
+      ts: t.ts ?? 0,
+      endTs: t.endTs ?? t.ts ?? 0,
+    })),
+    error: m.error,
+    interrupted: m.interrupted,
+    extra: m.extra,
+    streaming: false,
+    finishedAt: m.ts,
+    ts: m.ts,
+  };
+}
+
+/** 本地 markdown 文档预览状态 */
+/** 链接/文件预览弹窗: url → 内嵌 webview; file → 拉取文本渲染 */
+type LinkView =
+  | { kind: "url"; url: string; title: string }
+  | { kind: "file"; path: string; title: string; text?: string; loading?: boolean; error?: string };
+
+type DocPreview = {
+  path: string;
+  title: string;
+  text: string;
+  loading: boolean;
+  error?: string;
+};
+
+type Msg = {
+  id: number;
+  role: "user" | "agent";
+  text: string;
+  streaming?: boolean;
+  thinking?: boolean;
+  tools?: ToolEv[];
+  error?: boolean;
+  /** 超时等附属说明; 有正文时不覆盖 text, 单独展示红条 */
+  errorNote?: string;
+  interrupted?: boolean;
+  startedAt?: number;
+  finishedAt?: number;
+  ts?: number;
+  extra?: { title: string; text: string }[];
+};
+
+const PHASE_META: Record<Phase, { label: string; color: string; dot: string }> = {
+  idle: { label: "未连接", color: "bg-ink-faint/20 text-ink-faint", dot: "bg-ink-faint" },
+  discovering: { label: "正在发现网关…", color: "bg-ink-faint/20 text-ink-faint", dot: "bg-ink-faint animate-pulse" },
+  connecting: { label: "正在建立连接…", color: "bg-accent-soft text-accent-deep", dot: "bg-accent animate-pulse" },
+  connected: { label: "已连接 WorkBuddy 网关", color: "bg-down-soft text-down", dot: "bg-down" },
+  error: { label: "连接失败", color: "bg-up-soft text-up", dot: "bg-up" },
+};
+
+/** 徽章文案: idle 时区分「未发现」与「已发现但未连接」 */
+function phaseBadge(
+  phase: Phase,
+  discovered?: AgentStatus["discovered"],
+): { label: string; color: string; dot: string } {
+  if (phase === "idle") {
+    if (discovered) {
+      return {
+        label: "已检测到网关，未连接",
+        color: "bg-accent-soft text-accent-deep",
+        dot: "bg-accent",
+      };
+    }
+    return {
+      label: "未检测到 WorkBuddy 网关",
+      color: "bg-ink-faint/20 text-ink-faint",
+      dot: "bg-ink-faint",
+    };
+  }
+  return PHASE_META[phase];
+}
+
+const PRESET_TASKS = [
+  "用一句话介绍你自己",
+  "列出你最擅长处理的 5 类任务",
+];
+
+/** 网关配置项的中文 label 映射; 未知配置项回退网关给的 name */
+const CONFIG_LABEL: Record<string, string> = {
+  mode: "权限模式",
+  thought_level: "思考深度",
+  sandbox: "沙箱",
+  context_window: "上下文窗口",
+  multitask: "多任务",
+};
+
+/** 工具名 → 用户可读说明 */
+const TOOL_LABEL: Record<string, string> = {
+  Bash: "运行终端命令",
+  Shell: "运行终端命令",
+  WebFetch: "访问网页",
+  WebSearch: "搜索网页",
+  Read: "读取文件",
+  Write: "写入文件",
+  Edit: "编辑文件",
+  Glob: "查找文件",
+  Grep: "搜索文件内容",
+  AskUserQuestion: "向你提问",
+};
+
+function friendlyToolLabel(title: string): string {
+  const t = title.trim();
+  if (!t) return "使用工具";
+  if (TOOL_LABEL[t]) return TOOL_LABEL[t];
+  const key = Object.keys(TOOL_LABEL).find((k) => t.toLowerCase().includes(k.toLowerCase()));
+  return key ? TOOL_LABEL[key] : t;
+}
+
+function friendlyOptionLabel(o: { optionId: string; name: string; kind?: string }): string {
+  const id = `${o.optionId} ${o.kind ?? ""} ${o.name}`.toLowerCase();
+  if (/allow_always|allow-always|always/.test(id)) return "本会话始终允许";
+  if (/allow_once|allow-once|allow_session/.test(id) || /^allow$/.test(o.optionId)) return "允许一次";
+  if (/reject|deny|skip|取消|拒绝/.test(id)) return "拒绝";
+  // 网关已给中文名则直接用
+  if (/[\u4e00-\u9fff]/.test(o.name)) return o.name;
+  return o.name || o.optionId;
+}
+
+// 输入框自动撑开: 最多 MAX_ROWS 行, 超出才滚动
+const INPUT_MAX_ROWS = 6;
+const INPUT_LINE_H = 20; // 13px 字号 + line-height
+const INPUT_MAX_H = INPUT_MAX_ROWS * INPUT_LINE_H + 16; // 上下 padding py-2 = 16px
+
+/** 编辑框草稿: 按会话暂存, 切模块/切会话/面板重挂均可恢复 (不落盘到磁盘) */
+const INPUT_DRAFT_SS_KEY = "snuby.agent.inputDrafts";
+const inputDraftMem = new Map<string, string>();
+
+function readInputDraft(sid: string): string {
+  if (inputDraftMem.has(sid)) return inputDraftMem.get(sid) ?? "";
+  try {
+    const all = JSON.parse(sessionStorage.getItem(INPUT_DRAFT_SS_KEY) || "{}") as Record<string, string>;
+    const v = typeof all[sid] === "string" ? all[sid] : "";
+    inputDraftMem.set(sid, v);
+    return v;
+  } catch {
+    return "";
+  }
+}
+
+function writeInputDraft(sid: string, text: string): void {
+  inputDraftMem.set(sid, text);
+  try {
+    const raw = sessionStorage.getItem(INPUT_DRAFT_SS_KEY);
+    const all = (raw ? JSON.parse(raw) : {}) as Record<string, string>;
+    if (text) all[sid] = text;
+    else delete all[sid];
+    sessionStorage.setItem(INPUT_DRAFT_SS_KEY, JSON.stringify(all));
+  } catch {
+    // sessionStorage 不可用时仍保留内存暂存
+  }
+}
+
+export default function LocalAgentPanel() {
+  const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [input, setInput] = useState("");
+  const inputValueRef = useRef("");
+  inputValueRef.current = input;  const [msgs, setMsgs] = useState<Msg[]>([]);
+  /** 运行中/排队中的会话 (全局串行: 同时可有多个 queued, 至多一个真正执行) */
+  const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
+  /** 排队提示: sessionId -> 前序会话标题 */
+  const [queueHint, setQueueHint] = useState<Record<string, string | null>>({});
+  /** 每个运行会话的流式累积状态: sessionId -> RunState */
+  type RunState = {
+    sessionId: string;
+    msgId: number;
+    text: string;
+    tools: ToolEv[];
+    thinking: boolean;
+    error?: boolean;
+    interrupted?: boolean;
+    streaming: boolean;
+    startedAt: number;
+    ac: AbortController;
+    /** 仍在全局队列等待 (尚未收到 running) */
+    queued?: boolean;
+    /** 超时等附属说明 (保留已流出正文) */
+    errorNote?: string;
+  };
+  const runsRef = useRef<Map<string, RunState>>(new Map());
+  /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
+  const [preview, setPreview] = useState<DocPreview | null>(null);
+  /** 预览导航: stack + index, 支持前进/后退 */
+  const [linkNav, setLinkNav] = useState<{ stack: LinkView[]; index: number }>({ stack: [], index: 0 });
+  const linkView = linkNav.stack.length
+    ? linkNav.stack[Math.min(linkNav.index, linkNav.stack.length - 1)] ?? null
+    : null;
+  const previewCanBack = linkNav.index > 0;
+  const previewCanForward = linkNav.index < linkNav.stack.length - 1;
+  const [extraView, setExtraView] = useState<{ title: string; items: { title: string; text: string }[] } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; src: string; name: string } | null>(null);
+  const [ctxToast, setCtxToast] = useState<string | null>(null);
+  /** 本地会话: 列表 / 当前会话 / 历史加载中 */
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [histLoaded, setHistLoaded] = useState(false);
+  /** 侧栏标题就地编辑 */
+  const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const editTitleRef = useRef<HTMLInputElement | null>(null);
+  /** 侧栏 ⋯ 菜单 / 删除确认 */
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const sessionMenuRef = useRef<HTMLDivElement | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  useClickOutside(sessionMenuRef, menuFor !== null, () => setMenuFor(null));
+  /** per-session 视图缓存 (AgentSessionRegistry 前端侧): sessionId -> SessionUi */
+  const uiRef = useRef<Map<string, SessionUi>>(new Map());
+  /** per-session 网关态: sessionId -> GatewayInfo (status 拆分: 非全局字段归会话) */
+  const gwRef = useRef<Map<string, GatewayInfo>>(new Map());
+  /** 连接级共享: 模型/配置/用量 (单 ACP 连接, 新建会话继承, 避免模型选择消失) */
+  const sharedGwRef = useRef<GatewayInfo | null>(null);
+  /** 当前激活会话的网关态视图 (渲染用) */
+  const [gw, setGw] = useState<GatewayInfo | null>(null);
+  /** 越界写入审计提示 (任务结束后检测到其他会话目录被写) */
+  const [auditWarn, setAuditWarn] = useState<string | null>(null);
+  /** 流式中的最新 agent 消息 (供结束落盘) */
+  /** currentId 的 ref 镜像 (供异步流式闭包读取最新值) */
+  const currentIdRef = useRef<string | null>(null);
+  const loadSeqRef = useRef(0); // 会话加载代际号: 切会话/清空列表时递增, 过期的异步加载结果直接丢弃, 防止快速切换时渲染串台
+  useEffect(() => {
+    currentIdRef.current = currentId;
+  }, [currentId]);
+  /** 流式自动滚底开关: 用户上滚查看历史时暂停跟随, 滚回底部自动恢复 */
+  const followRef = useRef(true);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 消息滚动容器 (渐进加载: 滚到顶部拉更早历史) */
+  const msgBoxRef = useRef<HTMLDivElement | null>(null);
+  /** 是否正在 prepend 更早历史 (抑制自动滚底, 保持视口) */
+  const prependRef = useRef(false);
+  /** 历史加载(切会话/首屏)标记: 该次 msgs 变化由加载函数手动瞬跳到底, 不触发平滑滚动 */
+  const histPendingRef = useRef(false);
+  /** 分页游标: 当前已加载消息中最早的字节偏移; null=未加载 */
+  const [msgCursor, setMsgCursor] = useState<number | null>(null);
+  const [hasMoreMsgs, setHasMoreMsgs] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  /** 状态信息下拉 */
+  const infoRef = useRef<HTMLDivElement | null>(null);
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [sysOpen, setSysOpen] = useState(false);
+  const [sysText, setSysText] = useState("");
+  const [sysDraft, setSysDraft] = useState("");
+  const [sysSaving, setSysSaving] = useState(false);
+  const sysLoadedRef = useRef(false);
+  /** 模型外其余会话配置 (权限/思考深度/沙箱等) 对话框 */
+  const [configOpen, setConfigOpen] = useState(false);
+  /** 网关工具权限请求 (Always Ask 时弹窗) */
+  const [permAsk, setPermAsk] = useState<{
+    requestId: string | number;
+    localSessionId: string;
+    toolTitle: string;
+    toolCallId?: string;
+    detail?: string;
+    options: { optionId: string; name: string; kind?: string }[];
+    /** 网关已结束本轮 (勿再应答), 弹窗留到用户关闭, 避免「闪一下消失」 */
+    stale?: boolean;
+    /** 网关已用该 stopReason 结束本轮 */
+    stopReason?: string;
+  } | null>(null);
+  const [permBusy, setPermBusy] = useState(false);
+  const permAnsweredRef = useRef(false);
+
+  // 任务运行中轮询未决权限 (NDJSON 在服务端阻塞等待时可能迟迟刷不出 permission 事件)
+  useEffect(() => {
+    if (runningIds.size === 0) return;
+    let alive = true;
+    const tick = async () => {
+      for (const sid of runningIds) {
+        if (!alive) return;
+        try {
+          const r = await fetch(`/api/agent/permission?localSessionId=${encodeURIComponent(sid)}`, {
+            cache: "no-store",
+          });
+          const j = (await r.json()) as {
+            pending?: {
+              requestId: string | number;
+              toolTitle: string;
+              toolCallId?: string;
+              detail?: string;
+              options: { optionId: string; name: string; kind?: string }[];
+            }[];
+          };
+          const p = j.pending?.[0];
+          if (p) {
+            setPermAsk((prev) => {
+              if (prev && prev.localSessionId === sid && String(prev.requestId) === String(p.requestId)) {
+                return prev.detail || !p.detail ? prev : { ...prev, detail: p.detail };
+              }
+              permAnsweredRef.current = false;
+              return {
+                requestId: p.requestId,
+                localSessionId: sid,
+                toolTitle: p.toolTitle,
+                toolCallId: p.toolCallId,
+                detail: p.detail,
+                options: p.options ?? [],
+              };
+            });
+            return;
+          }
+          setPermAsk((prev) => {
+            if (!prev || prev.localSessionId !== sid || prev.stale || permAnsweredRef.current) return prev;
+            return { ...prev, stale: true };
+          });
+        } catch {
+          // 忽略
+        }
+      }
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [runningIds]);
+
+  // 挂载即加载工作约定: 发送时附加信息 / 打开编辑器都依赖它
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
+        const j = (await r.json()) as { prompt?: string };
+        if (j.prompt) {
+          setSysText(j.prompt);
+          setSysDraft(j.prompt);
+          sysLoadedRef.current = true;
+        }
+      } catch {
+        // 读取失败保持空白
+      }
+    })();
+  }, []);
+
+  /** 打开约定编辑对话框: 首次加载当前约定 */
+  const openSysEditor = async () => {
+    setSysOpen(true);
+    if (!sysLoadedRef.current) {
+      try {
+        const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
+        const j = (await r.json()) as { prompt?: string };
+        setSysText(j.prompt ?? "");
+        setSysDraft(j.prompt ?? "");
+        sysLoadedRef.current = true;
+      } catch {
+        // 读取失败, 空白
+      }
+    }
+  };
+  /** 保存约定 (下次激活会话时注入) */
+  const saveSysPrompt = async () => {
+    setSysSaving(true);
+    try {
+      const r = await fetch("/api/agent/system-prompt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: sysDraft }),
+      });
+      if (r.ok) {
+        setSysText(sysDraft);
+        setSysOpen(false);
+      }
+    } finally {
+      setSysSaving(false);
+    }
+  };
+  useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
+
+  /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
+  const openDoc = useCallback((path: string, title: string, opts?: { push?: boolean }) => {
+    const next: LinkView = { kind: "file", path, title, loading: true };
+    setLinkNav((prev) => {
+      if (!opts?.push || !prev.stack.length) return { stack: [next], index: 0 };
+      const cur = Math.min(prev.index, prev.stack.length - 1);
+      return { stack: [...prev.stack.slice(0, cur + 1), next], index: cur + 1 };
+    });
+  }, []);
+
+  /** 链接点击: http(s) → webview 弹窗; 本地路径 → 文件弹窗 */
+  const openLink = useCallback((raw: string, opts?: { push?: boolean }) => {
+    const url = raw.replace(/^file:\/\//, "");
+    let next: LinkView | null = null;
+    if (/^https?:\/\//i.test(url)) {
+      next = { kind: "url", url, title: url };
+    } else if (/^(\/Users\/|\/home\/|\/private\/|\/tmp\/)/.test(url)) {
+      const name = url.split("/").pop() ?? url;
+      next = { kind: "file", path: url, title: name, loading: true };
+    } else {
+      window.open(url, "_blank", "noopener");
+      return;
+    }
+    setLinkNav((prev) => {
+      if (!opts?.push || !prev.stack.length) return { stack: [next!], index: 0 };
+      const cur = Math.min(prev.index, prev.stack.length - 1);
+      return { stack: [...prev.stack.slice(0, cur + 1), next!], index: cur + 1 };
+    });
+  }, []);
+
+  /** 预览内跳转: 截断前进历史后压入 */
+  const openDocInPreview = useCallback(
+    (path: string, title: string) => openDoc(path, title, { push: true }),
+    [openDoc],
+  );
+  const openLinkInPreview = useCallback(
+    (raw: string) => openLink(raw, { push: true }),
+    [openLink],
+  );
+  const previewGoBack = useCallback(() => {
+    setLinkNav((prev) => ({ ...prev, index: Math.max(0, prev.index - 1) }));
+  }, []);
+  const previewGoForward = useCallback(() => {
+    setLinkNav((prev) => ({
+      ...prev,
+      index: Math.min(prev.stack.length - 1, prev.index + 1),
+    }));
+  }, []);
+  const closePreview = useCallback(() => setLinkNav({ stack: [], index: 0 }), []);
+
+  /** 「📄 文件名」补偿定位: 用当前会话工作目录做候选 (产物都写在工作区) */
+  const docHints = useMemo(() => {
+    const s = sessions.find((x) => x.id === currentId);
+    return s?.acpCwd ? [s.acpCwd] : [];
+  }, [sessions, currentId]);
+
+  const phase = status?.phase ?? "idle";
+
+  /** 把右键菜单里的 src 还原成可 fetch 的地址 (勿把 /Users/... 当同源路径) */
+  const resolveImageFetchUrl = (src: string): string => {
+    if (
+      src.startsWith("blob:") ||
+      src.startsWith("data:") ||
+      src.startsWith("/api/") ||
+      /^https?:\/\//i.test(src)
+    ) {
+      return src;
+    }
+    const cleaned = src.replace(/^file:\/\//, "");
+    if (cleaned.startsWith("/")) {
+      return `/api/local-file?path=${encodeURIComponent(cleaned)}`;
+    }
+    return src;
+  };
+
+  /** 图片右键: 拦截 → 自定义菜单 (下载/复制); 非图片保留浏览器默认菜单 */
+  const onCtxMenu = (e: React.MouseEvent) => {
+    const t = e.target as HTMLElement;
+    const img = t.closest("img");
+    if (!img) {
+      setCtxMenu(null);
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const src = img.getAttribute("src") ?? "";
+    const dataPath = img.getAttribute("data-local-path") ?? "";
+    let name = img.getAttribute("alt") || "";
+    let real = src;
+    if (dataPath) {
+      real = dataPath;
+      name = name || dataPath.split("/").pop() || "image.png";
+    } else if (src.startsWith("/api/local-file")) {
+      try {
+        real = decodeURIComponent(new URL(src, window.location.origin).searchParams.get("path") ?? src);
+      } catch {
+        real = src;
+      }
+      name = name || real.split("/").pop() || "image.png";
+    } else if (src.startsWith("blob:")) {
+      name = name || "image.png";
+      real = src; // fetch blob: 直接可用
+    } else {
+      try {
+        name = name || new URL(src, window.location.origin).pathname.split("/").pop() || "image.png";
+      } catch {
+        name = name || "image.png";
+      }
+    }
+    if (!/\.\w{2,5}$/i.test(name)) name = `${name}.png`;
+    setCtxMenu({ x: e.clientX, y: e.clientY, src: real, name });
+  };
+
+  /** 下载图片: 同源/blob fetch → a[download]; 失败则新窗口打开 */
+  const downloadImage = useCallback(async () => {
+    const m = ctxMenu;
+    if (!m) return;
+    try {
+      const url = resolveImageFetchUrl(m.src);
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = m.name || "image.png";
+      a.click();
+      window.setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      setCtxMenu(null);
+      setCtxToast("已开始下载");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    } catch {
+      setCtxMenu(null);
+      setCtxToast("下载失败");
+      window.setTimeout(() => setCtxToast(null), 2000);
+      try {
+        window.open(resolveImageFetchUrl(m.src), "_blank");
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [ctxMenu]);
+
+  /** 复制图片: fetch → canvas 转 png → 写剪贴板 */
+  const copyImage = useCallback(async () => {
+    const m = ctxMenu;
+    if (!m) return;
+    try {
+      const url = resolveImageFetchUrl(m.src);
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      // Chromium: image/png 可直接写剪贴板; 其它类型走 canvas 转 png
+      if (blob.type === "image/png") {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      } else {
+        const img = new Image();
+        const obj = URL.createObjectURL(blob);
+        img.src = obj;
+        await new Promise<void>((res, rej) => {
+          img.onload = () => res();
+          img.onerror = () => rej(new Error("图片解码失败"));
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const cx = canvas.getContext("2d");
+        if (!cx) throw new Error("canvas 不可用");
+        cx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(obj);
+        const png = await new Promise<Blob>((res, rej) =>
+          canvas.toBlob((b) => (b ? res(b) : rej(new Error("转码失败"))), "image/png"),
+        );
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+      }
+      setCtxMenu(null);
+      setCtxToast("图片已复制到剪贴板");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    } catch {
+      setCtxMenu(null);
+      setCtxToast("复制失败");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    }
+  }, [ctxMenu]);
+
+  /** 切会话/首屏: 恢复自动跟随并滚到底 (双 rAF + 定时兜底), 无动画 */
+  const scrollBottomStable = useCallback(() => {
+    followRef.current = true;
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
+    window.setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }), 200);
+    window.setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }), 600);
+  }, []);
+
+  /** 从 AgentStatus 提取会话维度网关态 (全局字段留在 status) */
+  const toGw = (st: AgentStatus | null | undefined): GatewayInfo | null =>
+    st
+      ? {
+          connectionIdMasked: st.connectionIdMasked,
+          protocolVersion: st.protocolVersion,
+          acpSessionId: st.acpSessionId,
+          authMethods: st.authMethods,
+          models: st.models,
+          sessionConfig: st.sessionConfig,
+          usage: st.usage,
+        }
+      : null;
+
+  /** 会话视图缓存读写 (Registry): 不存在则创建空 Ui */
+  const uiOf = (id: string): SessionUi => {
+    const m = uiRef.current;
+    let u = m.get(id);
+    if (!u) {
+      u = { msgs: [], cursor: null, hasMore: false, loaded: false, loading: false, lastUsed: 0 };
+      m.set(id, u);
+    }
+    return u;
+  };
+  /** LRU 触达 + 超限淘汰 (运行中会话保活不淘汰; keepId 永不被淘汰) */
+  const evictUi = (keepId: string) => {
+    const m = uiRef.current;
+    if (m.size <= UI_CACHE_MAX) return;
+    const idle = [...m.entries()]
+      .filter(([k, u]) => k !== keepId && !runningIds.has(k) && u.loaded)
+      .sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    for (const [k] of idle.slice(0, m.size - UI_CACHE_MAX)) m.delete(k);
+  };
+  /** 提交消息变更到会话缓存; 若该会话是激活会话则同步渲染视图 */
+  const commitMsgs = (id: string, updater: (prev: Msg[]) => Msg[]) => {
+    const u = uiOf(id);
+    u.msgs = updater(u.msgs);
+    u.lastUsed = Date.now();
+    evictUi(id);
+    if (id === currentIdRef.current) setMsgs(u.msgs);
+  };
+  /** 提交分页游标变更到会话缓存; 激活会话则同步渲染 */
+  const commitPage = (id: string, patch: Partial<Pick<SessionUi, "cursor" | "hasMore" | "loaded" | "loading">>) => {
+    const u = uiOf(id);
+    if (patch.cursor !== undefined) u.cursor = patch.cursor;
+    if (patch.hasMore !== undefined) u.hasMore = patch.hasMore;
+    if (patch.loaded !== undefined) u.loaded = patch.loaded;
+    if (patch.loading !== undefined) u.loading = patch.loading;
+    u.lastUsed = Date.now();
+    evictUi(id);
+    if (id === currentIdRef.current) {
+      setMsgCursor(u.cursor);
+      setHasMoreMsgs(u.hasMore);
+    }
+  };
+  /** 合并运行中任务的流式半成品到会话缓存 (切回继续渲染, 不中断) */
+  const mergeRunIntoView = (id: string) => {
+    const run = runsRef.current.get(id);
+    if (!run) return;
+    const u = uiOf(id);
+    if (u.msgs.some((m) => m.id === run.msgId)) return;
+    u.msgs = [
+      ...u.msgs,
+      {
+        id: run.msgId,
+        role: "agent",
+        text: run.text,
+        tools: run.tools,
+        thinking: run.thinking,
+        error: run.error,
+        interrupted: run.interrupted,
+        streaming: true,
+        startedAt: run.startedAt,
+        ts: run.startedAt,
+      },
+    ];
+    if (id === currentIdRef.current) setMsgs(u.msgs);
+  };
+  /** 合并连接级网关态: 新建会话无缓存时继承 shared, 避免模型选择消失 */
+  const mergeGw = (incoming: GatewayInfo | null | undefined, fallback?: GatewayInfo | null): GatewayInfo => {
+    const base = fallback ?? sharedGwRef.current ?? {};
+    const g = incoming ?? {};
+    const hasCfg = !!g.sessionConfig && Object.keys(g.sessionConfig).length > 0;
+    const merged: GatewayInfo = {
+      ...base,
+      ...g,
+      sessionConfig: hasCfg ? g.sessionConfig : base.sessionConfig,
+      models: g.models?.length ? g.models : base.models,
+      usage: g.usage ?? base.usage,
+    };
+    if (merged.sessionConfig && Object.keys(merged.sessionConfig).length > 0) {
+      sharedGwRef.current = merged;
+    }
+    return merged;
+  };
+
+  /** 拉取网关态并写入会话缓存; 模型/配置按连接级合并继承 */
+  const loadGw = async (id: string) => {
+    try {
+      const r = await fetch(`/api/agent/status?sid=${encodeURIComponent(id)}`, { cache: "no-store" });
+      const j = (await r.json()) as { status: AgentStatus };
+      const merged = mergeGw(toGw(j.status));
+      gwRef.current.set(id, merged);
+      if (id === currentIdRef.current) setGw(merged);
+    } catch {
+      // 忽略; 下次激活/任务时再刷新
+    }
+  };
+  /** 加载会话消息到缓存并设为激活视图; 缓存命中直接复用 (不重拉磁盘) */
+  const loadIntoUi = async (id: string, opts?: { scroll?: boolean }) => {
+    const u = uiOf(id);
+    if (u.loaded && !u.loading) {
+      // 缓存命中: 直接激活视图
+      histPendingRef.current = true;
+      setMsgs(u.msgs);
+      setMsgCursor(u.cursor);
+      setHasMoreMsgs(u.hasMore);
+      u.lastUsed = Date.now();
+      evictUi(id);
+      mergeRunIntoView(id);
+      if (opts?.scroll) scrollBottomStable();
+      return;
+    }
+    if (u.loading) return; // 正在加载, 避免并发重复拉取
+    u.loading = true;
+    u.lastUsed = Date.now();
+    const seq = ++loadSeqRef.current;
+    try {
+      const r = await fetch(`/api/agent/sessions/${id}/messages?limit=50`, { cache: "no-store" });
+      const j = (await r.json()) as { messages: StoredMsg[]; nextCursor?: number; hasMore?: boolean };
+      if (seq !== loadSeqRef.current) return; // 期间切了会话, 丢弃过期加载
+      u.msgs = (j.messages ?? []).map(storedToMsg);
+      u.cursor = typeof j.nextCursor === "number" ? j.nextCursor : null;
+      u.hasMore = !!j.hasMore;
+      u.loaded = true;
+      mergeRunIntoView(id);
+      u.lastUsed = Date.now();
+      evictUi(id);
+      if (id === currentIdRef.current) {
+        histPendingRef.current = true;
+        setMsgs(u.msgs);
+        setMsgCursor(u.cursor);
+        setHasMoreMsgs(u.hasMore);
+        if (opts?.scroll) scrollBottomStable();
+      }
+    } catch {
+      // 网络失败忽略; 缓存保持未加载, 下次切换再试
+    } finally {
+      u.loading = false;
+    }
+  };
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await fetch("/api/agent/status", { cache: "no-store" });
+      const j = (await r.json()) as { status: AgentStatus };
+      setStatus(j.status);
+    } catch {
+      // 网络错误忽略, 下轮重试
+    }
+  }, []);
+
+  // 挂载 + 周期轮询 (3s), 感知网关存活变化
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(() => void refresh(), 3000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  // 会话列表先亮出来; 最近会话历史异步加载, 不堵侧栏
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/api/agent/sessions", { cache: "no-store" });
+        const j = (await r.json()) as { sessions: SessionInfo[] };
+        const list = j.sessions ?? [];
+        setSessions(list);
+        setHistLoaded(true);
+        if (list.length) {
+          setCurrentId(list[0].id);
+          void loadIntoUi(list[0].id, { scroll: true });
+        } else {
+          void createLocalSession();
+        }
+      } catch {
+        setHistLoaded(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** 新建本地会话 */
+  const createLocalSession = async () => {
+    try {
+      const r = await fetch("/api/agent/sessions", { method: "POST" });
+      const j = (await r.json()) as { session: SessionInfo };
+      setSessions((x) => [j.session, ...x]);
+      // 同步 ref, 避免紧接着 loadGw 时仍指向旧会话导致 setGw 被跳过
+      currentIdRef.current = j.session.id;
+      setCurrentId(j.session.id);
+      ++loadSeqRef.current;
+      const u = uiOf(j.session.id);
+      u.msgs = [];
+      u.cursor = null;
+      u.hasMore = false;
+      u.loaded = true;
+      u.lastUsed = Date.now();
+      setMsgs([]);
+      setMsgCursor(null);
+      setHasMoreMsgs(false);
+      // 继承连接级模型/配置, 再拉一次状态 (新建会话本身没有独立网关态)
+      const seeded = mergeGw(null, sharedGwRef.current ?? gw);
+      gwRef.current.set(j.session.id, seeded);
+      setGw(seeded);
+      if (phase === "connected") void loadGw(j.session.id);
+    } catch {
+      // 落盘失败不阻塞本地会话
+    }
+  };
+
+  /** 切换本地会话: 纯视图操作 (AC-7) — 不触发网关 activate/load; 对齐仅在发送时 */
+  const switchSession = async (id: string) => {
+    if (id === currentId) return;
+    currentIdRef.current = id;
+    setCurrentId(id);
+    // 先展示已有/继承的网关态, 避免切换瞬间模型选择消失
+    const cached = gwRef.current.get(id);
+    setGw(mergeGw(cached ?? null, sharedGwRef.current ?? gw));
+    await loadIntoUi(id, { scroll: true });
+    // 仅刷新网关态缓存 (status?sid=, 只读, 不改网关活动会话)
+    if (phase === "connected") void loadGw(id);
+  };
+
+  /** 开始编辑会话标题 */
+  const beginRename = (id: string, title: string) => {
+    setEditingTitleId(id);
+    setEditTitle(title);
+    requestAnimationFrame(() => {
+      editTitleRef.current?.focus();
+      editTitleRef.current?.select();
+    });
+  };
+
+  /** 提交重命名; 空标题视为取消 */
+  const commitRename = async (id: string) => {
+    const next = editTitle.trim();
+    setEditingTitleId(null);
+    const prev = sessions.find((s) => s.id === id)?.title ?? "";
+    if (!next || next === prev) return;
+    // 乐观更新
+    setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: next } : s)));
+    try {
+      const r = await fetch(`/api/agent/sessions/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: next }),
+      });
+      if (!r.ok) {
+        setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: prev } : s)));
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        alert(j.error ?? "重命名失败");
+        return;
+      }
+      const j = (await r.json()) as { session?: SessionInfo };
+      if (j.session?.title) {
+        setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: j.session!.title } : s)));
+      }
+    } catch {
+      setSessions((all) => all.map((s) => (s.id === id ? { ...s, title: prev } : s)));
+      alert("重命名失败：本地服务无响应");
+    }
+  };
+
+  /** 打开删除确认 (AC-9: 运行/排队中拦截) */
+  const askRemoveSession = (id: string) => {
+    setMenuFor(null);
+    if (runningIds.has(id) || runsRef.current.has(id)) {
+      alert("会话任务进行中或排队中，请先停止/取消后再删除");
+      return;
+    }
+    setDeleteConfirmId(id);
+  };
+
+  /** 确认后删除本地会话 */
+  const removeSession = async (id: string) => {
+    setDeleteConfirmId(null);
+    if (runningIds.has(id) || runsRef.current.has(id)) {
+      alert("会话任务进行中或排队中，请先停止/取消后再删除");
+      return;
+    }
+    try {
+      const r = await fetch(`/api/agent/sessions/${id}`, { method: "DELETE" });
+      if (r.status === 409) {
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        alert(j.error ?? "会话忙碌中，无法删除");
+        return;
+      }
+      if (!r.ok) {
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        alert(j.error ?? "删除失败");
+        return;
+      }
+    } catch {
+      alert("删除失败：本地服务无响应");
+      return;
+    }
+    uiRef.current.delete(id);
+    gwRef.current.delete(id);
+    setQueueHint((prev) => {
+      if (!(id in prev)) return prev;
+      const n = { ...prev };
+      delete n[id];
+      return n;
+    });
+    // 以服务端列表为准, 避免本地过滤与磁盘不一致
+    let rest = sessions.filter((x) => x.id !== id);
+    try {
+      const lr = await fetch("/api/agent/sessions", { cache: "no-store" });
+      const lj = (await lr.json()) as { sessions?: SessionInfo[] };
+      if (Array.isArray(lj.sessions)) rest = lj.sessions;
+    } catch {
+      // 用本地过滤结果
+    }
+    setSessions(rest);
+    if (id === currentId) {
+      if (rest.length) void switchSession(rest[0].id);
+      else void createLocalSession();
+    }
+  };
+
+  /** 对话后把该会话顶到列表前 (与服务端 updatedAt 排序一致) */
+  const bumpSessionActivity = (sid: string, userText?: string) => {
+    const now = Date.now();
+    setSessions((list) => {
+      const next = list.map((s) => {
+        if (s.id !== sid) return s;
+        let title = s.title;
+        // 与 appendMessage 同规则: 默认「会话 …」标题用首条用户消息截断
+        if (userText && (title.startsWith("会话 ") || title.startsWith("「"))) {
+          const t = userText.replace(/\s+/g, " ").trim();
+          if (t) title = t.length > 24 ? `${t.slice(0, 24)}…` : t;
+        }
+        return { ...s, updatedAt: now, title };
+      });
+      return next.sort((a, b) => b.updatedAt - a.updatedAt);
+    });
+  };
+
+  /** 落盘一条消息到指定会话 (tools 仅内存展示, 不写盘) */
+  const persist = (sid: string, role: "user" | "assistant", msg: Partial<Msg>) => {
+    if (!sid) return;
+    void fetch(`/api/agent/sessions/${sid}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role,
+        text: msg.text ?? "",
+        error: msg.error,
+        interrupted: msg.interrupted,
+        ts: Date.now(),
+        extra: msg.extra,
+      }),
+    });
+    bumpSessionActivity(sid, role === "user" ? msg.text : undefined);
+  };
+
+  /** 在系统文件管理器中打开当前会话工作目录 */
+  const openSessionFolder = async () => {
+    const cwd = sessions.find((s) => s.id === currentId)?.acpCwd;
+    if (!cwd) {
+      setCtxToast("当前会话尚无工作目录");
+      window.setTimeout(() => setCtxToast(null), 2000);
+      return;
+    }
+    try {
+      const r = await fetch("/api/agent/open-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: cwd }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    } catch (e) {
+      setCtxToast(e instanceof Error ? e.message : "打开文件夹失败");
+      window.setTimeout(() => setCtxToast(null), 2000);
+    }
+  };
+
+  /** 渐进加载: 拉取当前会话更早的历史 (IM 式上拉) */
+  const loadMoreMsgs = async () => {
+    if (!currentId || loadingMore || !hasMoreMsgs || msgCursor === null) return;
+    setLoadingMore(true);
+    const box = msgBoxRef.current;
+    const prevScrollTop = box?.scrollTop ?? 0;
+    const prevScrollHeight = box?.scrollHeight ?? 0;
+    try {
+      const seq = loadSeqRef.current;
+      const r = await fetch(`/api/agent/sessions/${currentId}/messages?limit=50&cursor=${msgCursor}`, { cache: "no-store" });
+      const j = (await r.json()) as { messages: StoredMsg[]; nextCursor?: number; hasMore?: boolean };
+      if (seq !== loadSeqRef.current) return; // 期间切了会话, 丢弃过期分页
+      const older = (j.messages ?? []).map(storedToMsg);
+      prependRef.current = true;
+      commitMsgs(currentId, (prev) => [...older, ...prev]);
+      commitPage(currentId, {
+        cursor: typeof j.nextCursor === "number" ? j.nextCursor : null,
+        hasMore: !!j.hasMore,
+      });
+      // 补偿滚动位置: 内容增高后保持视口不跳动
+      requestAnimationFrame(() => {
+        const el = msgBoxRef.current;
+        if (el) el.scrollTop = prevScrollTop + (el.scrollHeight - prevScrollHeight);
+      });
+    } catch {
+      // 忽略; 下次滚动再试
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  /** 消息容器滚动: 滚到顶部附近触发加载更早历史; 滚出底部区域暂停流式自动跟随 */
+  const onMsgScroll = () => {
+    const el = msgBoxRef.current;
+    if (!el) return;
+    followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (el.scrollTop < 48 && !loadingMore && hasMoreMsgs) void loadMoreMsgs();
+  };
+
+  /** 相对时间 */
+  const fmtRel = (ts: number) => {
+    const d = Date.now() - ts;
+    if (d < 60_000) return "刚刚";
+    if (d < 3_600_000) return `${Math.floor(d / 60_000)}m`;
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h`;
+    return `${Math.floor(d / 86_400_000)}d`;
+  };
+
+  /** 消息时间: 跨天显示 日期+时分, 当天显示 时分秒 */
+  const fmtClock = (ts?: number) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    const now = new Date();
+    const hm = d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    if (d.toDateString() === now.toDateString()) return hm;
+    return `${d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })} ${hm}`;
+  };
+
+  const connect = async () => {
+    setBusy(true);
+    setStatus((s) => ({ ...(s ?? {}), phase: "connecting" }) as AgentStatus);
+    try {
+      // AC-8: 重连前中断本地仍在跑的展示流 (不静默重放)
+      for (const [sid, run] of [...runsRef.current.entries()]) {
+        run.interrupted = true;
+        run.streaming = false;
+        run.ac.abort();
+        commitMsgs(sid, (all) =>
+          all.map((m) =>
+            m.id === run.msgId
+              ? { ...m, streaming: false, interrupted: true, text: run.text, finishedAt: Date.now() }
+              : m,
+          ),
+        );
+        persist(sid, "assistant", { text: run.text, tools: run.tools, interrupted: true });
+        runsRef.current.delete(sid);
+      }
+      setRunningIds(new Set());
+      setQueueHint({});
+
+      const r = await fetch("/api/agent/connect", { method: "POST" });
+      const j = (await r.json()) as {
+        status: AgentStatus;
+        interruptedLocalIds?: string[];
+      };
+      setStatus(j.status);
+      if (currentIdRef.current) void loadGw(currentIdRef.current);
+    } catch {
+      setStatus((s) => ({ ...(s ?? {}), phase: "error", lastError: "本地服务无响应" }) as AgentStatus);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const send = async (text?: string) => {
+    const sid = currentId;
+    const task = (text ?? input).trim();
+    if (!task || !sid || runningIds.has(sid)) return;
+    setInput("");
+    writeInputDraft(sid, "");
+    setRunningIds((prev) => new Set(prev).add(sid));
+    const id = Date.now();
+    // extra 仅 UI/落盘排障用, 不会发给网关。勿塞「工作约定」全文:
+    // 约定只在 activate 时注入一次; 若写入每条 messages.jsonl, Agent 读历史会反复看到并易卡在 Read。
+    const extra: { title: string; text: string }[] = [];
+    const cwd = sessions.find((sd) => sd.id === sid)?.acpCwd ?? "";
+    if (cwd) extra.push({ title: "会话工作目录", text: cwd });
+    const mdl = gwRef.current.get(sid)?.sessionConfig?.model?.currentValue;
+    if (mdl) extra.push({ title: "会话模型", text: mdl });
+    commitMsgs(sid, (prev) => [...prev, { id, role: "user", text: task, ts: id, extra: extra.length ? extra : undefined }]);
+    persist(sid, "user", { text: task, ...(extra.length ? { extra } : {}) });
+    const agentMsg: Msg = {
+      id: id + 1,
+      role: "agent",
+      text: "",
+      streaming: true,
+      startedAt: Date.now(),
+      ts: Date.now(),
+    };
+    commitMsgs(sid, (prev) => [...prev, agentMsg]);
+    const ac = new AbortController();
+    const run: RunState = {
+      sessionId: sid,
+      msgId: agentMsg.id,
+      text: "",
+      tools: [],
+      thinking: false,
+      streaming: true,
+      startedAt: Date.now(),
+      ac,
+      queued: true,
+    };
+    runsRef.current.set(sid, run);
+    const update = (fn: (r: RunState) => void) => {
+      fn(run);
+      commitMsgs(sid, (all) =>
+        all.map((m) =>
+          m.id === agentMsg.id
+            ? {
+                ...m,
+                text: run.text,
+                tools: run.tools,
+                thinking: run.thinking,
+                error: run.error,
+                errorNote: run.errorNote,
+                streaming: run.streaming,
+              }
+            : m,
+        ),
+      );
+    };
+    try {
+      const res = await fetch("/api/agent/prompt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: task, localSessionId: sid }),
+        signal: ac.signal,
+      });
+      if (!res.ok || !res.body) throw new Error("任务启动失败");
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (!line.trim()) continue;
+          let ev: {
+            type: string;
+            text?: string;
+            tool?: string;
+            state?: string;
+            detail?: string;
+            toolCallId?: string;
+            error?: string;
+            preserveText?: boolean;
+            aheadTitle?: string | null;
+            aheadKey?: string | null;
+            requestId?: string | number;
+            toolTitle?: string;
+            stopReason?: string;
+            options?: { optionId: string; name: string; kind?: string }[];
+            usage?: AgentStatus["usage"];
+          };
+          try {
+            ev = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (ev.type === "usage" && ev.usage) {
+            for (const [id, prev] of gwRef.current) {
+              gwRef.current.set(id, { ...prev, usage: ev.usage });
+            }
+            if (currentIdRef.current) {
+              setGw((g) => ({ ...(g ?? {}), usage: ev.usage }));
+            }
+            continue;
+          }
+          if (ev.type === "permission" && ev.requestId != null) {
+            permAnsweredRef.current = false;
+            setPermAsk({
+              requestId: ev.requestId,
+              localSessionId: sid,
+              toolTitle: ev.toolTitle || "工具请求权限",
+              toolCallId: ev.toolCallId,
+              detail: ev.detail,
+              options: ev.options ?? [],
+            });
+            continue;
+          }
+          if (ev.type === "queued") {
+            run.queued = true;
+            const hint =
+              ev.aheadTitle && ev.aheadKey
+                ? `排队中（前序：会话「${ev.aheadTitle}」）`
+                : "排队中…";
+            setQueueHint((prev) => ({ ...prev, [sid]: hint }));
+            update((r) => {
+              if (!r.text) r.text = "";
+            });
+          } else if (ev.type === "running") {
+            run.queued = false;
+            setQueueHint((prev) => {
+              const n = { ...prev };
+              delete n[sid];
+              return n;
+            });
+          } else if (ev.type === "chunk") {
+            update((r) => {
+              r.text += ev.text ?? "";
+              r.thinking = false;
+            });
+          } else if (ev.type === "thought") {
+            update((r) => {
+              r.thinking = true;
+            });
+          } else if (ev.type === "tool") {
+            update((r) => {
+              upsertTool(r.tools, ev);
+            });
+          } else if (ev.type === "done") {
+            if (permAnsweredRef.current) {
+              setPermAsk((p) => (p?.localSessionId === sid ? null : p));
+            } else {
+              setPermAsk((p) =>
+                p?.localSessionId === sid ? { ...p, stale: true, stopReason: ev.stopReason } : p,
+              );
+            }
+            update((r) => {
+              r.streaming = false;
+              r.thinking = false;
+              // 用户停止 / 排队取消: 灰标「已取消」, 不走红字异常
+              if (ev.stopReason === "cancelled") {
+                r.interrupted = true;
+                r.error = false;
+                r.errorNote = undefined;
+              }
+            });
+          } else if (ev.type === "error") {
+            if (permAnsweredRef.current) {
+              setPermAsk((p) => (p?.localSessionId === sid ? null : p));
+            }
+            const note = ev.error ?? "任务执行失败";
+            // 兼容旧流: 「任务已取消」当中断而非异常
+            if (note === "任务已取消") {
+              update((r) => {
+                r.streaming = false;
+                r.interrupted = true;
+                r.error = false;
+                r.errorNote = undefined;
+              });
+            } else {
+              update((r) => {
+                r.streaming = false;
+                r.error = true;
+                // 不活跃超时等: 保留已流出正文, 红条单独展示
+                if (ev.preserveText && r.text.trim()) {
+                  r.errorNote = note;
+                } else if (!r.text.trim()) {
+                  r.text = note;
+                  r.errorNote = undefined;
+                } else {
+                  r.errorNote = note;
+                }
+              });
+            }
+          }
+        }
+      }
+      void loadGw(sid);
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") {
+        update((r) => {
+          r.streaming = false;
+          r.error = true;
+          r.text = (e as Error).message;
+        });
+      } else {
+        update((r) => {
+          r.streaming = false;
+          r.interrupted = true;
+        });
+      }
+    } finally {
+      runsRef.current.delete(sid);
+      setRunningIds((prev) => {
+        const n = new Set(prev);
+        n.delete(sid);
+        return n;
+      });
+      setQueueHint((prev) => {
+        const n = { ...prev };
+        delete n[sid];
+        return n;
+      });
+      commitMsgs(sid, (all) =>
+        all.map((m) =>
+          m.id === agentMsg.id
+            ? {
+                ...m,
+                text: run.text,
+                tools: run.tools,
+                error: run.error,
+                errorNote: run.errorNote,
+                interrupted: run.interrupted,
+                streaming: false,
+                thinking: false,
+                finishedAt: Date.now(),
+              }
+            : m,
+        ),
+      );
+      if (run.interrupted) persist(sid, "assistant", { text: run.text, tools: run.tools, interrupted: true });
+      else if (run.error) {
+        const persistText =
+          run.text.trim() || run.errorNote || "任务执行失败";
+        persist(sid, "assistant", { text: persistText, tools: run.tools, error: true });
+      } else if (run.text.trim()) persist(sid, "assistant", { text: run.text, tools: run.tools });
+      void (async () => {
+        try {
+          const ar = await fetch("/api/agent/audit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: sid }),
+          });
+          const aj = (await ar.json()) as { violations?: { path: string; mtime: number; size: number }[] };
+          if (aj.violations?.length) {
+            setAuditWarn(
+              `⚠ 检测到 ${aj.violations.length} 处工作区越界写入: WorkBuddy 可能读写到了其他会话目录（见控制台/审计接口）`,
+            );
+          } else {
+            setAuditWarn(null);
+          }
+        } catch {
+          // 审计失败静默
+        }
+      })();
+    }
+  };
+
+  const stop = async () => {
+    const sid = currentId;
+    const run = sid ? runsRef.current.get(sid) : undefined;
+    run?.ac.abort();
+    setPermAsk(null);
+    try {
+      await fetch("/api/agent/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ localSessionId: sid ?? undefined }),
+      });
+    } catch {
+      // 忽略
+    }
+  };
+
+  /** 应答网关 session/request_permission */
+  const answerPermission = async (optionId: string | null) => {
+    if (!permAsk || permBusy) return;
+    if (permAsk.stale) {
+      setPermAsk(null);
+      return;
+    }
+    setPermBusy(true);
+    permAnsweredRef.current = true;
+    let expired = false;
+    try {
+      const res = await fetch("/api/agent/permission", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          localSessionId: permAsk.localSessionId,
+          requestId: permAsk.requestId,
+          ...(optionId ? { optionId } : { cancelled: true }),
+        }),
+      });
+      if (res.status === 404) {
+        expired = true;
+        permAnsweredRef.current = false;
+      }
+    } catch {
+      // 网络失败: 服务端超时后会自行 cancelled
+    } finally {
+      setPermBusy(false);
+      if (expired) setPermAsk((p) => (p ? { ...p, stale: true } : p));
+      else setPermAsk(null);
+    }
+  };
+
+  /** 切换模型: POST /api/agent/set-model, 成功用返回 status 刷新 */
+  const applyModel = async (modelId: string) => {
+    if (!modelId) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/agent/set-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: modelId, localSessionId: currentId ?? undefined }),
+      });
+      const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
+      if (j.ok && j.status) {
+        // 全局偏好: 所有会话缓存同步模型当前值
+        setStatus((s) => ({ ...(s ?? {}), phase: j.status?.phase ?? "connected", lastError: j.status?.lastError }));
+        const merged = mergeGw(toGw(j.status));
+        for (const id of gwRef.current.keys()) gwRef.current.set(id, merged);
+        if (currentId) {
+          gwRef.current.set(currentId, merged);
+          setGw(merged);
+        }
+      } else alert(j.error ?? "切换模型失败");
+    } catch {
+      alert("切换模型失败: 本地服务无响应");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 通用配置项: POST /api/agent/set-config (权限模式/思考深度/沙箱) — 全局共享 */
+  const applyConfig = async (configId: string, value: string) => {
+    if (!value) return;
+    setBusy(true);
+    try {
+      const r = await fetch("/api/agent/set-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ configId, value, localSessionId: currentId ?? undefined }),
+      });
+      const j = (await r.json()) as { ok: boolean; status?: AgentStatus; error?: string };
+      if (j.ok && j.status) {
+        setStatus((s) => ({ ...(s ?? {}), phase: j.status?.phase ?? "connected", lastError: j.status?.lastError }));
+        const merged = mergeGw(toGw(j.status));
+        for (const id of gwRef.current.keys()) gwRef.current.set(id, merged);
+        if (currentId) {
+          gwRef.current.set(currentId, merged);
+          setGw(merged);
+        }
+      } else alert(j.error ?? "设置失败");
+    } catch {
+      alert("设置失败: 本地服务无响应");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 流式自动滚底 (用户上滚查看历史时暂停跟随; 历史加载/更早历史 prepend 时不平滑滚动)
+  useEffect(() => {
+    if (prependRef.current) {
+      prependRef.current = false;
+      return;
+    }
+    if (histPendingRef.current) {
+      histPendingRef.current = false;
+      return;
+    }
+    if (followRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [msgs]);
+
+  // 按会话恢复/切换草稿; 卸载时再写一次防丢
+  useEffect(() => {
+    if (currentId) setInput(readInputDraft(currentId));
+    else setInput("");
+  }, [currentId]);
+  useEffect(() => {
+    return () => {
+      const sid = currentIdRef.current;
+      if (sid) writeInputDraft(sid, inputValueRef.current);
+    };
+  }, []);
+
+  // 输入框自动撑高: 内容增高 → 高度跟随, 达到上限后滚动
+  useEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, INPUT_MAX_H)}px`;
+  }, [input]);
+
+  const pm = phaseBadge(phase, status?.discovered);
+  const caps = status?.capabilities;
+
+  return (
+    <div className="flex h-full w-full flex-col overflow-hidden bg-page">
+      {auditWarn && (
+        <div className="flex items-center justify-between gap-3 border-b border-up/30 bg-up-soft px-4 py-1.5 text-[11.5px] text-up">
+          <span>{auditWarn}</span>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            onClick={() => setAuditWarn(null)}
+            className="shrink-0 rounded px-1.5 text-up/80 transition-colors hover:bg-up/10 hover:text-up"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      <div className="relative flex items-center gap-3 border-b border-line bg-surface px-4 py-3">
+        <div
+          className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium ${pm.color}`}
+        >
+          <span className={`h-2 w-2 rounded-full ${pm.dot}`} />
+          {pm.label}
+        </div>
+        <div className="flex min-w-0 flex-1 items-center gap-x-4 text-[11.5px] text-ink-muted">
+          {status?.discovered ? (
+            <>
+              <span className="whitespace-nowrap">
+                网关 <b className="font-semibold text-ink">{status.discovered.pid}</b> ·{" "}
+                <b className="font-semibold text-ink">127.0.0.1:{status.discovered.port}</b>
+              </span>
+              <span className="whitespace-nowrap">
+                心跳{" "}
+                {status.discovered.heartbeatMsAgo < 600_000
+                  ? `${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`
+                  : "未知（连接可用）"}
+              </span>
+            </>
+          ) : (
+            <span>未发现 ~/.workbuddy/sessions 存活网关，请先启动 WorkBuddy</span>
+          )}
+          {status?.lastError && (
+            <div className="mt-1.5 rounded bg-up-soft px-2 py-1.5 text-[11.5px] leading-snug text-up">
+              {status.lastError}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* 已连接: 模型选择放状态行右侧; 其余配置进对话框 */}
+          {phase === "connected" && (gw?.sessionConfig || gw?.models?.length) ? (
+            <>
+              {gw.usage &&
+              (gw.usage.lastTotalTokens ||
+                gw.usage.sessionTotalTokens ||
+                gw.usage.used ||
+                gw.usage.lastCost) ? (
+                <span
+                  className="hidden max-w-[280px] truncate text-[11px] tabular-nums text-ink-muted sm:inline"
+                  title={
+                    [
+                      gw.usage.lastPromptTokens != null
+                        ? `本轮提示 ${fmtTokens(gw.usage.lastPromptTokens)}`
+                        : null,
+                      gw.usage.lastCompletionTokens != null
+                        ? `本轮补全 ${fmtTokens(gw.usage.lastCompletionTokens)}`
+                        : null,
+                      gw.usage.sessionTotalTokens != null
+                        ? `本连接累计 ${fmtTokens(gw.usage.sessionTotalTokens)}`
+                        : null,
+                      gw.usage.size > 0
+                        ? `上下文 ${fmtTokens(gw.usage.used)} / ${fmtTokens(gw.usage.size)}`
+                        : gw.usage.lastPromptTokens != null
+                          ? `上下文 ${fmtTokens(gw.usage.lastPromptTokens)}`
+                          : null,
+                      gw.usage.lastCost != null && gw.usage.lastCost > 0
+                        ? `cost ${fmtCost(gw.usage.lastCost)}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "Token 用量"
+                  }
+                >
+                  Token{" "}
+                  <b className="font-semibold text-ink">
+                    {fmtTokens(gw.usage.lastTotalTokens ?? gw.usage.used)}
+                  </b>
+                  {gw.usage.sessionTotalTokens != null &&
+                  gw.usage.sessionTotalTokens !== (gw.usage.lastTotalTokens ?? gw.usage.used) ? (
+                    <span className="text-ink-faint"> · 累计 {fmtTokens(gw.usage.sessionTotalTokens)}</span>
+                  ) : null}
+                  {gw.usage.size > 0 ? (
+                    <span className="text-ink-faint">
+                      {" "}
+                      · 上下文 {fmtTokens(gw.usage.used)}/{fmtTokens(gw.usage.size)}
+                    </span>
+                  ) : gw.usage.lastPromptTokens != null ? (
+                    <span className="text-ink-faint"> · 上下文 {fmtTokens(gw.usage.lastPromptTokens)}</span>
+                  ) : null}
+                  {fmtCost(gw.usage.lastCost) ? (
+                    <span className="text-ink-faint"> · cost {fmtCost(gw.usage.lastCost)}</span>
+                  ) : null}
+                </span>
+              ) : null}
+              <CtlSelect
+                value={gw.sessionConfig?.model?.currentValue ?? ""}
+                options={
+                  gw.models?.map((m) => ({
+                    value: m.modelId,
+                    label: `${m.name}${m.description ? ` · ${m.description}` : ""}`,
+                  })) ??
+                  gw.sessionConfig?.model?.options?.map((o) => ({
+                    value: o.value,
+                    label: o.name || o.value,
+                  })) ??
+                  []
+                }
+                disabled={busy}
+                onChange={(v) => void applyModel(v)}
+                title="切换会话模型"
+              />
+              <button
+                type="button"
+                aria-label="ACP 参数"
+                title="ACP 参数（权限模式 / 思考深度 / 沙箱等）"
+                onClick={() => setConfigOpen(true)}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z" />
+                </svg>
+              </button>
+            </>
+          ) : null}
+          {/* 打开会话工作目录 (Finder / 资源管理器) */}
+          <button
+            type="button"
+            aria-label="打开工作目录"
+            title={docHints[0] ? `打开工作目录\n${docHints[0]}` : "打开工作目录"}
+            disabled={!docHints[0]}
+            onClick={() => void openSessionFolder()}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
+            </svg>
+          </button>
+          {/* 工作约定按钮: 查看/编辑全局工作约定 (激活会话时注入给 WorkBuddy) */}
+          <button
+            type="button"
+            aria-label="工作约定"
+            title="工作约定（激活会话时注入给 WorkBuddy）"
+            onClick={() => void openSysEditor()}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
+              <path d="M8 3h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+              <path d="M9 8h6" />
+              <path d="M9 12h6" />
+              <path d="M9 16h4" />
+            </svg>
+          </button>
+          {/* 状态信息按钮: 未连接也可查看发现态 (进程/心跳); 已连接再补会话与能力 */}
+          <div className="relative">
+            <button
+              type="button"
+              aria-label="网关状态信息"
+              aria-expanded={infoOpen}
+              onClick={() => setInfoOpen((v) => !v)}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
+            >
+              <IconInfo className="h-[15px] w-[15px]" />
+            </button>
+            {infoOpen ? (
+              <div
+                ref={infoRef}
+                className="absolute right-0 top-[36px] z-50 w-[360px] rounded-lg border border-line bg-white p-3.5 shadow-xl"
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[12.5px] font-semibold text-ink">网关状态</span>
+                  <button
+                    type="button"
+                    aria-label="关闭信息"
+                    onClick={() => setInfoOpen(false)}
+                    className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+                      <path d="M6 6l12 12" />
+                      <path d="M18 6L6 18" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="space-y-1.5 text-[11.5px]">
+                  <InfoRow label="连接状态" value={pm.label} />
+                  {status?.discovered ? (
+                    <>
+                      <InfoRow label="网关进程" value={`${status.discovered.pid} · 127.0.0.1:${status.discovered.port}`} mono />
+                      <InfoRow
+                        label="心跳"
+                        value={
+                          status.discovered.heartbeatMsAgo < 600_000
+                            ? `${Math.round(status.discovered.heartbeatMsAgo / 1000)}s 前`
+                            : "未知"
+                        }
+                      />
+                    </>
+                  ) : (
+                    <InfoRow label="发现" value="未找到 ~/.workbuddy/sessions 存活网关" />
+                  )}
+                  {phase === "connected" && gw?.connectionIdMasked ? (
+                    <InfoRow label="连接 ID" value={gw.connectionIdMasked} mono />
+                  ) : null}
+                  {phase === "connected" && gw?.protocolVersion ? (
+                    <InfoRow label="协议版本" value={`v${gw.protocolVersion}`} />
+                  ) : null}
+                  {phase === "connected" && gw?.acpSessionId ? (
+                    <InfoRow label="ACP 会话" value={`${gw.acpSessionId.slice(0, 8)}…${gw.acpSessionId.slice(-4)}`} mono />
+                  ) : null}
+                  {status?.lastError ? <InfoRow label="最近错误" value={status.lastError} /> : null}
+                </div>
+                {phase === "connected" && caps ? (
+                  <div className="mt-2.5 border-t border-line pt-2">
+                    <div className="mb-1.5 text-[10.5px] font-medium uppercase tracking-wider text-ink-faint">
+                      网关能力
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        caps.loadSession && "loadSession",
+                        caps.multitaskSupport && "multitask",
+                        caps.promptCapabilities?.image && "image",
+                        caps.promptCapabilities?.embeddedContext && "embeddedContext",
+                        caps.mcpCapabilities?.http && "MCP·HTTP",
+                        caps.mcpCapabilities?.sse && "MCP·SSE",
+                        ...(gw?.authMethods ?? []).map((a) => `auth:${a}`),
+                      ]
+                        .filter(Boolean)
+                        .map((c) => (
+                          <span
+                            key={String(c)}
+                            className="rounded border border-line bg-page px-1.5 py-0.5 text-[10.5px] text-ink-muted"
+                          >
+                            {c}
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {phase !== "connected" ? (
+            <button
+              onClick={connect}
+              disabled={busy}
+              className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+            >
+              {busy ? "连接中…" : "连接"}
+            </button>
+          ) : (
+            <button
+              onClick={connect}
+              className="shrink-0 rounded-md border border-line px-3 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page"
+            >
+              重连
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="flex min-h-0 flex-1">
+
+      {/* ── 会话侧栏 (磁盘持久化的本地会话) ── */}
+      <aside className="flex h-full w-[216px] shrink-0 flex-col border-r border-line bg-surface">
+        <div className="flex items-center justify-between px-3 pb-2 pt-3">
+          <span className="text-[11.5px] font-semibold uppercase tracking-wider text-ink-faint">会话</span>
+          <button
+            type="button"
+            title="新建会话"
+            aria-label="新建会话"
+            onClick={() => void createLocalSession()}
+            className="flex h-5 w-5 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5">
+              <path d="M12 5v14" />
+              <path d="M5 12h14" />
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 pb-3">
+          {!histLoaded ? (
+            <div className="px-2 py-2 text-[11.5px] text-ink-faint">加载中…</div>
+          ) : sessions.length === 0 ? (
+            <div className="px-2 py-2 text-[11.5px] text-ink-faint">暂无会话，点 + 新建</div>
+          ) : (
+            sessions.map((sd) => (
+              <div
+                key={sd.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (editingTitleId === sd.id) return;
+                  void switchSession(sd.id);
+                }}
+                onKeyDown={(e) => {
+                  if (editingTitleId === sd.id) return;
+                  if (e.key === "Enter") void switchSession(sd.id);
+                }}
+                className={`group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] ${
+                  sd.id === currentId ? "bg-accent-soft font-medium text-accent-deep" : "text-ink hover:bg-black/5"
+                }`}
+                title={editingTitleId === sd.id ? undefined : `${sd.title}\n悬停右侧 ⋯ 可重命名或删除`}
+              >
+                {editingTitleId === sd.id ? (
+                  <input
+                    ref={editTitleRef}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void commitRename(sd.id);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setEditingTitleId(null);
+                      }
+                    }}
+                    onBlur={() => void commitRename(sd.id)}
+                    className="min-w-0 flex-1 rounded border border-accent/40 bg-white px-1 py-0.5 text-[12.5px] font-medium text-ink outline-none"
+                  />
+                ) : (
+                  <span
+                    className="min-w-0 flex-1 truncate"
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      beginRename(sd.id, sd.title);
+                    }}
+                  >
+                    {sd.title}
+                  </span>
+                )}
+                {runningIds.has(sd.id) && (
+                  <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-accent">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                    {queueHint[sd.id] ? "排队中" : "运行中"}
+                  </span>
+                )}
+                <span className="shrink-0 text-[10px] tabular-nums text-ink-faint">{fmtRel(sd.updatedAt)}</span>
+                <div className="relative shrink-0">
+                  <button
+                    type="button"
+                    aria-label={`管理会话 ${sd.title}`}
+                    disabled={editingTitleId === sd.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMenuFor(menuFor === sd.id ? null : sd.id);
+                    }}
+                    className={`${
+                      menuFor === sd.id ? "flex" : "hidden group-hover:flex"
+                    } h-4 w-4 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/10 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30`}
+                  >
+                    <svg viewBox="0 0 24 24" fill="currentColor" className="h-3 w-3">
+                      <circle cx="12" cy="5" r="1.6" />
+                      <circle cx="12" cy="12" r="1.6" />
+                      <circle cx="12" cy="19" r="1.6" />
+                    </svg>
+                  </button>
+                  {menuFor === sd.id ? (
+                    <div
+                      ref={sessionMenuRef}
+                      className="absolute right-0 top-full z-50 mt-1 w-[120px] rounded-lg border border-line bg-white p-1 shadow-xl"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMenuFor(null);
+                          beginRename(sd.id, sd.title);
+                        }}
+                        className="block w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-ink hover:bg-black/5"
+                      >
+                        重命名
+                      </button>
+                      <button
+                        type="button"
+                        disabled={runningIds.has(sd.id)}
+                        onClick={() => askRemoveSession(sd.id)}
+                        className="block w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] text-red-500 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </aside>
+        <div className="flex min-w-0 flex-1 flex-col">
+      {/* ── 协作演示区 ── */}
+      <div ref={msgBoxRef} onScroll={onMsgScroll} onContextMenu={onCtxMenu} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {msgs.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <div className="text-[15px] font-semibold text-ink">本地 Agent 协作演示</div>
+            <div className="mt-2 max-w-[460px] text-[12.5px] leading-relaxed text-ink-muted">
+              通过本机 ACP 网关（HTTP + SSE）与 WorkBuddy 建立连接，
+              <br />
+              在这里发送任务，WorkBuddy 的回复将流式实时渲染。
+            </div>
+            <div className="mt-4 flex flex-wrap justify-center gap-2">
+              {PRESET_TASKS.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => send(t)}
+                  disabled={runningIds.has(currentId ?? "")}
+                  className="rounded-full border border-line bg-surface px-3 py-1.5 text-[12px] text-accent hover:bg-accent-soft disabled:opacity-40"
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="mx-auto space-y-4" style={{ width: "min(max(980px, 88vw), 100%)" }}>
+            {msgs.map((m) => (
+              <div key={m.id}>
+                {m.role === "user" ? (
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-1.5">
+                      {m.extra && m.extra.length > 0 && (
+                        <button
+                          type="button"
+                          title="查看本条消息自动附带的信息 (排障用)"
+                          onClick={() => setExtraView({ title: "附加信息", items: m.extra! })}
+                          className="rounded border border-line bg-surface px-1.5 py-px text-[10px] text-ink-muted transition-colors hover:bg-page hover:text-ink"
+                        >
+                          附加信息
+                        </button>
+                      )}
+                      <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
+                    </div>
+                    <div className="flex items-end gap-2">
+                      <div className="group flex items-end justify-end gap-1.5">
+                        <CopyBtn text={m.text} />
+                        <div className="max-w-[640px] rounded-xl rounded-br-sm bg-accent px-3.5 py-2 text-[13px] leading-relaxed text-white">
+                          {m.text}
+                        </div>
+                      </div>
+                      <Avatar who="user" />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-2">
+                    <Avatar who="agent" />
+                    <div className="min-w-0 flex-1">
+                    <div className="mb-1 flex items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-ink">本地 Agent</span>
+                      <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
+                      {m.streaming && (
+                        <span className="text-[11px] text-accent">
+                          {m.thinking ? "思考中…" : "正在生成…"}
+                        </span>
+                      )}
+                      {m.interrupted && (
+                        <span
+                          className="rounded bg-black/[0.06] px-1.5 py-px text-[10px] font-medium text-ink-muted"
+                          title="任务已被手动取消（本地停止），已产出的内容已保留"
+                        >
+                          已取消
+                        </span>
+                      )}
+                    </div>
+                    <ToolStrip m={m} />
+                    <div className="group flex items-start gap-1.5">
+                      <div className="inline-block max-w-full rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
+                      {(() => {
+                        const errOnly =
+                          !!m.error &&
+                          !m.errorNote &&
+                          /^(任务超时|不活跃超时|任务执行失败)/.test((m.text ?? "").trim());
+                        const body = errOnly ? "" : m.text;
+                        const banner =
+                          m.errorNote ||
+                          (errOnly ? m.text : m.error && body.trim() ? "本轮异常结束（已保留上方内容）" : null);
+                        return (
+                          <>
+                            {body ? (
+                              <>
+                                {renderMd(body, openDoc, docHints, openLink)}
+                                {m.streaming ? <span className="animate-pulse">▍</span> : null}
+                              </>
+                            ) : m.streaming ? (
+                              <span className="animate-pulse">▍</span>
+                            ) : !banner ? (
+                              "…"
+                            ) : null}
+                            {banner ? (
+                              <div
+                                className={`rounded-md border border-up/40 bg-up-soft px-2.5 py-1.5 text-[12px] text-up ${
+                                  body.trim() ? "mt-2" : ""
+                                }`}
+                              >
+                                {banner}
+                              </div>
+                            ) : null}
+                          </>
+                        );
+                      })()}
+                      </div>
+                      <CopyBtn text={m.text} />
+                    </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* ── 输入区 ── */}
+      <div className="border-t border-line bg-surface px-4 py-3">
+        {currentId && queueHint[currentId] && (
+          <div className="mx-auto mb-2 text-[11.5px] text-accent-deep" style={{ width: "min(max(820px, 80vw), 100%)" }}>
+            {queueHint[currentId]}
+            <span className="ml-2 text-ink-faint">可点「取消排队」放弃</span>
+          </div>
+        )}
+        <div className="mx-auto flex items-center gap-2" style={{ width: "min(max(820px, 80vw), 100%)" }}>
+          <textarea
+            ref={taRef}
+            value={input}
+            onChange={(e) => {
+              const v = e.target.value;
+              setInput(v);
+              if (currentId) writeInputDraft(currentId, v);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            placeholder={
+              phase !== "connected"
+                ? "请先连接 WorkBuddy 网关"
+                : currentId && queueHint[currentId]
+                  ? queueHint[currentId]!
+                  : "给本地 Agent 派个任务… (Enter 发送, Shift+Enter 换行)"
+            }
+            disabled={phase !== "connected" || runningIds.has(currentId ?? "")}
+            rows={1}
+            style={{ maxHeight: INPUT_MAX_H }}
+            className="min-h-[38px] flex-1 resize-none overflow-y-auto rounded-lg border border-line bg-page px-3 py-2 text-[13px] leading-[20px] text-ink outline-none placeholder:text-ink-faint focus:border-accent disabled:opacity-50"
+          />
+          {runningIds.has(currentId ?? "") ? (
+            <button
+              onClick={stop}
+              title={
+                currentId && queueHint[currentId]
+                  ? "取消排队"
+                  : "已停止显示；网关侧可能仍在收尾"
+              }
+              className="shrink-0 rounded-lg bg-up px-4 py-2 text-[12.5px] font-medium text-white hover:opacity-90"
+            >
+              {currentId && queueHint[currentId] ? "取消排队" : "停止"}
+            </button>
+          ) : (
+            <button
+              onClick={() => void send()}
+              disabled={phase !== "connected" || runningIds.has(currentId ?? "") || !input.trim()}
+              className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-medium text-white hover:bg-accent-deep disabled:opacity-40"
+            >
+              发送
+            </button>
+          )}
+        </div>
+        <div className="mx-auto mt-1.5 text-[10.5px] text-ink-faint" style={{ width: "min(max(820px, 80vw), 100%)" }}>
+          ACP over HTTP+SSE · 连接令牌仅保存在本机内存
+          {gw?.sessionConfig?.mode?.currentValue
+            ? ` · 权限：${gw.sessionConfig.mode.options?.find((o) => o.value === gw.sessionConfig?.mode?.currentValue)?.name ?? gw.sessionConfig.mode.currentValue}`
+            : ""}
+        </div>
+      </div>
+        </div>
+      </div>
+      {/* ── 工具权限授权对话框 (session/request_permission) ── */}
+      {permAsk && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="需要你的授权"
+            className="flex w-[480px] max-w-[92vw] flex-col rounded-xl border border-line bg-white shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <span className="text-[13px] font-semibold text-ink">需要你的授权</span>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              <p className="text-[13px] leading-relaxed text-ink">
+                Agent 想要
+                <span className="font-medium"> {friendlyToolLabel(permAsk.toolTitle)}</span>
+              </p>
+              {permAsk.detail ? (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-page px-3 py-2 font-mono text-[11.5px] leading-relaxed text-ink">
+                  {permAsk.detail}
+                </pre>
+              ) : (
+                <p className="text-[11.5px] text-ink-faint">未提供具体内容，请根据工具类型判断是否允许。</p>
+              )}
+              <p className="text-[11.5px] leading-relaxed text-ink-muted">
+                {permAsk.stale
+                  ? "这轮任务已经结束，这次授权不会再生效。关闭后重新发送即可。"
+                  : "当前是每次询问。允许一次只放行这一步；本会话始终允许后，同类操作在本会话内不再弹窗。"}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3">
+              {permAsk.stale ? (
+                <button
+                  type="button"
+                  disabled={permBusy}
+                  onClick={() => void answerPermission(null)}
+                  className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+                >
+                  关闭
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    disabled={permBusy}
+                    onClick={() => void answerPermission(null)}
+                    className="rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page disabled:opacity-50"
+                  >
+                    拒绝
+                  </button>
+                  {(permAsk.options.length
+                    ? permAsk.options
+                    : [{ optionId: "allow", name: "允许一次", kind: "allow_once" }]
+                  ).map((o) => {
+                    const label = friendlyOptionLabel(o);
+                    const primary = /允许/.test(label);
+                    return (
+                      <button
+                        key={o.optionId}
+                        type="button"
+                        disabled={permBusy}
+                        onClick={() => void answerPermission(o.optionId)}
+                        className={
+                          primary
+                            ? "rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+                            : "rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page disabled:opacity-50"
+                        }
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 模型配置对话框 (权限模式 / 思考深度 / 沙箱等, 不含模型本身) ── */}
+      {configOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setConfigOpen(false);
+          }}
+        >
+          <div className="flex w-[420px] max-w-[90vw] flex-col rounded-xl border border-line bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <span className="text-[13px] font-semibold text-ink">ACP 参数</span>
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setConfigOpen(false)}
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="space-y-3 px-4 py-4">
+              {phase === "connected" && gw?.sessionConfig ? (
+                <>
+                  {Object.entries(gw.sessionConfig)
+                    .filter(([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0)
+                    .map(([id, c]) => (
+                      <label key={id} className="flex flex-col gap-1" title={c.description ?? undefined}>
+                        <span className="text-[11.5px] font-medium text-ink-muted">
+                          {CONFIG_LABEL[id] ?? c.name}
+                        </span>
+                        <select
+                          value={c.currentValue ?? ""}
+                          disabled={busy}
+                          onChange={(e) => void applyConfig(id, e.target.value)}
+                          className="w-full cursor-pointer rounded-md border border-line bg-page px-2.5 py-1.5 text-[12.5px] text-ink outline-none hover:border-accent focus:border-accent disabled:opacity-50"
+                        >
+                          {(c.options ?? []).map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.name}
+                              {o.description ? ` · ${o.description}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                        {c.description ? (
+                          <span className="text-[10.5px] leading-relaxed text-ink-faint">{c.description}</span>
+                        ) : null}
+                      </label>
+                    ))}
+                  {Object.entries(gw.sessionConfig).filter(
+                    ([id, c]) => id !== "model" && (c.options?.length ?? 0) > 0,
+                  ).length === 0 ? (
+                    <p className="text-[12px] text-ink-faint">当前网关未暴露可配置项</p>
+                  ) : null}
+                  {gw.sessionConfig.mode?.currentValue && /bypass/i.test(gw.sessionConfig.mode.currentValue) ? (
+                    <p className="rounded-md border border-line bg-page px-3 py-2 text-[11.5px] leading-relaxed text-ink-muted">
+                      当前为 Bypass：工具权限将自动放行，不再弹窗询问。
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-[12px] text-ink-faint">请先连接网关后再配置</p>
+              )}
+            </div>
+            <div className="flex items-center justify-end border-t border-line px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setConfigOpen(false)}
+                className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep"
+              >
+                完成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 工作约定编辑对话框 ── */}
+      {sysOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setSysOpen(false);
+          }}
+        >
+          <div className="flex w-[560px] max-w-[90vw] flex-col rounded-xl border border-line bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-line px-4 py-3">
+              <span className="text-[13px] font-semibold text-ink">工作约定（系统提示词）</span>
+              <button
+                type="button"
+                aria-label="关闭"
+                onClick={() => setSysOpen(false)}
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="px-4 py-3">
+              <textarea
+                value={sysDraft}
+                onChange={(e) => setSysDraft(e.target.value)}
+                spellCheck={false}
+                className="h-[260px] w-full resize-none rounded-lg border border-line bg-page px-3 py-2 font-mono text-[12px] leading-relaxed text-ink outline-none focus:border-accent"
+                placeholder="在此编辑工作约定…（激活会话时作为首条消息注入给 WorkBuddy）"
+              />
+              <div className="mt-2 text-[10.5px] leading-relaxed text-ink-faint">
+                约定只在<u>首次激活 / 重连后对齐 / 约定内容变更</u>时注入一次，不会拼进每条用户消息。包括 Markdown
+                格式、图片/文件引用方式等。
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setSysDraft(sysText);
+                  setSysOpen(false);
+                }}
+                className="rounded-lg border border-line px-3.5 py-1.5 text-[12px] font-medium text-ink-muted hover:bg-page"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveSysPrompt()}
+                disabled={sysSaving}
+                className="rounded-lg bg-accent px-3.5 py-1.5 text-[12px] font-medium text-white hover:bg-accent-deep disabled:opacity-50"
+              >
+                {sysSaving ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deleteConfirmId ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/35 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-session-title"
+            className="w-full max-w-sm rounded-xl border border-line bg-surface p-4 shadow-xl"
+          >
+            <h3 id="delete-session-title" className="text-[14px] font-semibold text-ink">
+              删除会话
+            </h3>
+            <p className="mt-2 text-[12.5px] leading-relaxed text-ink-muted">
+              确定删除「
+              {sessions.find((s) => s.id === deleteConfirmId)?.title ?? deleteConfirmId.slice(0, 8)}
+              」？历史消息与产物将一并清除，且不可恢复。
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmId(null)}
+                className="rounded-lg border border-line px-3 py-1.5 text-[12.5px] text-ink-muted hover:bg-page"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void removeSession(deleteConfirmId)}
+                className="rounded-lg bg-red-500 px-3 py-1.5 text-[12.5px] font-medium text-white hover:bg-red-600"
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {linkView ? (
+        <LinkPreviewModal
+          view={linkView}
+          stack={linkNav.stack}
+          stackIndex={linkNav.index}
+          canGoBack={previewCanBack}
+          canGoForward={previewCanForward}
+          onBack={previewGoBack}
+          onForward={previewGoForward}
+          onJump={(i) => setLinkNav((prev) => ({ ...prev, index: Math.max(0, Math.min(i, prev.stack.length - 1)) }))}
+          onClose={closePreview}
+          onOpenDoc={openDocInPreview}
+          docHints={docHints}
+          onOpenLink={openLinkInPreview}
+          onCtxMenu={onCtxMenu}
+          onToast={(msg) => {
+            setCtxToast(msg);
+            window.setTimeout(() => setCtxToast(null), 2000);
+          }}
+        />
+      ) : null}
+      {ctxMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-[60]"
+            onMouseDown={() => setCtxMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setCtxMenu(null);
+            }}
+          />
+          <div
+            className="fixed z-[61] min-w-[150px] overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-xl"
+            style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 110) }}
+          >
+            <button
+              type="button"
+              onClick={() => void downloadImage()}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-page"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 shrink-0">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+              </svg>
+              下载图片
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyImage()}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-page"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 shrink-0">
+                <rect x="9" y="9" width="11" height="11" rx="2" />
+                <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+              </svg>
+              复制图片
+            </button>
+          </div>
+        </>
+      )}
+      {ctxToast && (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-[70] -translate-x-1/2 rounded-full bg-ink px-4 py-1.5 text-[12px] text-white shadow-lg">
+          {ctxToast}
+        </div>
+      )}
+      {extraView && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setExtraView(null);
+          }}
+        >
+          <div className="flex h-[70vh] w-[min(720px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl">
+            <div className="flex items-center gap-2 border-b border-line bg-page px-3.5 py-2">
+              <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
+                📎 {extraView.title}
+              </span>
+              <button
+                type="button"
+                title="关闭"
+                aria-label="关闭附加信息"
+                onClick={() => setExtraView(null)}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              {extraView.items.map((it, i) => (
+                <div key={i} className="mb-3 last:mb-0">
+                  <div className="mb-1 text-[11px] font-semibold text-ink-muted">{it.title}</div>
+                  <pre className="max-h-[38vh] overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-page px-3 py-2 text-[12px] leading-relaxed text-ink">
+                    {it.text}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const IconCopy = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+  </svg>
+);
+
+const IconCheck = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    <path d="m5 13 4 4L19 7" />
+  </svg>
+);
+
+const IconInfo = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" fill="none" className={className}>
+    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.7" />
+    <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.08" />
+    <path d="M12 16.2v-4.4" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
+    <circle cx="12" cy="8.1" r="1.45" fill="currentColor" />
+  </svg>
+);
+
+/** 文档预览卡: 渲染本地 markdown 内容, 支持复制路径/关闭 */
+function DocPreviewCard({
+  preview,
+  onClose,
+  onOpenDoc,
+  docHints,
+}: {
+  preview: DocPreview;
+  onClose: () => void;
+  onOpenDoc: (path: string, title: string) => void;
+  docHints: string[];
+}) {
+  const [copied, setCopied] = useState(false);
+  const copyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(preview.path);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = preview.path;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="mt-2 overflow-hidden rounded-xl border border-line bg-surface">
+      <div className="flex items-center gap-2 border-b border-line bg-page px-3 py-2">
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">📄 {preview.title}</span>
+        <span className="max-w-[220px] truncate font-mono text-[10.5px] text-ink-faint" title={preview.path}>
+          {preview.path}
+        </span>
+        <button
+          type="button"
+          title="复制路径"
+          aria-label="复制文档路径"
+          onClick={() => void copyPath()}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+        >
+          {copied ? <IconCheck className="h-3.5 w-3.5 text-down" /> : <IconCopy className="h-3.5 w-3.5" />}
+        </button>
+        <button
+          type="button"
+          title="关闭预览"
+          aria-label="关闭文档预览"
+          onClick={onClose}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5">
+            <path d="M6 6l12 12" />
+            <path d="M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <div className="max-h-[420px] overflow-y-auto px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
+        {preview.loading ? (
+          <span className="animate-pulse text-ink-faint">加载中…</span>
+        ) : preview.error ? (
+          <div className="rounded bg-up-soft px-2.5 py-2 text-[12px] leading-snug text-up">
+            打开失败: {preview.error}
+          </div>
+        ) : (
+          renderMd(preview.text, onOpenDoc, docHints, undefined, preview.path.replace(/\/[^/]+$/, ""))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** 弹窗内嵌 webview (动态创建 Electron guest) */
+function WebviewBox({ src }: { src: string }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const wv = document.createElement("webview") as unknown as HTMLElement & { style: CSSStyleDeclaration };
+    wv.setAttribute("src", src);
+    wv.setAttribute("partition", "default");
+    wv.style.cssText = "width:100%;height:100%;border:none;display:flex;";
+    host.appendChild(wv);
+    return () => {
+      try {
+        host.removeChild(wv);
+      } catch {
+        // 已移除
+      }
+    };
+  }, [src]);
+  return <div ref={hostRef} className="h-full w-full overflow-hidden bg-white" />;
+}
+
+/** 链接/文件预览弹窗: url → 内嵌 webview; 本地文件按扩展名分发 (图片→img, html/pdf→webview, 文本→markdown/pre) */
+const PREVIEW_IMG_EXT = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif"];
+const PREVIEW_DOC_EXT = ["html", "htm", "pdf"];
+const extOf = (p: string) => {
+  const base = p.split("/").pop() ?? p;
+  const i = base.lastIndexOf(".");
+  return i >= 0 ? base.slice(i + 1).toLowerCase() : "";
+};
+/** jsonl/log: 逐行 JSON.parse 后 pretty, 非 JSON 行保留原文 */
+const prettyJsonl = (raw: string) =>
+  raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.stringify(JSON.parse(l), null, 2);
+      } catch {
+        return l;
+      }
+    })
+    .join("\n\n");
+
+/** 本地图片预览: fetch→blob, 404 时列出同目录可用媒体 (Agent 常写错文件名) */
+function LocalImagePreview({
+  path,
+  title,
+  onOpenFile,
+}: {
+  path: string;
+  title: string;
+  onOpenFile: (path: string, title: string) => void;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [siblings, setSiblings] = useState<{ name: string; path: string; mime: string }[]>([]);
+
+  useEffect(() => {
+    let dead = false;
+    let objectUrl: string | null = null;
+    setSrc(null);
+    setErr(null);
+    setSiblings([]);
+    void (async () => {
+      try {
+        const r = await fetch(`/api/local-file?path=${encodeURIComponent(path)}`, { cache: "no-store" });
+        if (!r.ok) {
+          const dir = path.replace(/\/[^/]+$/, "") || "/";
+          let hint = r.status === 404 ? "文件不存在" : `加载失败 (HTTP ${r.status})`;
+          try {
+            const j = (await r.json()) as { error?: string };
+            if (j?.error === "not found") hint = "文件不存在";
+          } catch {
+            /* ignore */
+          }
+          if (!dead) setErr(`${hint}: ${path}`);
+          try {
+            const lr = await fetch(`/api/local-file?path=${encodeURIComponent(dir)}&list=1`, { cache: "no-store" });
+            if (lr.ok) {
+              const j = (await lr.json()) as { entries?: { name: string; path: string; mime: string }[] };
+              const imgs = (j.entries ?? []).filter((e) => e.mime.startsWith("image/") && e.path !== path);
+              if (!dead) setSiblings(imgs);
+            }
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        const blob = await r.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (dead) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setSrc(objectUrl);
+      } catch (e) {
+        if (!dead) setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      dead = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path]);
+
+  if (err) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
+        <div className="max-w-[520px] rounded-lg bg-up-soft px-3 py-2.5 text-center text-[12.5px] leading-snug text-up">
+          {err}
+        </div>
+        {siblings.length > 0 && (
+          <div className="w-full max-w-[520px]">
+            <div className="mb-1.5 text-center text-[11.5px] text-ink-faint">同目录可用图片 — 点击打开</div>
+            <ul className="max-h-[240px] space-y-1 overflow-y-auto rounded-lg border border-line bg-page p-2">
+              {siblings.map((s) => (
+                <li key={s.path}>
+                  <button
+                    type="button"
+                    onClick={() => onOpenFile(s.path, s.name)}
+                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-accent-deep transition-colors hover:bg-accent-soft"
+                    title={s.path}
+                  >
+                    <span className="shrink-0 text-ink-faint">图</span>
+                    <span className="min-w-0 flex-1 truncate font-medium">{s.name}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (!src) {
+    return (
+      <div className="flex h-full items-center justify-center text-[12px] text-ink-faint">
+        <span className="animate-pulse">加载图片…</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full items-center justify-center p-4">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={src}
+        alt={title}
+        data-local-path={path}
+        className="max-h-full max-w-full object-contain"
+      />
+    </div>
+  );
+}
+
+function PreviewIconBtn({
+  title,
+  disabled,
+  onClick,
+  children,
+  className = "",
+}: {
+  title: string;
+  disabled?: boolean;
+  onClick?: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** 前进/后退悬停: 展示可跳转的历史堆栈 */
+function NavHistoryHover({
+  label,
+  disabled,
+  items,
+  onStep,
+  onJump,
+  icon,
+}: {
+  label: string;
+  disabled?: boolean;
+  items: { index: number; title: string; location: string }[];
+  onStep?: () => void;
+  onJump: (index: number) => void;
+  icon: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  const clear = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+  };
+  const show = () => {
+    clear();
+    if (!disabled && items.length) setOpen(true);
+  };
+  const hide = () => {
+    clear();
+    timer.current = setTimeout(() => setOpen(false), 120);
+  };
+
+  useEffect(() => () => clear(), []);
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+    >
+      <PreviewIconBtn title={label} disabled={disabled} onClick={onStep}>
+        {icon}
+      </PreviewIconBtn>
+      {open && items.length > 0 ? (
+        <div
+          className="absolute left-0 top-full z-[70] mt-1 w-[280px] overflow-hidden rounded-lg border border-line bg-white py-1 shadow-xl"
+          onMouseEnter={show}
+          onMouseLeave={hide}
+        >
+          <div className="px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-faint">
+            {label} · {items.length}
+          </div>
+          <div className="max-h-[240px] overflow-y-auto">
+            {items.map((it) => (
+              <button
+                key={`${it.index}-${it.location}`}
+                type="button"
+                onClick={() => {
+                  onJump(it.index);
+                  setOpen(false);
+                }}
+                className="flex w-full flex-col gap-0.5 px-2.5 py-1.5 text-left hover:bg-black/[0.04]"
+              >
+                <span className="truncate text-[12.5px] font-medium text-ink">{it.title}</span>
+                <span className="truncate font-mono text-[10px] text-ink-faint">{it.location}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type PreviewFontSize = "sm" | "md" | "lg";
+const PREVIEW_FONT_KEY = "snuby:preview-font-size";
+/** 基准字号; Markdown 标题/代码等用 em 相对缩放, 一并跟随 */
+const PREVIEW_FONT_PX: Record<PreviewFontSize, number> = { sm: 13, md: 15, lg: 17 };
+
+function LinkPreviewModal({
+  view,
+  stack,
+  stackIndex,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
+  onJump,
+  onClose,
+  onOpenDoc,
+  docHints,
+  onOpenLink,
+  onCtxMenu,
+  onToast,
+}: {
+  view: LinkView;
+  stack: LinkView[];
+  stackIndex: number;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
+  onJump: (index: number) => void;
+  onClose: () => void;
+  onOpenDoc: (path: string, title: string) => void;
+  docHints: string[];
+  onOpenLink: (raw: string) => void;
+  onCtxMenu?: (e: React.MouseEvent) => void;
+  onToast?: (msg: string) => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [copiedKind, setCopiedKind] = useState<"content" | "path" | null>(null);
+  const [fontSize, setFontSize] = useState<PreviewFontSize>(() => {
+    try {
+      const v = localStorage.getItem(PREVIEW_FONT_KEY);
+      if (v === "sm" || v === "md" || v === "lg") return v;
+    } catch {
+      /* ignore */
+    }
+    return "sm";
+  });
+  const ext = view.kind === "file" ? extOf(view.path) : "";
+  const isImg = PREVIEW_IMG_EXT.includes(ext);
+  const isDoc = PREVIEW_DOC_EXT.includes(ext);
+  const localFileUrl = (p: string) => `/api/local-file?path=${encodeURIComponent(p)}`;
+  const location = view.kind === "url" ? view.url : view.path;
+  const canCopyContent = view.kind === "file" && !isImg && !isDoc && !!text;
+  const basePx = PREVIEW_FONT_PX[fontSize];
+
+  const stackLoc = (v: LinkView) => (v.kind === "url" ? v.url : v.path);
+  // 后退列表: 当前之前的条目, 最近的在上
+  const backItems = stack
+    .slice(0, stackIndex)
+    .map((v, i) => ({ index: i, title: v.title, location: stackLoc(v) }))
+    .reverse();
+  // 前进列表: 当前之后, 最近的在上
+  const forwardItems = stack
+    .slice(stackIndex + 1)
+    .map((v, i) => ({ index: stackIndex + 1 + i, title: v.title, location: stackLoc(v) }));
+
+  useEffect(() => {
+    if (view.kind !== "file") return;
+    if (isImg || isDoc) return;
+    let dead = false;
+    setText(null);
+    setErr(null);
+    void (async () => {
+      try {
+        const r = await fetch(`/api/local-file?path=${encodeURIComponent(view.path)}`, { cache: "no-store" });
+        if (!r.ok) throw new Error(r.status === 404 ? "文件不存在" : `HTTP ${r.status}`);
+        const t = await r.text();
+        if (!dead) setText(t);
+      } catch (e) {
+        if (!dead) setErr(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      dead = true;
+    };
+  }, [view, isImg, isDoc]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (canGoBack && onBack) onBack();
+        else onClose();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "[") {
+        e.preventDefault();
+        if (canGoBack) onBack?.();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "]") {
+        e.preventDefault();
+        if (canGoForward) onForward?.();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, onBack, onForward, canGoBack, canGoForward]);
+
+  const setFont = (s: PreviewFontSize) => {
+    setFontSize(s);
+    try {
+      localStorage.setItem(PREVIEW_FONT_KEY, s);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const flashCopied = (kind: "content" | "path") => {
+    setCopiedKind(kind);
+    window.setTimeout(() => setCopiedKind(null), 1500);
+  };
+
+  const copyText = async (value: string, kind: "content" | "path") => {
+    try {
+      await navigator.clipboard.writeText(value);
+      flashCopied(kind);
+      onToast?.(kind === "content" ? "已复制内容" : "已复制路径");
+    } catch {
+      onToast?.("复制失败");
+    }
+  };
+
+  const revealInFinder = async () => {
+    if (view.kind !== "file") return;
+    try {
+      const r = await fetch("/api/agent/open-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: view.path }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      onToast?.("已在 Finder 中显示");
+    } catch (e) {
+      onToast?.(e instanceof Error ? e.message : "打开失败");
+    }
+  };
+
+  const openExternal = () => {
+    if (view.kind === "url") window.open(view.url, "_blank", "noopener");
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="flex h-[82vh] w-[min(1100px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl"
+        onContextMenu={onCtxMenu}
+      >
+        <div className="shrink-0 border-b border-line bg-page px-2.5 py-1.5">
+          <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0.5">
+              <NavHistoryHover
+                label="后退"
+                disabled={!canGoBack}
+                items={backItems}
+                onStep={onBack}
+                onJump={onJump}
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                    <path d="M15 18l-6-6 6-6" />
+                  </svg>
+                }
+              />
+              <NavHistoryHover
+                label="前进"
+                disabled={!canGoForward}
+                items={forwardItems}
+                onStep={onForward}
+                onJump={onJump}
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                }
+              />
+            </div>
+
+            <div className="mx-1 h-4 w-px shrink-0 bg-line" />
+
+            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink" title={location}>
+              {view.title}
+            </span>
+
+            <div className="flex items-center gap-0.5">
+              {/* 字号: 小 / 中 / 大 */}
+              <div className="mr-0.5 flex items-center rounded-md border border-line bg-white p-0.5">
+                {([
+                  ["sm", "小"],
+                  ["md", "中"],
+                  ["lg", "大"],
+                ] as const).map(([k, lab]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    title={`字号：${lab}`}
+                    aria-label={`字号${lab}`}
+                    aria-pressed={fontSize === k}
+                    onClick={() => setFont(k)}
+                    className={`h-6 min-w-[22px] rounded px-1 text-[11px] font-medium transition-colors ${
+                      fontSize === k ? "bg-accent-soft text-accent-deep" : "text-ink-faint hover:text-ink"
+                    }`}
+                  >
+                    {lab}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+
+              {/* 复制内容: 文档/文本图标 */}
+              <PreviewIconBtn
+                title={copiedKind === "content" ? "已复制" : "复制内容"}
+                disabled={!canCopyContent}
+                onClick={() => text && void copyText(text, "content")}
+              >
+                {copiedKind === "content" ? (
+                  <IconCheck className="h-3.5 w-3.5 text-down" />
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="8" y1="13" x2="16" y2="13" />
+                    <line x1="8" y1="17" x2="14" y2="17" />
+                  </svg>
+                )}
+              </PreviewIconBtn>
+              {/* 复制路径: 链接链图标 */}
+              <PreviewIconBtn
+                title={copiedKind === "path" ? "已复制" : view.kind === "url" ? "复制链接" : "复制路径"}
+                onClick={() => void copyText(location, "path")}
+              >
+                {copiedKind === "path" ? (
+                  <IconCheck className="h-3.5 w-3.5 text-down" />
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                  </svg>
+                )}
+              </PreviewIconBtn>
+              {view.kind === "file" ? (
+                <PreviewIconBtn title="在 Finder 中显示" onClick={() => void revealInFinder()}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                </PreviewIconBtn>
+              ) : (
+                <PreviewIconBtn title="在浏览器中打开" onClick={openExternal}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                    <polyline points="15 3 21 3 21 9" />
+                    <line x1="10" y1="14" x2="21" y2="3" />
+                  </svg>
+                </PreviewIconBtn>
+              )}
+              <div className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              <PreviewIconBtn title="关闭" onClick={onClose}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </PreviewIconBtn>
+            </div>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 bg-white">
+          {view.kind === "url" ? (
+            <WebviewBox src={view.url} />
+          ) : isImg ? (
+            <LocalImagePreview path={view.path} title={view.title} onOpenFile={onOpenDoc} />
+          ) : isDoc ? (
+            <WebviewBox src={localFileUrl(view.path)} />
+          ) : err ? (
+            <div className="p-4">
+              <div className="rounded bg-up-soft px-2.5 py-2 text-[12px] leading-snug text-up">打开失败: {err}</div>
+            </div>
+          ) : text === null ? (
+            <div className="flex h-full items-center justify-center text-[12px] text-ink-faint">
+              <span className="animate-pulse">加载中…</span>
+            </div>
+          ) : ext === "jsonl" || ext === "log" ? (
+            <div className="h-full overflow-y-auto px-4 py-3">
+              <pre
+                className="whitespace-pre-wrap break-all font-mono leading-relaxed text-ink"
+                style={{ fontSize: `${basePx * 0.92}px` }}
+              >
+                {prettyJsonl(text)}
+              </pre>
+            </div>
+          ) : (
+            <div className="h-full overflow-y-auto px-4 py-3 leading-relaxed text-ink" style={{ fontSize: `${basePx}px` }}>
+              {renderMd(
+                text,
+                onOpenDoc,
+                docHints,
+                onOpenLink,
+                view.kind === "file" ? view.path.replace(/\/[^/]+$/, "") : undefined,
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 信息下拉中的键值行 */
+function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="shrink-0 text-ink-faint">{label}</span>
+      <span className={`min-w-0 truncate text-right ${mono ? "font-mono text-[10.5px]" : ""} text-ink`}>{value}</span>
+    </div>
+  );
+}
+
+/** 复制按钮: hover 显示, 点击复制消息原文 (Markdown) */
+/** IM 气泡头像: user = 品牌色「我」, agent = 浅色机器人图标 */
+function Avatar({ who }: { who: "user" | "agent" }) {
+  return who === "user" ? (
+    <div className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full bg-accent text-[11px] font-semibold text-white">
+      我
+    </div>
+  ) : (
+    <div className="flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full bg-accent-soft text-accent">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="h-4 w-4"
+      >
+        <rect x="4" y="8" width="16" height="12" rx="3" />
+        <path d="M12 8V4" />
+        <circle cx="12" cy="3" r="1.2" fill="currentColor" stroke="none" />
+        <path d="M9 13h.01M15 13h.01" strokeWidth="2.4" />
+        <path d="M9 16.5h6" />
+      </svg>
+    </div>
+  );
+}
+
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button
+      type="button"
+      title="复制原文"
+      aria-label="复制原文"
+      onClick={() => void copy()}
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-all hover:bg-black/5 hover:text-ink group-hover:opacity-100"
+    >
+      {copied ? <IconCheck className="h-3.5 w-3.5 text-down" /> : <IconCopy className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+const IconChevron = ({ open }: { open: boolean }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`h-3 w-3 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}>
+    <path d="m6 9 6 6 6-6" />
+  </svg>
+);
+
+/** 会话配置下拉: label + select (WorkBuddy 会话设置入口) */
+function CtlSelect({
+  label,
+  value,
+  options,
+  onChange,
+  disabled,
+  title,
+}: {
+  label?: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  return (
+    <label className="flex items-center gap-1.5" title={title}>
+      {label ? <span className="text-ink-faint">{label}</span> : null}
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        className="max-w-[220px] cursor-pointer rounded-md border border-line bg-page px-1.5 py-0.5 text-[11.5px] text-ink outline-none hover:border-accent focus:border-accent disabled:opacity-50"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 可点击展开明细列表 */
+function ToolStrip({ m }: { m: Msg }) {
+  const [open, setOpen] = useState(false);
+  const [, setTick] = useState(0);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  useClickOutside(wrapRef, open, () => setOpen(false));
+  // 运行中每秒刷新耗时, 避免长时间无 tool 事件时秒数停住
+  useEffect(() => {
+    if (!m.streaming) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [m.streaming]);
+  const tools = m.tools ?? [];
+
+  // 按 toolCallId 聚合: 起始时间/结束时间/工具/参数, 按开始时间排序
+  // 依赖 m.tools (引用稳定), 内部再 ?? [] 兜底, 避免每次渲染新数组
+  const rows = useMemo(() => {
+    const arr = m.tools ?? [];
+    const map = new Map<string, { tool: string; detail: string; start: number; end: number }>();
+    arr.forEach((t, i) => {
+      const k = t.toolCallId || `${t.tool}-${i}`;
+      const ts = t.ts ?? 0;
+      const end = t.endTs ?? ts;
+      const r = map.get(k) ?? { tool: t.tool, detail: "", start: ts, end };
+      if (!r.start || (ts && ts < r.start)) r.start = ts;
+      if (end > r.end) r.end = end;
+      if (t.detail) r.detail = t.detail;
+      map.set(k, r);
+    });
+    return [...map.values()]
+      .sort((a, b) => a.start - b.start)
+      .map((r) => ({ ...r, ms: Math.max(0, r.end - r.start) }));
+  }, [m.tools]);
+
+  if (!tools.length && !m.streaming) return null;
+  const last = tools[tools.length - 1];
+  const unique = [...new Set(tools.map((t) => t.tool))].join("、") || "任务";
+  const elapsed = m.finishedAt && m.startedAt
+    ? Math.round((m.finishedAt - m.startedAt) / 1000)
+    : Math.max(0, Math.round((Date.now() - (m.startedAt ?? Date.now())) / 1000));
+  const detail = last?.detail ? ` · ${last.detail}` : "";
+
+  const fmtTime = (n: number) =>
+    n ? new Date(n).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
+
+  return (
+    <div ref={wrapRef} className="mb-1.5">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => e.key === "Enter" && setOpen((v) => !v)}
+        title={rows.length ? "点击展开/收起工具明细" : undefined}
+        className="flex min-h-[22px] cursor-pointer select-none items-center gap-2 rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted hover:bg-black/[0.05]"
+      >
+        <span
+          className={`shrink-0 rounded px-1.5 py-px font-medium ${
+            m.streaming ? "bg-accent-soft text-accent-deep" : "bg-black/[0.04] text-ink-muted"
+          }`}
+        >
+          {m.streaming ? "正在执行" : "已处理"}
+        </span>
+        <span className="min-w-0 flex-1 truncate">
+          {m.streaming ? (last ? `${last.tool}${detail ? ` · ${detail}` : ""}` : "任务运行中…") : `${unique}${detail ? ` · ${detail}` : ""}`}
+        </span>
+        <span className="shrink-0 tabular-nums">{elapsed}s</span>
+        {rows.length > 0 ? <IconChevron open={open} /> : null}
+      </div>
+      {open && rows.length > 0 ? (
+        <div className="mt-1 max-h-[200px] overflow-y-auto rounded-md border border-line bg-white/60">
+          <table className="w-full border-collapse text-[11px]">
+            <thead className="sticky top-0 bg-surface">
+              <tr className="text-ink-faint">
+                <th className="whitespace-nowrap px-2 py-1 text-left font-medium">时间</th>
+                <th className="px-2 py-1 text-left font-medium">工具</th>
+                <th className="px-2 py-1 text-left font-medium">参数</th>
+                <th className="whitespace-nowrap px-2 py-1 text-right font-medium">耗时</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className="border-t border-line/60">
+                  <td className="whitespace-nowrap px-2 py-1 tabular-nums">{fmtTime(r.start)}</td>
+                  <td className="whitespace-nowrap px-2 py-1 font-medium text-ink">{r.tool}</td>
+                  <td className="max-w-[260px] truncate px-2 py-1" title={r.detail}>
+                    {r.detail || "—"}
+                  </td>
+                  <td className="whitespace-nowrap px-2 py-1 text-right tabular-nums">
+                    {r.ms > 0 ? `${(r.ms / 1000).toFixed(1)}s` : "…"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+const MD_LOCAL_RE = /^(\/Users\/|\/home\/|\/private\/|\/tmp\/|file:\/\/)/;
+const MD_IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif)(\?|#|$)/i;
+const MD_VID_EXT_RE = /\.(mp4|webm|mov|m3u8)(\?|#|$)/i;
+
+/** 相对路径相对 baseDir 解析为绝对路径 (仅本机预览用) */
+function resolveAgainstDir(baseDir: string, rel: string): string {
+  const cleaned = rel.replace(/^file:\/\//, "");
+  if (cleaned.startsWith("/")) return cleaned;
+  const stack = baseDir.replace(/\/$/, "").split("/").filter(Boolean);
+  for (const seg of cleaned.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") stack.pop();
+    else stack.push(seg);
+  }
+  return `/${stack.join("/")}`;
+}
+
+function isMediaLikeUrl(u: string): boolean {
+  if (/^data:image\//i.test(u)) return true;
+  if (MD_IMG_EXT_RE.test(u) || MD_VID_EXT_RE.test(u)) return true;
+  // 绝对本地路径无扩展名时仍交给 /api/local-file 判定
+  return MD_LOCAL_RE.test(u) || (u.startsWith("/") && !/^https?:/i.test(u));
+}
+
+/** 图片加载失败时回退为可点击链接 (常见: ![alt](文章页 URL)) */
+function MdImg({
+  src,
+  alt,
+  title,
+  href,
+  localPath,
+  onOpenLink,
+  style,
+}: {
+  src: string;
+  alt: string;
+  title?: string;
+  href: string;
+  localPath?: string;
+  onOpenLink?: (raw: string) => void;
+  style?: CSSProperties;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <a
+        href={href}
+        onClick={(e) => {
+          if (onOpenLink) {
+            e.preventDefault();
+            onOpenLink(href);
+          }
+        }}
+        target="_blank"
+        rel="noreferrer"
+        className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[0.92em] text-accent no-underline"
+        title={href}
+      >
+        <span className="shrink-0 text-ink-faint">图</span>
+        <span className="min-w-0 flex-1 truncate font-medium text-accent-deep">{alt || "查看原图/来源"}</span>
+        <span className="max-w-[40%] shrink-0 truncate font-mono text-[0.85em] text-ink-faint">{href}</span>
+      </a>
+    );
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- 本地/外链媒体预览, 非优化静态资源
+    <img
+      src={src}
+      alt={alt}
+      title={title || undefined}
+      data-local-path={localPath || undefined}
+      loading="lazy"
+      onError={() => setFailed(true)}
+      style={style}
+      className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
+    />
+  );
+}
+
+/** 行内解析: **粗体** `代码` [链接](url) ![图片/视频](url "title")
+ *  + HTML 白名单直通: <video> / <img> (属性+协议双重校验)
+ *  + 裸 http(s) URL 自动转可点击链接
+ *  + 本地 markdown 路径 → 可点击按钮 (点击内联预览)
+ *  + 「📄 文件名.md」纯文本 → 用 docHints (会话工作目录) 尝试定位并预览
+ *  + 相对路径图片相对 baseDir (文档目录 / 工作目录) 解析
+ *  + 非媒体 URL 的 ![alt](url) 降级为可点来源链接, 避免裂图 */
+function Inline({
+  text,
+  onOpenDoc,
+  docHints,
+  onOpenLink,
+  baseDir,
+}: {
+  text: string;
+  onOpenDoc?: (path: string, title: string) => void;
+  docHints?: string[];
+  onOpenLink?: (raw: string) => void;
+  baseDir?: string;
+}) {
+  const parts = text.split(
+    /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|https?:\/\/[^\s<]+)/g,
+  );
+  const out: ReactNode[] = [];
+  parts.forEach((p, i) => {
+    // 安全: 协议白名单 + 标签/属性白名单
+    const mediaBase = baseDir ?? docHints?.[0];
+    const safeUrl = (u: string) => /^(https?:\/\/|data:image\/)/i.test(u) || MD_LOCAL_RE.test(u) || u.startsWith("/");
+    const toSrc = (u: string) => {
+      const cleaned = u.replace(/^file:\/\//, "");
+      if (MD_LOCAL_RE.test(u) || (cleaned.startsWith("/") && !/^https?:/i.test(u))) {
+        return `/api/local-file?path=${encodeURIComponent(cleaned)}`;
+      }
+      return u;
+    };
+    const resolveSrc = (raw: string): string => {
+      const t = raw.trim();
+      if (/^(https?:\/\/|data:)/i.test(t) || MD_LOCAL_RE.test(t) || t.startsWith("/")) {
+        return t.replace(/^file:\/\//, "");
+      }
+      if (mediaBase && !t.includes("://")) return resolveAgainstDir(mediaBase, t);
+      return t;
+    };
+
+    const vtag = p.match(/^<video([^>]*)>[\s\S]*?<\/video>$/i);
+    if (vtag) {
+      const attrs = vtag[1];
+      const src = resolveSrc(attrs.match(/src="([^"]+)"/)?.[1] ?? "");
+      const width = attrs.match(/width="?(\d+)"?/)?.[1];
+      const height = attrs.match(/height="?(\d+)"?/)?.[1];
+      const controls = /\bcontrols\b/i.test(attrs);
+      if (src && safeUrl(src)) {
+        out.push(
+          <video
+            key={i}
+            src={toSrc(src)}
+            controls={controls || true}
+            playsInline
+            style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 320 }}
+            className="my-1 rounded-lg border border-line bg-black/5"
+          />,
+        );
+        return;
+      }
+      out.push(<span key={i}>{p}</span>);
+      return;
+    }
+
+    const htag = p.match(/^<img([^>]*)\/?>$/i);
+    if (htag) {
+      const attrs = htag[1];
+      const rawSrc = attrs.match(/src="([^"]+)"/)?.[1] ?? "";
+      const src = resolveSrc(rawSrc);
+      const width = attrs.match(/width="?(\d+)"?/)?.[1];
+      const height = attrs.match(/height="?(\d+)"?/)?.[1];
+      const alt = attrs.match(/alt="([^"]*)"/)?.[1] ?? "";
+      if (src && safeUrl(src) && isMediaLikeUrl(src)) {
+        out.push(
+          <MdImg
+            key={i}
+            src={toSrc(src)}
+            alt={alt}
+            href={rawSrc || src}
+            localPath={src.startsWith("/") && !/^https?:/i.test(src) ? src : undefined}
+            onOpenLink={onOpenLink}
+            style={{ width: width ? `${width}px` : "100%", maxHeight: height ? `${height}px` : 360 }}
+          />,
+        );
+        return;
+      }
+      if (src && /^https?:\/\//i.test(src)) {
+        out.push(
+          <MdImg key={i} src={src} alt={alt} href={src} onOpenLink={onOpenLink} />,
+        );
+        return;
+      }
+      out.push(<span key={i}>{p}</span>);
+      return;
+    }
+
+    if (p.startsWith("**") && p.endsWith("**") && p.length > 4) {
+      out.push(<strong key={i}>{p.slice(2, -2)}</strong>);
+      return;
+    }
+    if (p.startsWith("`") && p.endsWith("`") && p.length > 2) {
+      out.push(
+        <code key={i} className="rounded bg-black/[0.06] px-1 py-0.5 text-[0.92em]">
+          {p.slice(1, -1)}
+        </code>,
+      );
+      return;
+    }
+
+    // 图片语法: ![alt](url) / ![alt](url "title")
+    const img = p.match(/^!\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)$/);
+    if (img) {
+      const alt = img[1];
+      const rawSrc = img[2].trim();
+      const src = resolveSrc(rawSrc);
+      const title = img[3] ?? "";
+      // 文章页 / 无扩展名外链: 不当作 <img>, 直接给可点来源
+      if (/^https?:\/\//i.test(src) && !isMediaLikeUrl(src)) {
+        out.push(
+          <a
+            key={i}
+            href={src}
+            onClick={(e) => {
+              if (onOpenLink) {
+                e.preventDefault();
+                onOpenLink(src);
+              }
+            }}
+            target="_blank"
+            rel="noreferrer"
+            className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[0.92em] text-accent no-underline"
+            title={title || src}
+          >
+            <span className="shrink-0 text-ink-faint">链</span>
+            <span className="min-w-0 flex-1 truncate font-medium text-accent-deep">{alt || "查看来源"}</span>
+            <span className="max-w-[40%] shrink-0 truncate font-mono text-[0.85em] text-ink-faint">{src}</span>
+          </a>,
+        );
+        return;
+      }
+      if (safeUrl(src)) {
+        if (MD_VID_EXT_RE.test(src)) {
+          out.push(
+            <video key={i} src={toSrc(src)} controls playsInline className="my-1 max-h-[320px] w-full rounded-lg border border-line bg-black/5">
+              <p className="px-2 py-1 text-[11.5px] text-ink-muted">视频无法预览: {alt || src}</p>
+            </video>,
+          );
+        } else {
+          out.push(
+            <MdImg
+              key={i}
+              src={toSrc(src)}
+              alt={alt}
+              title={title || undefined}
+              href={rawSrc}
+              localPath={src.startsWith("/") && !/^https?:/i.test(src) ? src : undefined}
+              onOpenLink={onOpenLink}
+            />,
+          );
+        }
+        return;
+      }
+      out.push(<span key={i}>{alt}</span>);
+      return;
+    }
+
+    const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (m && safeUrl(m[2])) {
+      const target = m[2].trim();
+      // 本地 markdown 文档: 不跳转, 点击内联预览
+      if (MD_LOCAL_RE.test(target) && /\.(md|markdown)(\?|#|$)/i.test(target)) {
+        out.push(
+          <button
+            key={i}
+            type="button"
+            onClick={() => onOpenDoc?.(target.replace(/^file:\/\//, ""), m[1])}
+            title={target}
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[0.92em] font-medium text-accent-deep transition-colors hover:bg-accent/15"
+          >
+            <span className="truncate">📄 {m[1]}</span>
+          </button>,
+        );
+        return;
+      }
+      out.push(
+        <a
+          key={i}
+          href={toSrc(m[2])}
+          onClick={(e) => {
+            if (onOpenLink) {
+              e.preventDefault();
+              onOpenLink(m[2]);
+            }
+          }}
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent underline decoration-accent/40 underline-offset-2"
+        >
+          {m[1]}
+        </a>,
+      );
+      return;
+    }
+
+    // 「📄 文件名.md」纯文本: 结合 docHints (会话工作目录) 尝试定位
+    const docHint = p.match(/^📄\s*([^\s「」()]+\.md|\.markdown)$/i);
+    if (docHint && onOpenDoc && docHints?.length) {
+      const name = docHint[1];
+      const full = `${docHints[0].replace(/\/$/, "")}/${name}`;
+      out.push(
+        <button
+          key={i}
+          type="button"
+          onClick={() => onOpenDoc(full, name)}
+          title={`点击预览 ${full}`}
+          className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[0.92em] font-medium text-accent-deep transition-colors hover:bg-accent/15"
+        >
+          <span className="truncate">{p}</span>
+        </button>,
+      );
+      return;
+    }
+
+    // 裸 URL: 自动可点击
+    if (/^https?:\/\//i.test(p)) {
+      out.push(
+        <a
+          key={i}
+          href={p}
+          onClick={(e) => {
+            if (onOpenLink) {
+              e.preventDefault();
+              onOpenLink(p);
+            }
+          }}
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent underline decoration-accent/40 underline-offset-2"
+        >
+          {p}
+        </a>,
+      );
+      return;
+    }
+
+    const lines = p.split("\n");
+    lines.forEach((ln, li) => {
+      if (li > 0) out.push(<br key={`br-${i}-${li}`} />);
+      out.push(<span key={`${i}-${li}`}>{ln}</span>);
+    });
+  });
+  return <>{out}</>;
+}
+
+/** 轻量 Markdown 渲染: 标题/表格/列表/引用/代码块/段落/行内格式 (WorkBuddy 风格) */
+function renderMd(
+  md: string,
+  onOpenDoc?: (path: string, title: string) => void,
+  docHints?: string[],
+  onOpenLink?: (raw: string) => void,
+  baseDir?: string,
+): ReactNode[] {
+  const lines = md.replace(/\r/g, "").split("\n");
+  const out: ReactNode[] = [];
+  let i = 0;
+  const parseRow = (r: string) => r.split("|").slice(1, -1).map((x) => x.trim());
+  const inlineProps = { onOpenDoc, docHints, onOpenLink, baseDir };
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      const code: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) {
+        code.push(lines[i]);
+        i++;
+      }
+      i++;
+      out.push(
+        <pre key={`pre-${i}`} className="my-1 overflow-x-auto rounded-lg bg-black/[0.05] p-2.5 text-[0.92em] leading-relaxed">
+          {code.join("\n")}
+        </pre>,
+      );
+      continue;
+    }
+    if (trimmed.startsWith("|") && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+      const header = parseRow(lines[i]);
+      let j = i + 2;
+      const rows: string[][] = [];
+      while (j < lines.length && lines[j].trim().startsWith("|")) {
+        rows.push(parseRow(lines[j]));
+        j++;
+      }
+      out.push(
+        <div key={`tbl-${i}`} className="my-1 overflow-x-auto">
+          <table className="w-full border-collapse text-[0.96em]">
+            <thead>
+              <tr>
+                {header.map((h, hi) => (
+                  <th key={hi} className="border border-line bg-black/[0.03] px-2.5 py-1.5 text-left font-medium">
+                    <Inline text={h} {...inlineProps} />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, ri) => (
+                <tr key={ri}>
+                  {r.map((c, ci) => (
+                    <td key={ci} className="border border-line px-2.5 py-1.5 align-top leading-relaxed">
+                      <Inline text={c} {...inlineProps} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      i = j;
+      continue;
+    }
+    if (/^#{1,3} /.test(trimmed)) {
+      const level = trimmed.match(/^#+/)![0].length;
+      const text = trimmed.replace(/^#+\s*/, "");
+      out.push(
+        level <= 2 ? (
+          <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[1.1em] font-bold text-ink">
+            <span className="h-3 w-[3px] rounded-full bg-accent" />
+            <Inline text={text} {...inlineProps} />
+          </h4>
+        ) : (
+          <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[1.02em] font-semibold text-ink">
+            <Inline text={text} {...inlineProps} />
+          </h5>
+        ),
+      );
+      i++;
+      continue;
+    }
+    if (/^\s*[-*] /.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*[-*] /.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-*] /, ""));
+        i++;
+      }
+      out.push(
+        <ul key={`ul-${i}`} className="my-1 list-disc space-y-0.5 pl-4">
+          {items.map((it, ii) => (
+            <li key={ii}>
+              <Inline text={it} {...inlineProps} />
+            </li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+    if (/^\s*\d+\. /.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*\d+\. /.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+\. /, ""));
+        i++;
+      }
+      out.push(
+        <ol key={`ol-${i}`} className="my-1 list-decimal space-y-0.5 pl-4">
+          {items.map((it, ii) => (
+            <li key={ii}>
+              <Inline text={it} {...inlineProps} />
+            </li>
+          ))}
+        </ol>,
+      );
+      continue;
+    }
+    if (trimmed.startsWith(">")) {
+      const quote: string[] = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) {
+        quote.push(lines[i].trim().replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(
+        <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[0.96em] text-ink-muted">
+          {quote.map((q, qi) => (
+            <div key={qi}>
+              <Inline text={q} {...inlineProps} />
+            </div>
+          ))}
+        </blockquote>,
+      );
+      continue;
+    }
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+    const para: string[] = [line];
+    let j = i + 1;
+    while (j < lines.length) {
+      const t = lines[j].trim();
+      if (!t || t.startsWith("|") || t.startsWith("```") || /^#{1,3} /.test(t) || /^\s*[-*] /.test(t) || /^\s*\d+\. /.test(t) || t.startsWith(">")) break;
+      para.push(lines[j]);
+      j++;
+    }
+    out.push(
+      <p key={`p-${i}`} className="my-1 leading-relaxed">
+        <Inline text={para.join("\n")} {...inlineProps} />
+      </p>,
+    );
+    i = j;
+  }
+  return out;
+}
