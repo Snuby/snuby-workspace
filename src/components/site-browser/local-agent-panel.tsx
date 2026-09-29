@@ -190,6 +190,8 @@ type Msg = {
   thinking?: boolean;
   tools?: ToolEv[];
   error?: boolean;
+  /** 超时等附属说明; 有正文时不覆盖 text, 单独展示红条 */
+  errorNote?: string;
   interrupted?: boolean;
   startedAt?: number;
   finishedAt?: number;
@@ -331,11 +333,19 @@ export default function LocalAgentPanel() {
     ac: AbortController;
     /** 仍在全局队列等待 (尚未收到 running) */
     queued?: boolean;
+    /** 超时等附属说明 (保留已流出正文) */
+    errorNote?: string;
   };
   const runsRef = useRef<Map<string, RunState>>(new Map());
   /** 正在预览的本地 markdown 文档 (点击 📄 打开) */
   const [preview, setPreview] = useState<DocPreview | null>(null);
-  const [linkView, setLinkView] = useState<LinkView | null>(null);
+  /** 预览导航: stack + index, 支持前进/后退 */
+  const [linkNav, setLinkNav] = useState<{ stack: LinkView[]; index: number }>({ stack: [], index: 0 });
+  const linkView = linkNav.stack.length
+    ? linkNav.stack[Math.min(linkNav.index, linkNav.stack.length - 1)] ?? null
+    : null;
+  const previewCanBack = linkNav.index > 0;
+  const previewCanForward = linkNav.index < linkNav.stack.length - 1;
   const [extraView, setExtraView] = useState<{ title: string; items: { title: string; text: string }[] } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; src: string; name: string } | null>(null);
   const [ctxToast, setCtxToast] = useState<string | null>(null);
@@ -516,23 +526,54 @@ export default function LocalAgentPanel() {
   useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
 
   /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
-  const openDoc = useCallback((path: string, title: string) => {
-    // 文件预览: 弹窗展示 (不再在消息流末尾插入卡片)
-    setLinkView({ kind: "file", path, title, loading: true });
+  const openDoc = useCallback((path: string, title: string, opts?: { push?: boolean }) => {
+    const next: LinkView = { kind: "file", path, title, loading: true };
+    setLinkNav((prev) => {
+      if (!opts?.push || !prev.stack.length) return { stack: [next], index: 0 };
+      const cur = Math.min(prev.index, prev.stack.length - 1);
+      return { stack: [...prev.stack.slice(0, cur + 1), next], index: cur + 1 };
+    });
   }, []);
 
   /** 链接点击: http(s) → webview 弹窗; 本地路径 → 文件弹窗 */
-  const openLink = useCallback((raw: string) => {
+  const openLink = useCallback((raw: string, opts?: { push?: boolean }) => {
     const url = raw.replace(/^file:\/\//, "");
+    let next: LinkView | null = null;
     if (/^https?:\/\//i.test(url)) {
-      setLinkView({ kind: "url", url, title: url });
+      next = { kind: "url", url, title: url };
     } else if (/^(\/Users\/|\/home\/|\/private\/|\/tmp\/)/.test(url)) {
       const name = url.split("/").pop() ?? url;
-      setLinkView({ kind: "file", path: url, title: name, loading: true });
+      next = { kind: "file", path: url, title: name, loading: true };
     } else {
       window.open(url, "_blank", "noopener");
+      return;
     }
+    setLinkNav((prev) => {
+      if (!opts?.push || !prev.stack.length) return { stack: [next!], index: 0 };
+      const cur = Math.min(prev.index, prev.stack.length - 1);
+      return { stack: [...prev.stack.slice(0, cur + 1), next!], index: cur + 1 };
+    });
   }, []);
+
+  /** 预览内跳转: 截断前进历史后压入 */
+  const openDocInPreview = useCallback(
+    (path: string, title: string) => openDoc(path, title, { push: true }),
+    [openDoc],
+  );
+  const openLinkInPreview = useCallback(
+    (raw: string) => openLink(raw, { push: true }),
+    [openLink],
+  );
+  const previewGoBack = useCallback(() => {
+    setLinkNav((prev) => ({ ...prev, index: Math.max(0, prev.index - 1) }));
+  }, []);
+  const previewGoForward = useCallback(() => {
+    setLinkNav((prev) => ({
+      ...prev,
+      index: Math.min(prev.stack.length - 1, prev.index + 1),
+    }));
+  }, []);
+  const closePreview = useCallback(() => setLinkNav({ stack: [], index: 0 }), []);
 
   /** 「📄 文件名」补偿定位: 用当前会话工作目录做候选 (产物都写在工作区) */
   const docHints = useMemo(() => {
@@ -1209,6 +1250,7 @@ export default function LocalAgentPanel() {
                 tools: run.tools,
                 thinking: run.thinking,
                 error: run.error,
+                errorNote: run.errorNote,
                 streaming: run.streaming,
               }
             : m,
@@ -1243,6 +1285,7 @@ export default function LocalAgentPanel() {
             detail?: string;
             toolCallId?: string;
             error?: string;
+            preserveText?: boolean;
             aheadTitle?: string | null;
             aheadKey?: string | null;
             requestId?: string | number;
@@ -1318,16 +1361,41 @@ export default function LocalAgentPanel() {
             update((r) => {
               r.streaming = false;
               r.thinking = false;
+              // 用户停止 / 排队取消: 灰标「已取消」, 不走红字异常
+              if (ev.stopReason === "cancelled") {
+                r.interrupted = true;
+                r.error = false;
+                r.errorNote = undefined;
+              }
             });
           } else if (ev.type === "error") {
             if (permAnsweredRef.current) {
               setPermAsk((p) => (p?.localSessionId === sid ? null : p));
             }
-            update((r) => {
-              r.streaming = false;
-              r.error = true;
-              r.text = ev.error ?? "任务执行失败";
-            });
+            const note = ev.error ?? "任务执行失败";
+            // 兼容旧流: 「任务已取消」当中断而非异常
+            if (note === "任务已取消") {
+              update((r) => {
+                r.streaming = false;
+                r.interrupted = true;
+                r.error = false;
+                r.errorNote = undefined;
+              });
+            } else {
+              update((r) => {
+                r.streaming = false;
+                r.error = true;
+                // 不活跃超时等: 保留已流出正文, 红条单独展示
+                if (ev.preserveText && r.text.trim()) {
+                  r.errorNote = note;
+                } else if (!r.text.trim()) {
+                  r.text = note;
+                  r.errorNote = undefined;
+                } else {
+                  r.errorNote = note;
+                }
+              });
+            }
           }
         }
       }
@@ -1365,6 +1433,7 @@ export default function LocalAgentPanel() {
                 text: run.text,
                 tools: run.tools,
                 error: run.error,
+                errorNote: run.errorNote,
                 interrupted: run.interrupted,
                 streaming: false,
                 thinking: false,
@@ -1374,8 +1443,11 @@ export default function LocalAgentPanel() {
         ),
       );
       if (run.interrupted) persist(sid, "assistant", { text: run.text, tools: run.tools, interrupted: true });
-      else if (run.error) persist(sid, "assistant", { text: run.text, tools: run.tools, error: true });
-      else if (run.text.trim()) persist(sid, "assistant", { text: run.text, tools: run.tools });
+      else if (run.error) {
+        const persistText =
+          run.text.trim() || run.errorNote || "任务执行失败";
+        persist(sid, "assistant", { text: persistText, tools: run.tools, error: true });
+      } else if (run.text.trim()) persist(sid, "assistant", { text: run.text, tools: run.tools });
       void (async () => {
         try {
           const ar = await fetch("/api/agent/audit", {
@@ -2011,23 +2083,40 @@ export default function LocalAgentPanel() {
                     </div>
                     <ToolStrip m={m} />
                     <div className="group flex items-start gap-1.5">
-                      <div
-                        className={`inline-block rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed ${
-                          m.error ? "border-up/40 text-up" : "text-ink"
-                        }`}
-                      >
-                      {m.error ? (
-                        m.text
-                      ) : m.text ? (
-                        <>
-                          {renderMd(m.text, openDoc, docHints, openLink)}
-                          {m.streaming ? <span className="animate-pulse">▍</span> : null}
-                        </>
-                      ) : m.streaming ? (
-                        <span className="animate-pulse">▍</span>
-                      ) : (
-                        "…"
-                      )}
+                      <div className="inline-block max-w-full rounded-xl rounded-tl-sm border border-line bg-surface px-3.5 py-2.5 text-[13px] leading-relaxed text-ink">
+                      {(() => {
+                        const errOnly =
+                          !!m.error &&
+                          !m.errorNote &&
+                          /^(任务超时|不活跃超时|任务执行失败)/.test((m.text ?? "").trim());
+                        const body = errOnly ? "" : m.text;
+                        const banner =
+                          m.errorNote ||
+                          (errOnly ? m.text : m.error && body.trim() ? "本轮异常结束（已保留上方内容）" : null);
+                        return (
+                          <>
+                            {body ? (
+                              <>
+                                {renderMd(body, openDoc, docHints, openLink)}
+                                {m.streaming ? <span className="animate-pulse">▍</span> : null}
+                              </>
+                            ) : m.streaming ? (
+                              <span className="animate-pulse">▍</span>
+                            ) : !banner ? (
+                              "…"
+                            ) : null}
+                            {banner ? (
+                              <div
+                                className={`rounded-md border border-up/40 bg-up-soft px-2.5 py-1.5 text-[12px] text-up ${
+                                  body.trim() ? "mt-2" : ""
+                                }`}
+                              >
+                                {banner}
+                              </div>
+                            ) : null}
+                          </>
+                        );
+                      })()}
                       </div>
                       <CopyBtn text={m.text} />
                     </div>
@@ -2361,11 +2450,22 @@ export default function LocalAgentPanel() {
       {linkView ? (
         <LinkPreviewModal
           view={linkView}
-          onClose={() => setLinkView(null)}
-          onOpenDoc={openDoc}
+          stack={linkNav.stack}
+          stackIndex={linkNav.index}
+          canGoBack={previewCanBack}
+          canGoForward={previewCanForward}
+          onBack={previewGoBack}
+          onForward={previewGoForward}
+          onJump={(i) => setLinkNav((prev) => ({ ...prev, index: Math.max(0, Math.min(i, prev.stack.length - 1)) }))}
+          onClose={closePreview}
+          onOpenDoc={openDocInPreview}
           docHints={docHints}
-          onOpenLink={openLink}
+          onOpenLink={openLinkInPreview}
           onCtxMenu={onCtxMenu}
+          onToast={(msg) => {
+            setCtxToast(msg);
+            window.setTimeout(() => setCtxToast(null), 2000);
+          }}
         />
       ) : null}
       {ctxMenu && (
@@ -2704,30 +2804,179 @@ function LocalImagePreview({
   );
 }
 
+function PreviewIconBtn({
+  title,
+  disabled,
+  onClick,
+  children,
+  className = "",
+}: {
+  title: string;
+  disabled?: boolean;
+  onClick?: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-black/5 hover:text-ink disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-muted ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** 前进/后退悬停: 展示可跳转的历史堆栈 */
+function NavHistoryHover({
+  label,
+  disabled,
+  items,
+  onStep,
+  onJump,
+  icon,
+}: {
+  label: string;
+  disabled?: boolean;
+  items: { index: number; title: string; location: string }[];
+  onStep?: () => void;
+  onJump: (index: number) => void;
+  icon: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+
+  const clear = () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+  };
+  const show = () => {
+    clear();
+    if (!disabled && items.length) setOpen(true);
+  };
+  const hide = () => {
+    clear();
+    timer.current = setTimeout(() => setOpen(false), 120);
+  };
+
+  useEffect(() => () => clear(), []);
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+    >
+      <PreviewIconBtn title={label} disabled={disabled} onClick={onStep}>
+        {icon}
+      </PreviewIconBtn>
+      {open && items.length > 0 ? (
+        <div
+          className="absolute left-0 top-full z-[70] mt-1 w-[280px] overflow-hidden rounded-lg border border-line bg-white py-1 shadow-xl"
+          onMouseEnter={show}
+          onMouseLeave={hide}
+        >
+          <div className="px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-ink-faint">
+            {label} · {items.length}
+          </div>
+          <div className="max-h-[240px] overflow-y-auto">
+            {items.map((it) => (
+              <button
+                key={`${it.index}-${it.location}`}
+                type="button"
+                onClick={() => {
+                  onJump(it.index);
+                  setOpen(false);
+                }}
+                className="flex w-full flex-col gap-0.5 px-2.5 py-1.5 text-left hover:bg-black/[0.04]"
+              >
+                <span className="truncate text-[12.5px] font-medium text-ink">{it.title}</span>
+                <span className="truncate font-mono text-[10px] text-ink-faint">{it.location}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type PreviewFontSize = "sm" | "md" | "lg";
+const PREVIEW_FONT_KEY = "snuby:preview-font-size";
+/** 基准字号; Markdown 标题/代码等用 em 相对缩放, 一并跟随 */
+const PREVIEW_FONT_PX: Record<PreviewFontSize, number> = { sm: 13, md: 15, lg: 17 };
+
 function LinkPreviewModal({
   view,
+  stack,
+  stackIndex,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
+  onJump,
   onClose,
   onOpenDoc,
   docHints,
   onOpenLink,
   onCtxMenu,
+  onToast,
 }: {
   view: LinkView;
+  stack: LinkView[];
+  stackIndex: number;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
+  onJump: (index: number) => void;
   onClose: () => void;
   onOpenDoc: (path: string, title: string) => void;
   docHints: string[];
   onOpenLink: (raw: string) => void;
   onCtxMenu?: (e: React.MouseEvent) => void;
+  onToast?: (msg: string) => void;
 }) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [copiedKind, setCopiedKind] = useState<"content" | "path" | null>(null);
+  const [fontSize, setFontSize] = useState<PreviewFontSize>(() => {
+    try {
+      const v = localStorage.getItem(PREVIEW_FONT_KEY);
+      if (v === "sm" || v === "md" || v === "lg") return v;
+    } catch {
+      /* ignore */
+    }
+    return "sm";
+  });
   const ext = view.kind === "file" ? extOf(view.path) : "";
   const isImg = PREVIEW_IMG_EXT.includes(ext);
   const isDoc = PREVIEW_DOC_EXT.includes(ext);
   const localFileUrl = (p: string) => `/api/local-file?path=${encodeURIComponent(p)}`;
+  const location = view.kind === "url" ? view.url : view.path;
+  const canCopyContent = view.kind === "file" && !isImg && !isDoc && !!text;
+  const basePx = PREVIEW_FONT_PX[fontSize];
+
+  const stackLoc = (v: LinkView) => (v.kind === "url" ? v.url : v.path);
+  // 后退列表: 当前之前的条目, 最近的在上
+  const backItems = stack
+    .slice(0, stackIndex)
+    .map((v, i) => ({ index: i, title: v.title, location: stackLoc(v) }))
+    .reverse();
+  // 前进列表: 当前之后, 最近的在上
+  const forwardItems = stack
+    .slice(stackIndex + 1)
+    .map((v, i) => ({ index: stackIndex + 1 + i, title: v.title, location: stackLoc(v) }));
+
   useEffect(() => {
     if (view.kind !== "file") return;
-    if (isImg || isDoc) return; // 图片/html/pdf 不走文本拉取
+    if (isImg || isDoc) return;
     let dead = false;
     setText(null);
     setErr(null);
@@ -2746,14 +2995,69 @@ function LinkPreviewModal({
     };
   }, [view, isImg, isDoc]);
 
-  // ESC 关闭
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        if (canGoBack && onBack) onBack();
+        else onClose();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "[") {
+        e.preventDefault();
+        if (canGoBack) onBack?.();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "]") {
+        e.preventDefault();
+        if (canGoForward) onForward?.();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, onBack, onForward, canGoBack, canGoForward]);
+
+  const setFont = (s: PreviewFontSize) => {
+    setFontSize(s);
+    try {
+      localStorage.setItem(PREVIEW_FONT_KEY, s);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const flashCopied = (kind: "content" | "path") => {
+    setCopiedKind(kind);
+    window.setTimeout(() => setCopiedKind(null), 1500);
+  };
+
+  const copyText = async (value: string, kind: "content" | "path") => {
+    try {
+      await navigator.clipboard.writeText(value);
+      flashCopied(kind);
+      onToast?.(kind === "content" ? "已复制内容" : "已复制路径");
+    } catch {
+      onToast?.("复制失败");
+    }
+  };
+
+  const revealInFinder = async () => {
+    if (view.kind !== "file") return;
+    try {
+      const r = await fetch("/api/agent/open-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: view.path }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      onToast?.("已在 Finder 中显示");
+    } catch (e) {
+      onToast?.(e instanceof Error ? e.message : "打开失败");
+    }
+  };
+
+  const openExternal = () => {
+    if (view.kind === "url") window.open(view.url, "_blank", "noopener");
+  };
 
   return (
     <div
@@ -2766,33 +3070,124 @@ function LinkPreviewModal({
         className="flex h-[82vh] w-[min(1100px,92vw)] flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-2xl"
         onContextMenu={onCtxMenu}
       >
-        <div className="flex items-center gap-2 border-b border-line bg-page px-3.5 py-2">
-          <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-ink">
-            {view.kind === "url" ? "链接 " : "文件 "}
-            {view.title}
-          </span>
-          {view.kind === "url" ? (
-            <span className="max-w-[280px] truncate font-mono text-[10.5px] text-ink-faint" title={view.url}>
-              {view.url}
+        <div className="shrink-0 border-b border-line bg-page px-2.5 py-1.5">
+          <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0.5">
+              <NavHistoryHover
+                label="后退"
+                disabled={!canGoBack}
+                items={backItems}
+                onStep={onBack}
+                onJump={onJump}
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                    <path d="M15 18l-6-6 6-6" />
+                  </svg>
+                }
+              />
+              <NavHistoryHover
+                label="前进"
+                disabled={!canGoForward}
+                items={forwardItems}
+                onStep={onForward}
+                onJump={onJump}
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                }
+              />
+            </div>
+
+            <div className="mx-1 h-4 w-px shrink-0 bg-line" />
+
+            <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink" title={location}>
+              {view.title}
             </span>
-          ) : (
-            <span className="max-w-[280px] truncate font-mono text-[10.5px] text-ink-faint" title={view.path}>
-              {view.path}
-            </span>
-          )}
-          <button
-            type="button"
-            title="关闭"
-            aria-label="关闭预览"
-            onClick={onClose}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
-              <path d="M6 6l12 12" />
-              <path d="M18 6L6 18" />
-            </svg>
-          </button>
+
+            <div className="flex items-center gap-0.5">
+              {/* 字号: 小 / 中 / 大 */}
+              <div className="mr-0.5 flex items-center rounded-md border border-line bg-white p-0.5">
+                {([
+                  ["sm", "小"],
+                  ["md", "中"],
+                  ["lg", "大"],
+                ] as const).map(([k, lab]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    title={`字号：${lab}`}
+                    aria-label={`字号${lab}`}
+                    aria-pressed={fontSize === k}
+                    onClick={() => setFont(k)}
+                    className={`h-6 min-w-[22px] rounded px-1 text-[11px] font-medium transition-colors ${
+                      fontSize === k ? "bg-accent-soft text-accent-deep" : "text-ink-faint hover:text-ink"
+                    }`}
+                  >
+                    {lab}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+
+              {/* 复制内容: 文档/文本图标 */}
+              <PreviewIconBtn
+                title={copiedKind === "content" ? "已复制" : "复制内容"}
+                disabled={!canCopyContent}
+                onClick={() => text && void copyText(text, "content")}
+              >
+                {copiedKind === "content" ? (
+                  <IconCheck className="h-3.5 w-3.5 text-down" />
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="8" y1="13" x2="16" y2="13" />
+                    <line x1="8" y1="17" x2="14" y2="17" />
+                  </svg>
+                )}
+              </PreviewIconBtn>
+              {/* 复制路径: 链接链图标 */}
+              <PreviewIconBtn
+                title={copiedKind === "path" ? "已复制" : view.kind === "url" ? "复制链接" : "复制路径"}
+                onClick={() => void copyText(location, "path")}
+              >
+                {copiedKind === "path" ? (
+                  <IconCheck className="h-3.5 w-3.5 text-down" />
+                ) : (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                  </svg>
+                )}
+              </PreviewIconBtn>
+              {view.kind === "file" ? (
+                <PreviewIconBtn title="在 Finder 中显示" onClick={() => void revealInFinder()}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                </PreviewIconBtn>
+              ) : (
+                <PreviewIconBtn title="在浏览器中打开" onClick={openExternal}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                    <polyline points="15 3 21 3 21 9" />
+                    <line x1="10" y1="14" x2="21" y2="3" />
+                  </svg>
+                </PreviewIconBtn>
+              )}
+              <div className="mx-0.5 h-4 w-px shrink-0 bg-line" />
+              <PreviewIconBtn title="关闭" onClick={onClose}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-4 w-4">
+                  <path d="M6 6l12 12" />
+                  <path d="M18 6L6 18" />
+                </svg>
+              </PreviewIconBtn>
+            </div>
+          </div>
         </div>
+
         <div className="min-h-0 flex-1 bg-white">
           {view.kind === "url" ? (
             <WebviewBox src={view.url} />
@@ -2810,12 +3205,15 @@ function LinkPreviewModal({
             </div>
           ) : ext === "jsonl" || ext === "log" ? (
             <div className="h-full overflow-y-auto px-4 py-3">
-              <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed text-ink">
+              <pre
+                className="whitespace-pre-wrap break-all font-mono leading-relaxed text-ink"
+                style={{ fontSize: `${basePx * 0.92}px` }}
+              >
                 {prettyJsonl(text)}
               </pre>
             </div>
           ) : (
-            <div className="h-full overflow-y-auto px-4 py-3 text-[13px] leading-relaxed text-ink">
+            <div className="h-full overflow-y-auto px-4 py-3 leading-relaxed text-ink" style={{ fontSize: `${basePx}px` }}>
               {renderMd(
                 text,
                 onOpenDoc,
@@ -2942,8 +3340,15 @@ function CtlSelect({
 /** 工具信息条 (WorkBuddy 风格): 聚合展示工具执行状态与耗时, 可点击展开明细列表 */
 function ToolStrip({ m }: { m: Msg }) {
   const [open, setOpen] = useState(false);
+  const [, setTick] = useState(0);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   useClickOutside(wrapRef, open, () => setOpen(false));
+  // 运行中每秒刷新耗时, 避免长时间无 tool 事件时秒数停住
+  useEffect(() => {
+    if (!m.streaming) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [m.streaming]);
   const tools = m.tools ?? [];
 
   // 按 toolCallId 聚合: 起始时间/结束时间/工具/参数, 按开始时间排序
@@ -3087,12 +3492,12 @@ function MdImg({
         }}
         target="_blank"
         rel="noreferrer"
-        className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[12px] text-accent no-underline"
+        className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[0.92em] text-accent no-underline"
         title={href}
       >
         <span className="shrink-0 text-ink-faint">图</span>
         <span className="min-w-0 flex-1 truncate font-medium text-accent-deep">{alt || "查看原图/来源"}</span>
-        <span className="max-w-[40%] shrink-0 truncate font-mono text-[10.5px] text-ink-faint">{href}</span>
+        <span className="max-w-[40%] shrink-0 truncate font-mono text-[0.85em] text-ink-faint">{href}</span>
       </a>
     );
   }
@@ -3217,7 +3622,7 @@ function Inline({
     }
     if (p.startsWith("`") && p.endsWith("`") && p.length > 2) {
       out.push(
-        <code key={i} className="rounded bg-black/[0.06] px-1 py-0.5 text-[12px]">
+        <code key={i} className="rounded bg-black/[0.06] px-1 py-0.5 text-[0.92em]">
           {p.slice(1, -1)}
         </code>,
       );
@@ -3245,12 +3650,12 @@ function Inline({
             }}
             target="_blank"
             rel="noreferrer"
-            className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[12px] text-accent no-underline"
+            className="my-1 flex items-center gap-2 rounded-lg border border-line bg-black/[0.02] px-2.5 py-2 text-[0.92em] text-accent no-underline"
             title={title || src}
           >
             <span className="shrink-0 text-ink-faint">链</span>
             <span className="min-w-0 flex-1 truncate font-medium text-accent-deep">{alt || "查看来源"}</span>
-            <span className="max-w-[40%] shrink-0 truncate font-mono text-[10.5px] text-ink-faint">{src}</span>
+            <span className="max-w-[40%] shrink-0 truncate font-mono text-[0.85em] text-ink-faint">{src}</span>
           </a>,
         );
         return;
@@ -3292,7 +3697,7 @@ function Inline({
             type="button"
             onClick={() => onOpenDoc?.(target.replace(/^file:\/\//, ""), m[1])}
             title={target}
-            className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[12px] font-medium text-accent-deep transition-colors hover:bg-accent/15"
+            className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[0.92em] font-medium text-accent-deep transition-colors hover:bg-accent/15"
           >
             <span className="truncate">📄 {m[1]}</span>
           </button>,
@@ -3330,7 +3735,7 @@ function Inline({
           type="button"
           onClick={() => onOpenDoc(full, name)}
           title={`点击预览 ${full}`}
-          className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[12px] font-medium text-accent-deep transition-colors hover:bg-accent/15"
+          className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[0.92em] font-medium text-accent-deep transition-colors hover:bg-accent/15"
         >
           <span className="truncate">{p}</span>
         </button>,
@@ -3394,7 +3799,7 @@ function renderMd(
       }
       i++;
       out.push(
-        <pre key={`pre-${i}`} className="my-1 overflow-x-auto rounded-lg bg-black/[0.05] p-2.5 text-[12px] leading-relaxed">
+        <pre key={`pre-${i}`} className="my-1 overflow-x-auto rounded-lg bg-black/[0.05] p-2.5 text-[0.92em] leading-relaxed">
           {code.join("\n")}
         </pre>,
       );
@@ -3410,7 +3815,7 @@ function renderMd(
       }
       out.push(
         <div key={`tbl-${i}`} className="my-1 overflow-x-auto">
-          <table className="w-full border-collapse text-[12.5px]">
+          <table className="w-full border-collapse text-[0.96em]">
             <thead>
               <tr>
                 {header.map((h, hi) => (
@@ -3442,12 +3847,12 @@ function renderMd(
       const text = trimmed.replace(/^#+\s*/, "");
       out.push(
         level <= 2 ? (
-          <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[14px] font-bold text-ink">
+          <h4 key={`h-${i}`} className="mb-1 mt-2.5 flex items-center gap-1.5 text-[1.1em] font-bold text-ink">
             <span className="h-3 w-[3px] rounded-full bg-accent" />
             <Inline text={text} {...inlineProps} />
           </h4>
         ) : (
-          <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[13px] font-semibold text-ink">
+          <h5 key={`h-${i}`} className="mb-0.5 mt-2 text-[1.02em] font-semibold text-ink">
             <Inline text={text} {...inlineProps} />
           </h5>
         ),
@@ -3496,7 +3901,7 @@ function renderMd(
         i++;
       }
       out.push(
-        <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[12.5px] text-ink-muted">
+        <blockquote key={`q-${i}`} className="my-1 border-l-2 border-accent/40 pl-2.5 text-[0.96em] text-ink-muted">
           {quote.map((q, qi) => (
             <div key={qi}>
               <Inline text={q} {...inlineProps} />

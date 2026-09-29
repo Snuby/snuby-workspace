@@ -17,6 +17,7 @@ import path from "node:path";
 import {
   clearAllGatewayBindings,
   getAgentPreference,
+  getInactivityTimeoutMs,
   getSession,
   patchAgentPreference,
   updateSessionGateway,
@@ -1490,7 +1491,7 @@ export async function injectSessionSetup(
     await prompt(text, () => {}, {
       acpSessionId: acpSid,
       localSessionId,
-      timeoutMs: 45_000,
+      absoluteTimeoutMs: 45_000,
       bypassGlobalQueue: opts.bypassGlobalQueue,
       // 注入约定无 UI: 自动放行工具权限, 避免卡死
       autoAllowPermissions: true,
@@ -1502,16 +1503,25 @@ export async function injectSessionSetup(
 }
 
 /** session/prompt: 流式执行, 通过 onEvent 回调逐事件推送。
- *  默认进全局串行队列; bypassGlobalQueue=true 时由调用方持锁 (activate+prompt 合并场景)。 */
+ *  默认进全局串行队列; bypassGlobalQueue=true 时由调用方持锁 (activate+prompt 合并场景)。
+ *  超时策略: 默认「不活跃超时」(距上一次网关响应); 总时长不封顶, 仅用户停止或硬 absoluteTimeoutMs。 */
 export async function prompt(
   text: string,
   onEvent: (e: PromptEvent) => void,
   opts: {
+    /**
+     * 不活跃超时 (ms)。缺省读偏好 (默认 10min); 0 = 禁用。
+     * 任意网关响应 (工具/正文/权限/用量等) 都会重置计时。
+     */
+    inactivityTimeoutMs?: number;
+    /** 绝对硬超时 (ms); 仅后台注入等短任务使用。与不活跃超时可并存, 先到先触发。 */
+    absoluteTimeoutMs?: number;
+    /** @deprecated 请用 absoluteTimeoutMs / inactivityTimeoutMs */
     timeoutMs?: number;
     acpSessionId?: string;
     cwd?: string;
     localSessionId?: string;
-    /** 任务超时(网关侧可能仍在执行)时回调: 前端可立即提示, 服务端继续吞流直到自然结束 */
+    /** 不活跃/硬超时触发时回调: 前端可立即提示, 服务端继续吞流直到自然结束 */
     onTimeout?: () => void;
     /** 调用方已持 withGlobalAgentLock 时置 true, 避免嵌套入队死锁 */
     bypassGlobalQueue?: boolean;
@@ -1527,11 +1537,20 @@ export async function prompt(
       const sessionId = await ensureSessionForOn(cs, opts.acpSessionId, opts.cwd);
       if (consumeCancelled(cs, sessionId)) throw new Error("任务已取消");
       cs.running = true;
-      const timeoutMs = opts.timeoutMs ?? 300_000;
+      // 兼容旧 timeoutMs (= 绝对超时); 用户任务走不活跃超时
+      const absoluteMs =
+        opts.absoluteTimeoutMs ??
+        (opts.inactivityTimeoutMs === undefined && opts.timeoutMs != null ? opts.timeoutMs : undefined);
+      const inactivityMs =
+        opts.inactivityTimeoutMs !== undefined
+          ? opts.inactivityTimeoutMs
+          : absoluteMs != null
+            ? 0
+            : getInactivityTimeoutMs();
       const id = Date.now();
       const toolUrlAcc = new Map<string, string>();
       acpLog(
-        `prompt start local=${key} acp=${sessionId} rpc=${id} timeoutMs=${timeoutMs} autoAllow=${!!opts.autoAllowPermissions} textLen=${text.length}`,
+        `prompt start local=${key} acp=${sessionId} rpc=${id} inactivityMs=${inactivityMs} absoluteMs=${absoluteMs ?? "-"} autoAllow=${!!opts.autoAllowPermissions} textLen=${text.length}`,
       );
       try {
         const res = await acpPost(cs, {
@@ -1542,25 +1561,58 @@ export async function prompt(
         });
         if (!res.ok) throw new Error(`prompt HTTP ${res.status}`);
         await new Promise<void>((resolve, reject) => {
-          // 防御性吞流: cancel 语义不保证 (见 capability 复测); 超时后丢弃转发直至自然结束
+          // 防御性吞流: cancel 语义不保证; 超时后丢弃转发直至自然结束
           let discarded = false;
+          let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+          let absoluteTimer: ReturnType<typeof setTimeout> | null = null;
+          let swallowTimer: ReturnType<typeof setTimeout> | null = null;
+          const clearAllTimers = () => {
+            if (inactivityTimer) clearTimeout(inactivityTimer);
+            if (absoluteTimer) clearTimeout(absoluteTimer);
+            if (swallowTimer) clearTimeout(swallowTimer);
+            inactivityTimer = absoluteTimer = swallowTimer = null;
+          };
           const emit = (e: PromptEvent): void => {
             if (!discarded) onEvent(e);
           };
-          const timer = setTimeout(() => {
+          const fireTimeout = (reason: "inactivity" | "absolute", afterMs: number) => {
+            if (discarded) return;
             discarded = true;
+            clearAllTimers();
             markCancelled(cs, sessionId);
             cancelPendingPermissions(key);
-            acpLog(`prompt timeout local=${key} acp=${sessionId} rpc=${id} after=${timeoutMs}ms`);
-            void acpPost(cs, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId } }).catch(() => {});
+            acpLog(
+              `prompt timeout local=${key} acp=${sessionId} rpc=${id} reason=${reason} after=${afterMs}ms`,
+            );
+            void acpPost(cs, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId } }).catch(
+              () => {},
+            );
             opts.onTimeout?.();
-          }, timeoutMs);
-          const swallowTimer = setTimeout(() => {
-            if (discarded) {
-              clearTimeout(timer);
-              reject(new Error("任务超时且网关任务未结束, 已强制放行队列"));
-            }
-          }, timeoutMs + 60_000);
+            // 网关可能仍在跑: 再等 60s 吞流后强制放行队列
+            swallowTimer = setTimeout(() => {
+              reject(
+                new Error(
+                  reason === "inactivity"
+                    ? "不活跃超时且网关任务未结束, 已强制放行队列"
+                    : "任务超时且网关任务未结束, 已强制放行队列",
+                ),
+              );
+            }, 60_000);
+          };
+          const armInactivity = () => {
+            if (inactivityTimer) clearTimeout(inactivityTimer);
+            inactivityTimer = null;
+            if (discarded || inactivityMs <= 0) return;
+            inactivityTimer = setTimeout(() => fireTimeout("inactivity", inactivityMs), inactivityMs);
+          };
+          const bumpActivity = () => {
+            if (discarded) return;
+            armInactivity();
+          };
+          armInactivity();
+          if (absoluteMs != null && absoluteMs > 0) {
+            absoluteTimer = setTimeout(() => fireTimeout("absolute", absoluteMs), absoluteMs);
+          }
           readSse(res, async (json) => {
             const r = json as {
               id?: string | number;
@@ -1590,6 +1642,9 @@ export async function prompt(
                 };
               };
             };
+
+            // 任意入站帧都算活跃 (含 keepalive 以外的 JSON-RPC)
+            bumpActivity();
 
             // Agent → Client 权限请求: 必须用同 id 回 result
             // 不可 await 用户应答 (停读 SSE 易令网关侧提前 cancelled); 前端弹窗 + GET 轮询应答
@@ -1680,8 +1735,7 @@ export async function prompt(
                 ? (r.result as { stopReason: string }).stopReason
                 : undefined;
             if (stopReason !== undefined && r.id === id && !("outcome" in (r.result as object))) {
-              clearTimeout(timer);
-              clearTimeout(swallowTimer);
+              clearAllTimers();
               const map = pendingPermissions();
               let dropped = 0;
               for (const [, p] of [...map]) {
@@ -1693,17 +1747,15 @@ export async function prompt(
               acpLog(
                 `prompt stop local=${key} acp=${sessionId} rpc=${String(id)} stopReason=${stopReason} droppedPending=${dropped}`,
               );
-              // session/cancel 会把 ACP 会话的 abortSignal 永久置位, 之后工具授权会被网关立刻拒绝
-              if (stopReason === "cancelled" && key !== "default" && key !== GATEWAY_KEY) {
-                updateSessionGateway(key, { clearAcpSession: true });
-                acpLog(`cleared poisoned acp binding local=${key} acp=${sessionId}`);
+              // session/cancel 会永久毒化该 ACP 会话的 abortSignal; 必须清绑定, 下次 session/new + 注入历史
+              if (stopReason === "cancelled") {
+                clearPoisonedAcpBinding(key, cs, sessionId);
               }
               emit({ type: "done", stopReason, id });
               resolve();
             }
           }).catch((e) => {
-            clearTimeout(timer);
-            clearTimeout(swallowTimer);
+            clearAllTimers();
             cancelPendingPermissions(key);
             reject(e);
           });
@@ -1716,11 +1768,26 @@ export async function prompt(
         throw e;
       } finally {
         cs.running = false;
+        // cancelledSids 只对本轮有效; 不清理会让下一轮一进来就误抛「任务已取消」
+        cs.cancelledSids.delete(sessionId);
       }
     });
   };
   if (opts.bypassGlobalQueue) return run();
   return enqueueGlobal(key, run);
+}
+
+/**
+ * session/cancel 后 ACP 会话 abortSignal 永久置位, 后续工具授权会被网关拒绝。
+ * 丢掉本地绑定与内存 activeSessionId, 下次发送走 session/new + 历史注入。
+ */
+function clearPoisonedAcpBinding(key: string, cs: ConnState, sid: string): void {
+  if (cs.activeSessionId === sid) cs.activeSessionId = null;
+  cs.cancelledSids.delete(sid);
+  if (key !== "default") {
+    updateSessionGateway(key, { clearAcpSession: true });
+  }
+  acpLog(`cleared poisoned acp binding local=${key} acp=${sid}`);
 }
 
 /** session/cancel (通知, 无响应体等待); 取消指定本地会话连接上的网关会话 */
@@ -1730,21 +1797,18 @@ export async function cancel(localSessionId?: string, sessionId?: string): Promi
   cancelQueued(key);
   // 2) 未决权限一律 cancelled
   cancelPendingPermissions(key);
-  // 3) 取消运行中的任务 (标记 + 通知网关)
+  // 3) 取消运行中的任务 (标记 + 通知网关) 并清毒化绑定
   const cs = conns.get(GATEWAY_KEY);
   const sid = sessionId ?? cs?.activeSessionId ?? undefined;
   if (!cs || !sid) return;
   markCancelled(cs, sid);
-  if (key !== "default" && key !== GATEWAY_KEY) {
-    updateSessionGateway(key, { clearAcpSession: true });
-    acpLog(`cancel cleared binding local=${key} acp=${sid}`);
-  }
   try {
     await acpPost(cs, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: sid } });
     acpLog(`session/cancel sent local=${key} acp=${sid}`);
   } catch (e) {
     acpLog(`session/cancel fail local=${key} acp=${sid}: ${(e as Error).message}`);
   }
+  clearPoisonedAcpBinding(key, cs, sid);
 }
 
 /** 通用 RPC 封装: 等首个 result 或 error (通知忽略) */

@@ -3,6 +3,7 @@
 // 激活+prompt 必须在同一全局锁内, 防止对齐后被他会话插队 (spec 017 §11)
 import { globalQueueSnapshot, prompt, withGlobalAgentLock } from "@/infrastructure/workbuddy-acp";
 import {
+  getInactivityTimeoutMs,
   getSession,
   listSessions,
   readMessages,
@@ -34,14 +35,22 @@ function inlineRecentHistory(localSessionId: string): string {
 
 export async function POST(req: Request) {
   let text = "";
-  let timeoutMs = 300_000;
+  let inactivityTimeoutMs = getInactivityTimeoutMs();
   let acpSessionId: string | undefined;
   let cwd: string | undefined;
   let localSessionId: string | undefined;
   try {
-    const body = (await req.json()) as { text?: string; timeoutMs?: number; localSessionId?: string };
+    const body = (await req.json()) as {
+      text?: string;
+      inactivityTimeoutMs?: number;
+      /** @deprecated 绝对超时; 仅兼容旧客户端, 用户任务已改为不活跃超时 */
+      timeoutMs?: number;
+      localSessionId?: string;
+    };
     text = (body.text ?? "").trim();
-    if (typeof body.timeoutMs === "number" && body.timeoutMs > 0) timeoutMs = body.timeoutMs;
+    if (typeof body.inactivityTimeoutMs === "number" && body.inactivityTimeoutMs >= 0) {
+      inactivityTimeoutMs = body.inactivityTimeoutMs;
+    }
     localSessionId = body.localSessionId;
     if (localSessionId) {
       const meta = getSession(localSessionId);
@@ -81,6 +90,20 @@ export async function POST(req: Request) {
         const safePush = (obj: unknown) => {
           try {
             push(obj);
+          } catch {
+            clientGone = true;
+          }
+        };
+
+        // 生产构建会 gzip: 短行易攒到流关闭才到达浏览器。
+        // permission/done 立即冲; tool/chunk 节流冲, 避免每帧 20KB。
+        let lastFlushAt = 0;
+        const flushPad = (force = false) => {
+          const now = Date.now();
+          if (!force && now - lastFlushAt < 400) return;
+          lastFlushAt = now;
+          try {
+            controller.enqueue(encoder.encode(`${" ".repeat(20 * 1024)}\n`));
           } catch {
             clientGone = true;
           }
@@ -126,33 +149,40 @@ export async function POST(req: Request) {
               (e) => {
                 if (clientGone) return;
                 safePush(e);
-                // 生产构建会 gzip。权限/结束这种短行会攒到流关闭才到达浏览器,
-                // 界面就只看见「正在执行」或弹窗和结束挤在同一帧。补填充迫使立即刷出。
-                if (e.type === "permission" || e.type === "done") {
-                  try {
-                    controller.enqueue(encoder.encode(`${" ".repeat(20 * 1024)}\n`));
-                  } catch {
-                    clientGone = true;
-                  }
-                }
+                if (e.type === "permission" || e.type === "done") flushPad(true);
+                else if (e.type === "tool" || e.type === "chunk" || e.type === "thought") flushPad(false);
               },
               {
-                timeoutMs,
+                inactivityTimeoutMs,
                 acpSessionId,
                 cwd,
                 localSessionId,
                 bypassGlobalQueue: true,
                 onTimeout: () => {
-                  safePush({ type: "error", error: "任务超时（网关任务可能仍在执行）" });
+                  const mins = Math.round(inactivityTimeoutMs / 60_000);
+                  safePush({
+                    type: "error",
+                    error: `不活跃超时（${mins} 分钟无新响应；网关任务可能仍在执行，可打开工作目录查看产物）`,
+                    preserveText: true,
+                  });
                 },
               },
             );
             if (localSessionId && pendingFp) {
-              updateSessionGateway(localSessionId, { sysPromptFp: pendingFp, sysPromptFailed: undefined });
-              snubyLog(
-                "session",
-                `inject commit ok local=${localSessionId} fp=${pendingFp}`,
-              );
+              // cancel/超时已清毒化绑定时勿回写 fp, 否则下次会误判「约定已注入」
+              const stillBound = !!getSession(localSessionId)?.acpSessionId;
+              if (stillBound) {
+                updateSessionGateway(localSessionId, { sysPromptFp: pendingFp, sysPromptFailed: undefined });
+                snubyLog(
+                  "session",
+                  `inject commit ok local=${localSessionId} fp=${pendingFp}`,
+                );
+              } else {
+                snubyLog(
+                  "session",
+                  `inject commit skip local=${localSessionId} (binding cleared after cancel/timeout)`,
+                );
+              }
             }
           } catch (e) {
             if (localSessionId && pendingFp) {
@@ -178,7 +208,13 @@ export async function POST(req: Request) {
         });
         await run;
       } catch (e) {
-        push({ type: "error", error: (e as Error).message });
+        const msg = (e as Error).message;
+        // 用户停止 / 排队取消: 走 done(cancelled), 前端标「已取消」而非红字异常
+        if (msg === "任务已取消") {
+          push({ type: "done", stopReason: "cancelled" });
+        } else {
+          push({ type: "error", error: msg });
+        }
       } finally {
         try {
           controller.close();

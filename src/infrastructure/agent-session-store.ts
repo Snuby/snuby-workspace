@@ -103,7 +103,34 @@ export interface AgentPreference {
   modelId?: string;
   modelName?: string;
   config?: Partial<Record<"mode" | "thought_level" | "sandbox", string>>;
+  /**
+   * 任务不活跃超时 (ms): 距上一次网关响应超过该时长则客户端超时。
+   * 缺省 / 非法 → DEFAULT_INACTIVITY_TIMEOUT_MS; 0 表示不启用不活跃超时。
+   */
+  inactivityTimeoutMs?: number;
   updatedAt: number;
+}
+
+/** 默认不活跃超时: 10 分钟 */
+export const DEFAULT_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
+/** 设置页允许范围: 1–60 分钟 */
+export const INACTIVITY_TIMEOUT_MIN_MS = 60 * 1000;
+export const INACTIVITY_TIMEOUT_MAX_MS = 60 * 60 * 1000;
+
+/** 规范化不活跃超时; undefined → 默认; 0 → 禁用; 其余夹到合法区间 */
+export function normalizeInactivityTimeoutMs(raw: unknown): number {
+  if (raw === 0 || raw === "0") return 0;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_INACTIVITY_TIMEOUT_MS;
+  if (n === 0) return 0;
+  return Math.min(INACTIVITY_TIMEOUT_MAX_MS, Math.max(INACTIVITY_TIMEOUT_MIN_MS, Math.round(n)));
+}
+
+/** 当前生效的不活跃超时 (读偏好, 带默认) */
+export function getInactivityTimeoutMs(): number {
+  const d = getAgentPreference();
+  if (d?.inactivityTimeoutMs === undefined) return DEFAULT_INACTIVITY_TIMEOUT_MS;
+  return normalizeInactivityTimeoutMs(d.inactivityTimeoutMs);
 }
 
 /** 读取全局 Agent 偏好 (兼容旧 model-preference.json) */
@@ -131,6 +158,7 @@ export function patchAgentPreference(patch: {
   modelId?: string;
   modelName?: string;
   config?: Partial<Record<"mode" | "thought_level" | "sandbox", string>>;
+  inactivityTimeoutMs?: number;
 }): AgentPreference {
   mkdirSync(ROOT, { recursive: true });
   const prev = getAgentPreference() ?? { updatedAt: 0 };
@@ -138,6 +166,10 @@ export function patchAgentPreference(patch: {
     modelId: patch.modelId ?? prev.modelId,
     modelName: patch.modelName ?? prev.modelName,
     config: { ...(prev.config ?? {}), ...(patch.config ?? {}) },
+    inactivityTimeoutMs:
+      patch.inactivityTimeoutMs !== undefined
+        ? normalizeInactivityTimeoutMs(patch.inactivityTimeoutMs)
+        : prev.inactivityTimeoutMs,
     updatedAt: Date.now(),
   };
   if (next.config && Object.keys(next.config).length === 0) delete next.config;
@@ -351,7 +383,7 @@ export function updateSessionGateway(
     acpCwd?: string;
     sysPromptFp?: string;
     sysPromptFailed?: boolean;
-    /** 网关会话已被 cancel 毒化, 丢掉绑定以便下次 session/new */
+    /** 网关会话作废时丢掉绑定 (重连 clearAll / load 失败 / session/cancel 毒化后) */
     clearAcpSession?: boolean;
   },
 ): AgentSessionMeta | null {

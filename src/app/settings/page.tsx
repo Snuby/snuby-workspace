@@ -1,7 +1,7 @@
 "use client";
 
 // Spec: 017-site-tabs — 设置页: 站点标签页按模块独立配置 (maxTabs 2-50 / maxHistory 10-2000)
-// 读取/写入 /api/site-tabs (SQLite site_settings 表)。
+// + 本地 Agent 不活跃超时 (agent-preference.json)
 
 import { useEffect, useState } from "react";
 import Topbar from "@/components/workbench/topbar";
@@ -23,6 +23,9 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [savedTip, setSavedTip] = useState(false);
+  /** 本地 Agent: 不活跃超时 (分钟); 0 = 禁用 */
+  const [inactivityMin, setInactivityMin] = useState(10);
+  const [agentDirty, setAgentDirty] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -38,6 +41,16 @@ export default function SettingsPage() {
         }
       }
       setValues(next);
+      try {
+        const r = await fetch("/api/agent/preference", { cache: "no-store" });
+        if (r.ok) {
+          const j = (await r.json()) as { inactivityTimeoutMs?: number };
+          const ms = j.inactivityTimeoutMs ?? 600_000;
+          setInactivityMin(ms <= 0 ? 0 : Math.round(ms / 60_000));
+        }
+      } catch {
+        // 用默认 10
+      }
       setLoaded(true);
     })();
   }, []);
@@ -68,10 +81,25 @@ export default function SettingsPage() {
         // 单个模块失败不中断其余
       }
     }
+    if (agentDirty) {
+      const ms = inactivityMin <= 0 ? 0 : clamp(Math.round(inactivityMin), 1, 60) * 60_000;
+      try {
+        await fetch("/api/agent/preference", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ inactivityTimeoutMs: ms }),
+        });
+        setAgentDirty(false);
+      } catch {
+        // 忽略
+      }
+    }
     setSaving(false);
     setDirty(false);
     setSavedTip(true);
   }
+
+  const canSave = loaded && (dirty || agentDirty) && !saving;
 
   return (
     <>
@@ -83,7 +111,7 @@ export default function SettingsPage() {
             <button
               type="button"
               onClick={saveAll}
-              disabled={!dirty || saving || !loaded}
+              disabled={!canSave}
               className="rounded-md bg-accent px-4 py-1.5 text-[12.5px] font-medium text-white hover:opacity-90 disabled:opacity-40"
             >
               {saving ? "保存中…" : "保存设置"}
@@ -100,6 +128,29 @@ export default function SettingsPage() {
             <div className="py-8 text-center text-[13px] text-ink-faint">加载中…</div>
           ) : (
             <div className="space-y-3">
+              <div className="rounded-[10px] border border-line bg-surface px-4 py-3">
+                <div className="mb-1 text-[13px] font-medium text-ink">本地 Agent</div>
+                <p className="mb-2.5 text-[11.5px] leading-relaxed text-ink-faint">
+                  任务总时长不限制，仅在「距上一次网关响应」超过下方时长时视为不活跃超时。工具调用、正文片段等任意响应都会重置计时。
+                </p>
+                <label className="flex items-center gap-2 text-[12.5px] text-ink-muted">
+                  不活跃超时
+                  <input
+                    type="number"
+                    min={0}
+                    max={60}
+                    value={inactivityMin}
+                    onChange={(e) => {
+                      setInactivityMin(Number(e.target.value));
+                      setAgentDirty(true);
+                      setSavedTip(false);
+                    }}
+                    className="h-7 w-[72px] rounded-md border border-line bg-white px-2 text-center text-[12.5px] outline-none focus:border-accent"
+                  />
+                  <span className="text-[11px] text-ink-faint">分钟（0 = 禁用，默认 10，最长 60）</span>
+                </label>
+              </div>
+
               {MODULES.map((m) => {
                 const v = values[m.key] ?? { maxTabs: 10, maxHistory: 100 };
                 return (
