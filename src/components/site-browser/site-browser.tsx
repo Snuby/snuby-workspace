@@ -13,6 +13,11 @@ import LocalAgentPanel from "@/components/site-browser/local-agent-panel";
 import { tabIconFor } from "@/components/ui/site-favicon";
 import { ContextMenuItem, ContextMenuLayer } from "@/components/ui/context-menu-layer";
 import { useClickOutside } from "@/lib/use-click-outside";
+import {
+  readWebContentsId,
+  registerMonitorSource,
+  type MonitorTabInfo,
+} from "@/lib/monitor-registry";
 
 export type SiteDef = {
   /** 站点唯一 id (同一模块内) */
@@ -233,6 +238,8 @@ export default function SiteBrowser({
   const [editHomeUrl, setEditHomeUrl] = useState("");
   const [homeTabMenu, setHomeTabMenu] = useState<{ x: number; y: number } | null>(null);
   const [loaded, setLoaded] = useState(false);
+  /** 监控回收: 主页等被「关闭」后卸掉 webview, 模块再次激活时重建 */
+  const [parkedIds, setParkedIds] = useState<Record<string, true>>({});
   /** 每个标签一个常驻 webview 实例 (tabId → element): 切标签只切 display, 不重建, 状态保留、无白屏 */
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
   /** tabId → siteId: 站点级可见性按归属站点判断 (webview 实例常驻后, 可见性必须知道它属于哪个站点组) */
@@ -244,9 +251,30 @@ export default function SiteBrowser({
   const openTabRef = useRef<((siteId: string, url: string) => void) | null>(null);
   const addToTopicRef = useRef<HTMLDivElement | null>(null);
   const historyMenuRef = useRef<HTMLDivElement | null>(null);
+  const parkedIdsRef = useRef(parkedIds);
+  parkedIdsRef.current = parkedIds;
+  /** 各标签最近打开/激活时间 */
+  const lastActiveAtRef = useRef<Record<string, number>>({});
 
   useClickOutside(addToTopicRef, addToTopicOpen, () => setAddToTopicOpen(false));
   useClickOutside(historyMenuRef, showHistory, () => setShowHistory(false));
+
+  /** 重进模块: 恢复被监控回收的主页 webview */
+  useEffect(() => {
+    if (!active) return;
+    setParkedIds((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+  }, [active]);
+
+  useEffect(() => {
+    if (!activeTab?.tabId) return;
+    lastActiveAtRef.current[activeTab.tabId] = Date.now();
+  }, [activeTab?.tabId]);
+
+  useEffect(() => {
+    if (!active || !activeTab?.tabId) return;
+    lastActiveAtRef.current[activeTab.tabId] = Date.now();
+  }, [active, activeTab?.tabId]);
+
 
   const activeSite = activeSiteProp ?? activeSiteInner;
   const moduleSites = useMemo(() => {
@@ -254,6 +282,52 @@ export default function SiteBrowser({
     const base = sites[0] ?? { id: "default", label: "主页", url: DEFAULT_BROWSER_HOME };
     return [{ ...base, url: browserHome, label: browserHomeTitle || "主页" }];
   }, [sites, addressMode, browserHome, browserHomeTitle]);
+
+  const moduleSitesRef = useRef(moduleSites);
+  moduleSitesRef.current = moduleSites;
+  const activeTabRef = useRef(activeTab);
+  activeTabRef.current = activeTab;
+  const closeTabRef = useRef<(siteId: string, tabId: string) => void>(() => {});
+  const tabsOfRef = useRef<(siteId: string) => SiteTab[]>(() => []);
+
+  // —— 监控注册: 向系统·监控上报本模块常驻标签 ——
+  useEffect(() => {
+    const section = addressMode || moduleKey === "browser" ? "browser" : "topic";
+    const sourceId = `site:${moduleKey}`;
+    return registerMonitorSource(sourceId, {
+      list: () => {
+        const rows: MonitorTabInfo[] = [];
+        for (const site of moduleSitesRef.current) {
+          const tabs = tabsOfRef.current(site.id);
+          for (const t of tabs) {
+            if (parkedIdsRef.current[t.id]) continue;
+            if (!(t.id in lastActiveAtRef.current)) {
+              lastActiveAtRef.current[t.id] = Date.now();
+            }
+            rows.push({
+              section,
+              moduleKey,
+              moduleLabel: title || (section === "browser" ? "Web 访问" : moduleKey),
+              groupId: site.id,
+              groupLabel: site.label || site.id,
+              tabId: t.id,
+              title: t.title || t.url,
+              url: t.url,
+              isHome: t.id.endsWith(HOME_SUFFIX),
+              isActive: activeTabRef.current?.siteId === site.id && activeTabRef.current?.tabId === t.id,
+              lastActiveAt: lastActiveAtRef.current[t.id] ?? Date.now(),
+              webContentsId: readWebContentsId(webviewRefs.current[t.id]),
+            });
+          }
+        }
+        return rows;
+      },
+      close: (groupId, tabId) => {
+        closeTabRef.current(groupId, tabId);
+      },
+    });
+  }, [moduleKey, addressMode, title]);
+
   // 卸载 (切走模块/关窗) 前把最新内存态 (含页面加载后的真实标题) 落库,
   // 否则标签标题只在 openTab 时持久化 (当时为 "…"), 切回模块恢复的标签全是 "…"
   const tabsBySiteRef = useRef(tabsBySite);
@@ -487,6 +561,7 @@ export default function SiteBrowser({
     },
     [moduleSites, tabsBySite],
   );
+  tabsOfRef.current = tabsOf;
 
   const persistTabs = useCallback(
     (siteId: string, tabs: SiteTab[]) => {
@@ -582,6 +657,13 @@ export default function SiteBrowser({
 
   const closeTab = useCallback(
     (siteId: string, tabId: string) => {
+      // 主页: 监控回收 — 卸 webview, 标签仍在, 下次进入模块再挂载
+      if (tabId.endsWith(HOME_SUFFIX)) {
+        setParkedIds((prev) => ({ ...prev, [tabId]: true }));
+        delete webviewRefs.current[tabId];
+        delete tabSiteRef.current[tabId];
+        return;
+      }
       const group = tabsBySite[siteId] ?? [];
       const idx = group.findIndex((t) => t.id === tabId);
       if (idx < 0) return;
@@ -616,6 +698,7 @@ export default function SiteBrowser({
     },
     [tabsBySite, activeTab, appendHistory, persistTabs, moduleSites],
   );
+  closeTabRef.current = closeTab;
 
   const activateTab = useCallback(
     (siteId: string, tabId: string) => {
@@ -1339,7 +1422,7 @@ export default function SiteBrowser({
                     zIndex: isActiveSite && t.id === activeTabDef.id ? 10 : 0,
                   }}
                 >
-                  {t.url.startsWith("snuby://") ? (
+                  {parkedIds[t.id] ? null : t.url.startsWith("snuby://") ? (
                     // 内置站点 (实验室等): 渲染本地组件而非 webview
                     <LocalAgentPanel />
                   ) : (

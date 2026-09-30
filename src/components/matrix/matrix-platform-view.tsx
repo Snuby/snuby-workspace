@@ -2,7 +2,7 @@
 
 // 自媒体账号矩阵 · 平台工作台
 // 布局: 顶栏(平台/账号切换/添加) · 下方全宽多标签 WebView (一账号一 persist partition)
-// 主标签不可关; 切账号常驻不销毁 webview, 登录态互不影响。
+// 主标签默认不可在工具栏关闭; 监控页可回收主页以释放内存, 再次进入平台时重建。
 
 import { createElement, useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -17,6 +17,11 @@ import {
   tabIconFor,
 } from "@/components/ui/site-favicon";
 import { ContextMenuItem, ContextMenuLayer } from "@/components/ui/context-menu-layer";
+import {
+  readWebContentsId,
+  registerMonitorSource,
+  type MonitorTabInfo,
+} from "@/lib/monitor-registry";
 
 type Props = {
   platformId: string;
@@ -43,6 +48,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   /** 标签是否已成功完成过至少一次加载 — 首屏白屏才盖全屏提示 */
   const [readyByTab, setReadyByTab] = useState<Record<string, boolean>>({});
   const [errorByTab, setErrorByTab] = useState<Record<string, string>>({});
+  /** 监控回收主页: 卸 webview, 平台再次激活时重建 */
+  const [parkedIds, setParkedIds] = useState<Record<string, true>>({});
 
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
   const tabAccountRef = useRef<Record<string, string>>({});
@@ -52,6 +59,9 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   /** popup 监听 effect 依赖少: 用 ref 避免闭包拿到陈旧 openTab / 错误账号 */
   const openTabRef = useRef<((accountId: string, url: string) => void) | null>(null);
   const persistTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const parkedIdsRef = useRef(parkedIds);
+  parkedIdsRef.current = parkedIds;
+  const lastActiveAtRef = useRef<Record<string, number>>({});
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
   const groupTabs = activeAccountId ? (tabsByAccount[activeAccountId] ?? []) : [];
@@ -63,6 +73,69 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   const activeError = activeTabId ? errorByTab[activeTabId] : undefined;
   const showFirstLoadOverlay = activeLoading && !activeReady && !activeError;
   const showErrorOverlay = !!activeError;
+
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
+  const platformRef = useRef(platform);
+  platformRef.current = platform;
+  const activeTabByAccountRef = useRef(activeTabByAccount);
+  activeTabByAccountRef.current = activeTabByAccount;
+  const closeTabRef = useRef<(accountId: string, tabId: string) => void>(() => {});
+
+  useEffect(() => {
+    if (!active) return;
+    setParkedIds((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+  }, [active]);
+
+  useEffect(() => {
+    if (!activeTabId) return;
+    lastActiveAtRef.current[activeTabId] = Date.now();
+  }, [activeTabId]);
+
+  useEffect(() => {
+    if (!active || !activeTabId) return;
+    lastActiveAtRef.current[activeTabId] = Date.now();
+  }, [active, activeTabId]);
+
+  // —— 监控注册 ——
+  useEffect(() => {
+    return registerMonitorSource(`matrix:${platformId}`, {
+      list: () => {
+        const rows: MonitorTabInfo[] = [];
+        const plat = platformRef.current;
+        const moduleLabel = plat?.name ?? platformId;
+        for (const acc of accountsRef.current) {
+          const tabs = tabsByAccountRef.current[acc.id] ?? [];
+          const activeId = activeTabByAccountRef.current[acc.id] ?? tabs[0]?.id;
+          for (const t of tabs) {
+            if (parkedIdsRef.current[t.id]) continue;
+            if (!(t.id in lastActiveAtRef.current)) {
+              lastActiveAtRef.current[t.id] = Date.now();
+            }
+            rows.push({
+              section: "matrix",
+              moduleKey: platformId,
+              moduleLabel,
+              groupId: acc.id,
+              groupLabel: acc.displayName || acc.id,
+              tabId: t.id,
+              title: t.title || t.url,
+              url: t.url,
+              isHome: isHomeTabId(t.id),
+              isActive: activeId === t.id,
+              lastActiveAt: lastActiveAtRef.current[t.id] ?? Date.now(),
+              webContentsId: readWebContentsId(webviewRefs.current[t.id]),
+            });
+          }
+        }
+        return rows;
+      },
+      close: (groupId, tabId) => {
+        closeTabRef.current(groupId, tabId);
+      },
+    });
+  }, [platformId]);
+
 
   const refreshAccounts = useCallback(async () => {
     const r = await fetch(`/api/matrix/accounts?platform=${encodeURIComponent(platformId)}`, {
@@ -385,7 +458,12 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   openTabRef.current = openTab;
 
   const closeTab = (accountId: string, tabId: string) => {
-    if (isHomeTabId(tabId)) return;
+    if (isHomeTabId(tabId)) {
+      setParkedIds((prev) => ({ ...prev, [tabId]: true }));
+      delete webviewRefs.current[tabId];
+      delete tabAccountRef.current[tabId];
+      return;
+    }
     setTabsByAccount((prev) => {
       const tabs = prev[accountId] ?? [];
       const idx = tabs.findIndex((t) => t.id === tabId);
@@ -419,6 +497,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
       return next;
     });
   };
+  closeTabRef.current = closeTab;
 
   const nav = (fn: "goBack" | "goForward" | "reload") => {
     const el = activeTabId ? webviewRefs.current[activeTabId] : null;
@@ -709,7 +788,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
               <div className="relative min-h-0 flex-1 bg-surface">
                 {accounts.map((acc) => {
                   const tabs = tabsByAccount[acc.id] ?? [];
-                  return tabs.map((t) => (
+                  return tabs.map((t) =>
+                    parkedIds[t.id] ? null : (
                     <div
                       key={`${acc.id}:${t.id}`}
                       className="absolute inset-0"
@@ -730,7 +810,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                         onRef={registerGuest}
                       />
                     </div>
-                  ));
+                    ),
+                  );
                 })}
                 {showFirstLoadOverlay ? (
                   <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-surface">

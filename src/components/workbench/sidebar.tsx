@@ -1,7 +1,8 @@
 "use client";
 
-// 灵活工作台: 左侧菜单 = 固定区 (工作台/Web访问/设置)
-// + 主题区 (用户动态创建的主题, 来自 /api/topics; 主题 = 可配置的站点集合)
+// 灵活工作台: 左侧菜单 = 固定区 (工作台/Web访问)
+// + 自媒体账号矩阵 + 主题区 + 实验室 + 系统
+// 主题区来自 /api/topics (主题 = 可配置的站点集合)
 
 import { useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
@@ -13,6 +14,10 @@ import {
   getAgentRunningCount,
   subscribeAgentRunning,
 } from "@/infrastructure/agent-run-presence";
+import {
+  getMonitorAlerting,
+  subscribeMonitorAlerting,
+} from "@/lib/monitor-alert";
 
 type NavLeaf = {
   href: string;
@@ -49,6 +54,11 @@ const ICONS = {
       <path d="M7 15h10" />
     </svg>
   ),
+  activity: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
+      <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+    </svg>
+  ),
   weixin: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px]">
       <path d="M8.5 14.5c-3 0-5.5-2-5.5-4.5S5.5 5.5 8.5 5.5 14 7.5 14 10c0 .6-.1 1.1-.3 1.6" />
@@ -76,7 +86,6 @@ const ICONS = {
 const NAV: NavLeaf[] = [
   { href: "/", label: "工作台", icon: ICONS.home },
   { href: "/browser", label: "Web 访问", icon: ICONS.globe },
-  { href: "/settings", label: "设置", icon: ICONS.gear },
 ];
 
 function itemClass(active: boolean): string {
@@ -96,6 +105,11 @@ export default function Sidebar() {
     subscribeAgentRunning,
     getAgentRunningCount,
     () => 0,
+  );
+  const monitorAlert = useSyncExternalStore(
+    subscribeMonitorAlerting,
+    getMonitorAlerting,
+    () => false,
   );
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
@@ -310,6 +324,28 @@ export default function Sidebar() {
               进行中
             </span>
           )}
+        </Link>
+
+        {/* 系统 */}
+        <div className="mb-1 mt-4 px-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">系统</span>
+        </div>
+        <Link href="/settings" className={itemClass(pathname === "/settings" || pathname.startsWith("/settings/"))}>
+          {ICONS.gear}
+          设置
+        </Link>
+        <Link
+          href="/system/monitor"
+          title={monitorAlert ? "内存告警：打开监控查看" : undefined}
+          className={itemClass(pathname === "/system/monitor" || pathname.startsWith("/system/monitor/"))}
+        >
+          {ICONS.activity}
+          <span className="min-w-0 flex-1 truncate">监控</span>
+          {monitorAlert ? (
+            <span className="ml-auto shrink-0 rounded-full bg-up px-1.5 py-0.5 text-[10px] font-medium text-white">
+              告警
+            </span>
+          ) : null}
         </Link>
       </nav>
 

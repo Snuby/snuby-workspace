@@ -4,7 +4,7 @@
 //   用户数据根 = ~/snuby-workspace-data (SNUBY_USER_DATA 可覆盖)
 //   含主题库 + Agent 会话与工作区; 启动时从旧路径幂等迁移。
 
-const { app, BrowserWindow, dialog, session, utilityProcess, Menu, clipboard, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, session, utilityProcess, Menu, clipboard, ipcMain, webContents } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -373,4 +373,44 @@ ipcMain.handle("snuby:clear-partition", async (_event, partition) => {
     // 部分 Electron 版本 clearCache 行为差异, 存储已清即可
   }
   return { ok: true };
+});
+
+/** 性能监控快照: 进程内存 + 按 webContentsId 对齐的 guest RSS (KiB) */
+ipcMain.handle("snuby:get-perf-snapshot", async (_event, webContentsIds) => {
+  const metrics = app.getAppMetrics();
+  const byPid = new Map();
+  for (const m of metrics) byPid.set(m.pid, m);
+
+  const tabs = {};
+  const ids = Array.isArray(webContentsIds) ? webContentsIds : [];
+  for (const raw of ids) {
+    const id = Number(raw);
+    if (!Number.isFinite(id)) continue;
+    try {
+      const wc = webContents.fromId(id);
+      if (!wc || wc.isDestroyed()) continue;
+      const pid = wc.getOSProcessId();
+      const m = byPid.get(pid);
+      tabs[id] = {
+        pid,
+        rssKb: m && m.memory ? m.memory.workingSetSize : null,
+        type: m ? m.type : null,
+      };
+    } catch {
+      // guest 已销毁等
+    }
+  }
+
+  return {
+    at: Date.now(),
+    totalMemBytes: os.totalmem(),
+    processes: metrics.map((m) => ({
+      pid: m.pid,
+      type: m.type,
+      name: m.name || "",
+      rssKb: m.memory ? m.memory.workingSetSize : 0,
+      cpu: m.cpu && typeof m.cpu.percentCPUUsage === "number" ? m.cpu.percentCPUUsage : 0,
+    })),
+    tabs,
+  };
 });
