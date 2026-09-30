@@ -14,7 +14,6 @@ import {
   type ReactNode,
 } from "react";
 import { useClickOutside } from "@/lib/use-click-outside";
-import { openInSystemBrowser } from "@/lib/open-external";
 import { setAgentRunningCount } from "@/infrastructure/agent-run-presence";
 import PreviewModal, {
   PreviewIconBtn,
@@ -197,6 +196,8 @@ type Msg = {
   role: "user" | "agent";
   text: string;
   streaming?: boolean;
+  /** 仍在全局队列等待 (尚未真正执行); 与 streaming 同时为 true */
+  queued?: boolean;
   thinking?: boolean;
   tools?: ToolEv[];
   error?: boolean;
@@ -506,35 +507,76 @@ export default function LocalAgentPanel() {
 
   useClickOutside(infoRef, infoOpen, () => setInfoOpen(false));
 
-  /** 点击 📄 打开本地 markdown 文档: 拉取文本并内联预览 */
+  /** 点击 📄 / 本地路径: 目录→访达; 其它→预览弹窗 */
   const openDoc = useCallback((path: string, title: string, opts?: { push?: boolean }) => {
-    const next: LinkView = { kind: "file", path, title, loading: true };
-    setLinkNav((prev) => {
-      if (!opts?.push || !prev.stack.length) return { stack: [next], index: 0 };
-      const cur = Math.min(prev.index, prev.stack.length - 1);
-      return { stack: [...prev.stack.slice(0, cur + 1), next], index: cur + 1 };
-    });
+    void (async () => {
+      const cleaned = path.replace(/^file:\/\//, "").trim();
+      try {
+        const r = await fetch(`/api/local-file?path=${encodeURIComponent(cleaned)}&stat=1`, {
+          cache: "no-store",
+        });
+        if (r.ok) {
+          const j = (await r.json()) as { isDirectory?: boolean };
+          if (j.isDirectory) {
+            const fr = await fetch("/api/agent/open-folder", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: cleaned }),
+            });
+            const fj = (await fr.json().catch(() => ({}))) as { error?: string };
+            if (!fr.ok) throw new Error(fj.error || "打开文件夹失败");
+            setCtxToast("已在访达中打开文件夹");
+            window.setTimeout(() => setCtxToast(null), 2000);
+            return;
+          }
+        }
+      } catch (e) {
+        setCtxToast(e instanceof Error ? e.message : "打开失败");
+        window.setTimeout(() => setCtxToast(null), 2000);
+        return;
+      }
+
+      const next: LinkView = {
+        kind: "file",
+        path: cleaned,
+        title: title || cleaned.split("/").pop() || cleaned,
+        loading: true,
+      };
+      setLinkNav((prev) => {
+        if (!opts?.push || !prev.stack.length) return { stack: [next], index: 0 };
+        const cur = Math.min(prev.index, prev.stack.length - 1);
+        return { stack: [...prev.stack.slice(0, cur + 1), next], index: cur + 1 };
+      });
+    })();
   }, []);
 
-  /** 链接点击: http(s) → webview 弹窗; 本地路径 → 文件弹窗 */
+  /** 链接点击: http(s) → webview 弹窗; 本地路径 → openDoc 分流 */
   const openLink = useCallback((raw: string, opts?: { push?: boolean }) => {
-    const url = raw.replace(/^file:\/\//, "");
-    let next: LinkView | null = null;
+    let url = raw.replace(/^file:\/\//, "").trim();
+    // 聊天区 img 可能是 /api/local-file?path=...
+    if (url.startsWith("/api/local-file")) {
+      try {
+        const p = new URL(url, window.location.origin).searchParams.get("path");
+        if (p) url = decodeURIComponent(p);
+      } catch {
+        /* keep */
+      }
+    }
     if (/^https?:\/\//i.test(url)) {
-      next = { kind: "url", url, title: url };
-    } else if (/^(\/Users\/|\/home\/|\/private\/|\/tmp\/)/.test(url)) {
-      const name = url.split("/").pop() ?? url;
-      next = { kind: "file", path: url, title: name, loading: true };
-    } else {
-      window.open(url, "_blank", "noopener");
+      const next: LinkView = { kind: "url", url, title: url };
+      setLinkNav((prev) => {
+        if (!opts?.push || !prev.stack.length) return { stack: [next], index: 0 };
+        const cur = Math.min(prev.index, prev.stack.length - 1);
+        return { stack: [...prev.stack.slice(0, cur + 1), next], index: cur + 1 };
+      });
       return;
     }
-    setLinkNav((prev) => {
-      if (!opts?.push || !prev.stack.length) return { stack: [next!], index: 0 };
-      const cur = Math.min(prev.index, prev.stack.length - 1);
-      return { stack: [...prev.stack.slice(0, cur + 1), next!], index: cur + 1 };
-    });
-  }, []);
+    if (/^(\/Users\/|\/home\/|\/private\/|\/tmp\/)/.test(url) || (url.startsWith("/") && !url.startsWith("//"))) {
+      openDoc(url, url.split("/").pop() ?? url, opts);
+      return;
+    }
+    window.open(url, "_blank", "noopener");
+  }, [openDoc]);
 
   /** 预览内跳转: 截断前进历史后压入 */
   const openDocInPreview = useCallback(
@@ -1259,6 +1301,7 @@ export default function LocalAgentPanel() {
       role: "agent",
       text: "",
       streaming: true,
+      queued: true,
       startedAt: Date.now(),
       ts: Date.now(),
     };
@@ -1289,6 +1332,7 @@ export default function LocalAgentPanel() {
                 error: run.error,
                 errorNote: run.errorNote,
                 streaming: run.streaming,
+                queued: run.queued,
               }
             : m,
         ),
@@ -1365,7 +1409,7 @@ export default function LocalAgentPanel() {
                 : "排队中…";
             setQueueHint((prev) => ({ ...prev, [sid]: hint }));
             update((r) => {
-              if (!r.text) r.text = "";
+              r.queued = true;
             });
           } else if (ev.type === "running") {
             run.queued = false;
@@ -1373,6 +1417,9 @@ export default function LocalAgentPanel() {
               const n = { ...prev };
               delete n[sid];
               return n;
+            });
+            update((r) => {
+              r.queued = false;
             });
           } else if (ev.type === "chunk") {
             update((r) => {
@@ -1397,6 +1444,7 @@ export default function LocalAgentPanel() {
             }
             update((r) => {
               r.streaming = false;
+              r.queued = false;
               r.thinking = false;
               // 用户停止 / 排队取消: 灰标「已取消」, 不走红字异常
               if (ev.stopReason === "cancelled") {
@@ -1414,6 +1462,7 @@ export default function LocalAgentPanel() {
             if (note === "任务已取消") {
               update((r) => {
                 r.streaming = false;
+                r.queued = false;
                 r.interrupted = true;
                 r.error = false;
                 r.errorNote = undefined;
@@ -1421,6 +1470,7 @@ export default function LocalAgentPanel() {
             } else {
               update((r) => {
                 r.streaming = false;
+                r.queued = false;
                 r.error = true;
                 // 不活跃超时等: 保留已流出正文, 红条单独展示
                 if (ev.preserveText && r.text.trim()) {
@@ -1444,12 +1494,14 @@ export default function LocalAgentPanel() {
       if ((e as Error).name !== "AbortError") {
         update((r) => {
           r.streaming = false;
+          r.queued = false;
           r.error = true;
           r.text = (e as Error).message;
         });
       } else {
         update((r) => {
           r.streaming = false;
+          r.queued = false;
           r.interrupted = true;
         });
       }
@@ -1476,6 +1528,7 @@ export default function LocalAgentPanel() {
                 errorNote: run.errorNote,
                 interrupted: run.interrupted,
                 streaming: false,
+                queued: false,
                 thinking: false,
                 finishedAt: Date.now(),
               }
@@ -2169,7 +2222,7 @@ export default function LocalAgentPanel() {
                         <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
                         {m.streaming && (
                           <span className="text-[11px] text-accent">
-                            {m.thinking ? "思考中…" : "正在生成…"}
+                            {m.queued ? "排队中…" : m.thinking ? "思考中…" : "正在生成…"}
                           </span>
                         )}
                         {m.interrupted && (
@@ -2198,10 +2251,18 @@ export default function LocalAgentPanel() {
                             {body ? (
                               <>
                                 {renderMd(body, openDoc, docHints, openLink)}
-                                {m.streaming ? <span className="animate-pulse">▍</span> : null}
+                                {m.streaming && !m.queued ? <span className="animate-pulse">▍</span> : null}
                               </>
                             ) : m.streaming ? (
-                              <span className="animate-pulse">▍</span>
+                              m.queued ? (
+                                <span className="text-ink-faint">
+                                  {currentId && queueHint[currentId]
+                                    ? queueHint[currentId]
+                                    : "排队等待中…"}
+                                </span>
+                              ) : (
+                                <span className="animate-pulse">▍</span>
+                              )
                             ) : !banner ? (
                               "…"
                             ) : null}
@@ -2852,10 +2913,27 @@ export default function LocalAgentPanel() {
           />
           <div
             className="fixed z-[61] min-w-[150px] select-none overflow-hidden rounded-lg border border-line bg-surface py-1 shadow-xl"
-            style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 110) }}
+            style={{ left: Math.min(ctxMenu.x, window.innerWidth - 170), top: Math.min(ctxMenu.y, window.innerHeight - 140) }}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
+            <button
+              type="button"
+              onClick={() => {
+                const src = ctxMenu.src;
+                setCtxMenu(null);
+                openLink(src);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] text-ink transition-colors hover:bg-page"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4 shrink-0">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3-3" />
+                <path d="M11 8v6" />
+                <path d="M8 11h6" />
+              </svg>
+              预览
+            </button>
             <button
               type="button"
               onClick={() => void downloadImage()}
@@ -3216,50 +3294,61 @@ function ToolStrip({ m }: { m: Msg }) {
     ? Math.round((m.finishedAt - m.startedAt) / 1000)
     : Math.max(0, Math.round((Date.now() - (m.startedAt ?? Date.now())) / 1000));
   const detail = last?.detail ? ` · ${last.detail}` : "";
+  const stripLabel = m.queued
+    ? "等待前序任务完成后开始…"
+    : m.streaming
+      ? last
+        ? `${last.tool}${detail}`
+        : "任务运行中…"
+      : `${unique}${detail}`;
 
   const fmtTime = (n: number) =>
     n ? new Date(n).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
 
   return (
-    <div ref={wrapRef} className="mb-1.5">
+    <div ref={wrapRef} className="mb-1.5 w-full min-w-0 max-w-full">
       <div
         role="button"
         tabIndex={0}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => e.key === "Enter" && setOpen((v) => !v)}
-        title={rows.length ? "点击展开/收起工具明细" : undefined}
-        className="flex min-h-[22px] cursor-pointer select-none items-center gap-2 rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted hover:bg-black/[0.05]"
+        title={rows.length ? "点击展开/收起工具明细" : stripLabel}
+        className="flex min-h-[22px] w-full min-w-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted hover:bg-black/[0.05]"
       >
         <span
           className={`shrink-0 rounded px-1.5 py-px font-medium ${
-            m.streaming ? "bg-accent-soft text-accent-deep" : "bg-black/[0.04] text-ink-muted"
+            m.queued
+              ? "bg-accent-soft text-accent-deep"
+              : m.streaming
+                ? "bg-accent-soft text-accent-deep"
+                : "bg-black/[0.04] text-ink-muted"
           }`}
         >
-          {m.streaming ? "正在执行" : "已处理"}
+          {m.queued ? "排队中" : m.streaming ? "正在执行" : "已处理"}
         </span>
-        <span className="min-w-0 flex-1 truncate">
-          {m.streaming ? (last ? `${last.tool}${detail ? ` · ${detail}` : ""}` : "任务运行中…") : `${unique}${detail ? ` · ${detail}` : ""}`}
+        <span className="min-w-0 flex-1 truncate" title={stripLabel}>
+          {stripLabel}
         </span>
         <span className="shrink-0 tabular-nums">{elapsed}s</span>
         {rows.length > 0 ? <IconChevron open={open} /> : null}
       </div>
       {open && rows.length > 0 ? (
-        <div className="mt-1 max-h-[200px] overflow-y-auto rounded-md border border-line bg-white/60">
-          <table className="w-full border-collapse text-[11px]">
+        <div className="mt-1 max-h-[200px] w-full min-w-0 overflow-x-auto overflow-y-auto rounded-md border border-line bg-white/60">
+          <table className="w-full table-fixed border-collapse text-[11px]">
             <thead className="sticky top-0 bg-surface">
               <tr className="text-ink-faint">
-                <th className="whitespace-nowrap px-2 py-1 text-left font-medium">时间</th>
-                <th className="px-2 py-1 text-left font-medium">工具</th>
+                <th className="w-[72px] whitespace-nowrap px-2 py-1 text-left font-medium">时间</th>
+                <th className="w-[88px] px-2 py-1 text-left font-medium">工具</th>
                 <th className="px-2 py-1 text-left font-medium">参数</th>
-                <th className="whitespace-nowrap px-2 py-1 text-right font-medium">耗时</th>
+                <th className="w-[56px] whitespace-nowrap px-2 py-1 text-right font-medium">耗时</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r, i) => (
                 <tr key={i} className="border-t border-line/60">
                   <td className="whitespace-nowrap px-2 py-1 tabular-nums">{fmtTime(r.start)}</td>
-                  <td className="whitespace-nowrap px-2 py-1 font-medium text-ink">{r.tool}</td>
-                  <td className="max-w-[260px] truncate px-2 py-1" title={r.detail}>
+                  <td className="truncate px-2 py-1 font-medium text-ink" title={r.tool}>{r.tool}</td>
+                  <td className="truncate px-2 py-1" title={r.detail}>
                     {r.detail || "—"}
                   </td>
                   <td className="whitespace-nowrap px-2 py-1 text-right tabular-nums">
@@ -3344,11 +3433,17 @@ function MdImg({
     <img
       src={src}
       alt={alt}
-      title={title || undefined}
+      title={title || alt || "点击预览"}
       data-local-path={localPath || undefined}
       loading="lazy"
       onError={() => setFailed(true)}
-      style={style}
+      onClick={(e) => {
+        if (!onOpenLink) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onOpenLink(localPath || href || src);
+      }}
+      style={{ ...style, cursor: onOpenLink ? "zoom-in" : style?.cursor }}
       className="my-1 max-h-[360px] w-full rounded-lg border border-line object-contain bg-black/[0.02]"
     />
   );
@@ -3374,10 +3469,12 @@ function Inline({
   onOpenLink?: (raw: string) => void;
   baseDir?: string;
 }) {
+  // 链接 URL 允许换行 (模型偶发把长路径折行); 粗体优先匹配后需递归解析内层链接
   const parts = text.split(
-    /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*\n]+\*\*|`[^`\n]+`|!\[[^\]\n]+\]\([^)\n]+\)|\[[^\]\n]+\]\([^)\n]+\)|https?:\/\/[^\s<]+)/g,
+    /(<video[^>]*>[\s\S]*?<\/video>|<img[^>]*\/?>|\*\*[^*]+?\*\*|`[^`\n]+`|!\[[^\]]+\]\([^)]+\)|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<]+)/g,
   );
   const out: ReactNode[] = [];
+  const nested = { onOpenDoc, docHints, onOpenLink, baseDir };
   parts.forEach((p, i) => {
     // 安全: 协议白名单 + 标签/属性白名单
     const mediaBase = baseDir ?? docHints?.[0];
@@ -3455,7 +3552,12 @@ function Inline({
     }
 
     if (p.startsWith("**") && p.endsWith("**") && p.length > 4) {
-      out.push(<strong key={i}>{p.slice(2, -2)}</strong>);
+      // 粗体内继续解析链接, 避免 **[文件](/abs/path)** 整段当纯文本
+      out.push(
+        <strong key={i}>
+          <Inline text={p.slice(2, -2)} {...nested} />
+        </strong>,
+      );
       return;
     }
     if (p.startsWith("`") && p.endsWith("`") && p.length > 2) {
@@ -3524,16 +3626,19 @@ function Inline({
       return;
     }
 
-    const m = p.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-    if (m && safeUrl(m[2])) {
-      const target = m[2].trim();
-      // 本地 markdown 文档: 不跳转, 点击内联预览
-      if (MD_LOCAL_RE.test(target) && /\.(md|markdown)(\?|#|$)/i.test(target)) {
+    const m = p.match(/^\[([^\]]+)\]\(\s*<?([^)>\s]*(?:\s+[^)>\s]+)*)>?(?:\s+"[^"]*")?\s*\)$/);
+    // 兼容长路径被折行: 去掉 href 内空白
+    const linkHref = m?.[2]?.replace(/\s+/g, "").trim() ?? "";
+    if (m && linkHref && safeUrl(linkHref)) {
+      const target = linkHref.replace(/^file:\/\//, "");
+      const isLocal = MD_LOCAL_RE.test(target) || (target.startsWith("/") && !/^https?:/i.test(target));
+      // 本地文档: 不跳转, 点击内联预览
+      if (isLocal) {
         out.push(
           <button
             key={i}
             type="button"
-            onClick={() => onOpenDoc?.(target.replace(/^file:\/\//, ""), m[1])}
+            onClick={() => onOpenDoc?.(target, m[1])}
             title={target}
             className="inline-flex max-w-full items-center gap-1 rounded-md border border-accent/30 bg-accent-soft px-2 py-0.5 align-baseline text-[0.92em] font-medium text-accent-deep transition-colors hover:bg-accent/15"
           >
@@ -3545,11 +3650,11 @@ function Inline({
       out.push(
         <a
           key={i}
-          href={toSrc(m[2])}
+          href={toSrc(linkHref)}
           onClick={(e) => {
             if (onOpenLink) {
               e.preventDefault();
-              onOpenLink(m[2]);
+              onOpenLink(linkHref);
             }
           }}
           target="_blank"
@@ -3603,7 +3708,9 @@ function Inline({
       return;
     }
 
-    const lines = p.split("\n");
+    // 行末 Markdown 硬换行反斜杠不展示
+    const cleaned = p.replace(/\\\n/g, "\n").replace(/\\$/gm, "");
+    const lines = cleaned.split("\n");
     lines.forEach((ln, li) => {
       if (li > 0) out.push(<br key={`br-${i}-${li}`} />);
       out.push(<span key={`${i}-${li}`}>{ln}</span>);

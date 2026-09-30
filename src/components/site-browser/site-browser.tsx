@@ -42,6 +42,19 @@ export type SiteHistoryEntry = {
   closedAt: number;
 };
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+}
+
 type SiteSettings = {
   maxTabs: number;
   maxHistory: number;
@@ -276,7 +289,13 @@ export default function SiteBrowser({
   const [browserHomeTitle, setBrowserHomeTitle] = useState(sites[0]?.label || "主页");
   const [editHomeOpen, setEditHomeOpen] = useState(false);
   const [editHomeUrl, setEditHomeUrl] = useState("");
-  const [homeTabMenu, setHomeTabMenu] = useState<{ x: number; y: number } | null>(null);
+  const [homeTabMenu, setHomeTabMenu] = useState<{
+    x: number;
+    y: number;
+    tabId: string;
+    url: string;
+    isHome: boolean;
+  } | null>(null);
   const [loaded, setLoaded] = useState(false);
   /** 监控回收: 主页等被「关闭」后卸掉 webview, 模块再次激活时重建 */
   const [parkedIds, setParkedIds] = useState<Record<string, true>>({});
@@ -1282,6 +1301,15 @@ export default function SiteBrowser({
             <ContextMenuLayer x={ctxMenu.x} y={ctxMenu.y} onClose={() => setCtxMenu(null)}>
               <ContextMenuItem
                 onClick={() => {
+                  const site = moduleSites.find((x) => x.id === ctxMenu.siteId);
+                  setCtxMenu(null);
+                  if (site?.url) void copyTextToClipboard(site.url);
+                }}
+              >
+                复制链接
+              </ContextMenuItem>
+              <ContextMenuItem
+                onClick={() => {
                   const id = ctxMenu.siteId;
                   setCtxMenu(null);
                   openEditSite(id);
@@ -1401,25 +1429,38 @@ export default function SiteBrowser({
             <ContextMenuLayer x={homeTabMenu.x} y={homeTabMenu.y} onClose={() => setHomeTabMenu(null)}>
               <ContextMenuItem
                 onClick={() => {
+                  const url = homeTabMenu.url;
                   setHomeTabMenu(null);
-                  setEditHomeUrl(browserHome);
-                  setEditHomeOpen(true);
+                  if (url) void copyTextToClipboard(url);
                 }}
               >
-                编辑主页
+                复制链接
               </ContextMenuItem>
-              <ContextMenuItem
-                onClick={() => {
-                  setHomeTabMenu(null);
-                  const hint =
-                    activeTabDef && !activeTabDef.id.endsWith(HOME_SUFFIX)
-                      ? tabDisplayTitle(activeTabDef)
-                      : undefined;
-                  void applyBrowserHome(currentUrl || browserHome, hint);
-                }}
-              >
-                将当前页设为主页
-              </ContextMenuItem>
+              {addressMode && homeTabMenu.isHome ? (
+                <>
+                  <ContextMenuItem
+                    onClick={() => {
+                      setHomeTabMenu(null);
+                      setEditHomeUrl(browserHome);
+                      setEditHomeOpen(true);
+                    }}
+                  >
+                    编辑主页
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    onClick={() => {
+                      setHomeTabMenu(null);
+                      const hint =
+                        activeTabDef && !activeTabDef.id.endsWith(HOME_SUFFIX)
+                          ? tabDisplayTitle(activeTabDef)
+                          : undefined;
+                      void applyBrowserHome(currentUrl || browserHome, hint);
+                    }}
+                  >
+                    将当前页设为主页
+                  </ContextMenuItem>
+                </>
+              ) : null}
             </ContextMenuLayer>
           ) : null}
           {groupTabs.map((t) => {
@@ -1427,6 +1468,8 @@ export default function SiteBrowser({
             const isHome = t.id.endsWith(HOME_SUFFIX);
             const tabLoading = !!loadingByTab[t.id];
             const tabErrMsg = errorMsgByTab[t.id];
+            const liveUrl =
+              active && currentUrl && currentUrl.startsWith("http") ? currentUrl : t.url;
             return (
               <div
                 key={t.id}
@@ -1435,16 +1478,21 @@ export default function SiteBrowser({
                 onClick={() => activateTab(groupId, t.id)}
                 onKeyDown={(e) => e.key === "Enter" && activateTab(groupId, t.id)}
                 onContextMenu={(e) => {
-                  if (!addressMode || !isHome) return;
                   e.preventDefault();
                   e.stopPropagation();
                   window.getSelection()?.removeAllRanges();
-                  setHomeTabMenu({ x: e.clientX, y: e.clientY });
+                  setHomeTabMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    tabId: t.id,
+                    url: liveUrl,
+                    isHome,
+                  });
                 }}
                 title={
                   addressMode && isHome
-                    ? `${tabErrMsg || t.url}\n右键编辑主页`
-                    : tabErrMsg || t.url
+                    ? `${tabErrMsg || liveUrl}\n右键可复制链接 / 编辑主页`
+                    : tabErrMsg || liveUrl
                 }
                 className={[
                   "group relative flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 px-2.5 text-[12.5px] transition-colors duration-150",

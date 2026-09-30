@@ -72,14 +72,28 @@ export async function GET(req: Request) {
     return new Response("bad path", { status: 400 });
   }
 
-  // 元信息: 预览标题旁展示文件大小等
+  // 元信息: 预览标题旁展示文件大小等; 目录也可探测 (点击打开文件夹)
   if (url.searchParams.get("stat") === "1") {
-    if (!existsSync(p) || !statSync(p).isFile()) {
+    if (!existsSync(p)) {
       return Response.json({ error: "not found" }, { status: 404 });
     }
     const st = statSync(p);
+    if (st.isDirectory()) {
+      return Response.json({
+        name: basename(p),
+        isDirectory: true,
+        isFile: false,
+        size: 0,
+        mtime: st.mtimeMs,
+      });
+    }
+    if (!st.isFile()) {
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
     return Response.json({
       name: basename(p),
+      isDirectory: false,
+      isFile: true,
       size: st.size,
       mtime: st.mtimeMs,
     });

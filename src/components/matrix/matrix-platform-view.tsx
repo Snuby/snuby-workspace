@@ -57,6 +57,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; accountId: string } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; url: string } | null>(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   /** 标签加载态 (内存, 不落库) */
@@ -704,6 +705,34 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
         </ContextMenuLayer>
       ) : null}
 
+      {/* 标签页右键: 复制链接 */}
+      {tabMenu ? (
+        <ContextMenuLayer x={tabMenu.x} y={tabMenu.y} onClose={() => setTabMenu(null)}>
+          <ContextMenuItem
+            onClick={() => {
+              const url = tabMenu.url;
+              setTabMenu(null);
+              void (async () => {
+                try {
+                  await navigator.clipboard.writeText(url);
+                } catch {
+                  const ta = document.createElement("textarea");
+                  ta.value = url;
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  ta.remove();
+                }
+                setNotice("链接已复制");
+                window.setTimeout(() => setNotice(""), 1500);
+              })();
+            }}
+          >
+            复制链接
+          </ContextMenuItem>
+        </ContextMenuLayer>
+      ) : null}
+
       {/* 重命名弹框 */}
       {renamingId ? (
         <div
@@ -797,7 +826,13 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                             }));
                           }
                         }}
-                        title={tabError ? errorByTab[t.id] : t.url}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          window.getSelection()?.removeAllRanges();
+                          setTabMenu({ x: e.clientX, y: e.clientY, url: t.url });
+                        }}
+                        title={tabError ? errorByTab[t.id] : `${t.url}\n右键复制链接`}
                         className={[
                           "group relative flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 px-2.5 text-[12.5px] transition-colors duration-150",
                           isActive ? "font-semibold text-accent-deep" : "text-ink-muted hover:text-ink",

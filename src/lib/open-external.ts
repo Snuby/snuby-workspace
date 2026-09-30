@@ -1,5 +1,9 @@
-/** 系统默认浏览器打开 http(s)。Electron 拦截了 window.open / target=_blank。 */
-export async function openInSystemBrowser(url: string): Promise<void> {
+/** 系统默认应用打开 http(s)，或本地 html/htm（file:// / 绝对路径）。Electron 拦截了 window.open。 */
+export async function openInSystemBrowser(urlOrPath: string): Promise<void> {
+  let url = urlOrPath.trim();
+  if (url.startsWith("/") && /\.(html?|HTML?)$/.test(url)) {
+    url = `file://${url}`;
+  }
   const r = await fetch("/api/open-external", {
     method: "POST",
     headers: { "content-type": "application/json" },

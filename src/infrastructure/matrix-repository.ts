@@ -166,6 +166,8 @@ export function createMatrixPlatform(input: {
 
   const created = getMatrixPlatform(id);
   if (!created) throw new Error("创建平台失败");
+  // 新建平台默认带首个账号槽 + 主页标签
+  addMatrixAccount(id);
   return created;
 }
 

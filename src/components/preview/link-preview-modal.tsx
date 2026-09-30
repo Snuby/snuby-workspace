@@ -448,10 +448,18 @@ export function LinkPreviewModal({
   };
 
   const openExternal = () => {
-    if (view.kind !== "url") return;
-    void openInSystemBrowser(view.url).catch((e) => {
-      onToast?.(e instanceof Error ? e.message : "打开失败");
-    });
+    if (view.kind === "url") {
+      void openInSystemBrowser(view.url).catch((e) => {
+        onToast?.(e instanceof Error ? e.message : "打开失败");
+      });
+      return;
+    }
+    // 本地 html/htm: 用系统默认浏览器打开
+    if (view.kind === "file" && (ext === "html" || ext === "htm")) {
+      void openInSystemBrowser(view.path).catch((e) => {
+        onToast?.(e instanceof Error ? e.message : "打开失败");
+      });
+    }
   };
 
   return (
@@ -557,11 +565,22 @@ export function LinkPreviewModal({
             )}
           </PreviewIconBtn>
           {view.kind === "file" ? (
-            <PreviewIconBtn title="在 Finder 中显示" onClick={() => void revealInFinder()}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
-                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              </svg>
-            </PreviewIconBtn>
+            <>
+              <PreviewIconBtn title="在 Finder 中显示" onClick={() => void revealInFinder()}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                </svg>
+              </PreviewIconBtn>
+              {ext === "html" || ext === "htm" ? (
+                <PreviewIconBtn title="在浏览器中打开" onClick={openExternal}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                    <polyline points="15 3 21 3 21 9" />
+                    <line x1="10" y1="14" x2="21" y2="3" />
+                  </svg>
+                </PreviewIconBtn>
+              ) : null}
+            </>
           ) : (
             <PreviewIconBtn title="在浏览器中打开" onClick={openExternal}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5">

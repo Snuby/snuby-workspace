@@ -103,6 +103,10 @@ export default function SettingsPage() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveTip, setSaveTip] = useState("");
   const [openingFolder, setOpeningFolder] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
+  const [promptDraft, setPromptDraft] = useState("");
+  const [promptBusy, setPromptBusy] = useState(false);
+  const [promptErr, setPromptErr] = useState("");
   const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flash = useCallback((state: SaveState, tip: string) => {
@@ -199,6 +203,50 @@ export default function SettingsPage() {
     }
   };
 
+  const openPromptEditor = async () => {
+    setPromptErr("");
+    setPromptBusy(true);
+    setPromptOpen(true);
+    try {
+      const r = await fetch("/api/agent/system-prompt", { cache: "no-store" });
+      const j = (await r.json()) as { prompt?: string; error?: string };
+      if (!r.ok) throw new Error(j.error || "加载失败");
+      setPromptDraft(j.prompt ?? "");
+    } catch (e) {
+      setPromptErr(e instanceof Error ? e.message : "加载失败");
+      setPromptDraft("");
+    } finally {
+      setPromptBusy(false);
+    }
+  };
+
+  const savePrompt = async () => {
+    const text = promptDraft.trim();
+    if (!text) {
+      setPromptErr("约定内容不能为空");
+      return;
+    }
+    setPromptBusy(true);
+    setPromptErr("");
+    flash("saving", "保存中…");
+    try {
+      const r = await fetch("/api/agent/system-prompt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: text }),
+      });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || "保存失败");
+      setPromptOpen(false);
+      flash("saved", "已保存，下次注入将使用新约定");
+    } catch (e) {
+      setPromptErr(e instanceof Error ? e.message : "保存失败");
+      flash("error", "保存失败");
+    } finally {
+      setPromptBusy(false);
+    }
+  };
+
   const openUserData = async () => {
     if (!userDataPath || openingFolder) return;
     setOpeningFolder(true);
@@ -255,6 +303,15 @@ export default function SettingsPage() {
                     onCommit={(n) => void saveAgentTimeout(n)}
                   />
                 </SettingRow>
+                <SettingRow label="工作约定">
+                  <button
+                    type="button"
+                    onClick={() => void openPromptEditor()}
+                    className="shrink-0 rounded-md border border-line bg-surface px-2.5 py-1 text-[11.5px] text-ink-muted transition-colors hover:bg-hover hover:text-ink"
+                  >
+                    编辑系统提示词
+                  </button>
+                </SettingRow>
               </Section>
 
               <Section
@@ -306,6 +363,69 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+
+      {promptOpen ? (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30"
+          onClick={() => {
+            if (!promptBusy) setPromptOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="编辑系统提示词"
+            onClick={(e) => e.stopPropagation()}
+            className="flex max-h-[min(720px,86vh)] w-[min(640px,92vw)] flex-col rounded-xl border border-line bg-white shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
+              <div>
+                <h3 className="text-[14px] font-semibold text-ink">工作约定 · 系统提示词</h3>
+                <p className="mt-0.5 text-[11.5px] text-ink-faint">
+                  全局生效；保存后下次会话注入将自动使用新内容
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={promptBusy}
+                onClick={() => setPromptOpen(false)}
+                className="rounded-md px-2 py-1 text-[12px] text-ink-faint hover:bg-hover hover:text-ink disabled:opacity-40"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 px-5 py-4">
+              <textarea
+                value={promptDraft}
+                onChange={(e) => setPromptDraft(e.target.value)}
+                disabled={promptBusy}
+                spellCheck={false}
+                className="h-[min(420px,52vh)] w-full resize-none rounded-lg border border-line bg-page px-3 py-2.5 font-mono text-[12.5px] leading-relaxed text-ink outline-none focus:border-accent disabled:opacity-60"
+                placeholder="加载中…"
+              />
+              {promptErr ? <p className="mt-2 text-[12px] text-up">{promptErr}</p> : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-line px-5 py-3">
+              <button
+                type="button"
+                disabled={promptBusy}
+                onClick={() => setPromptOpen(false)}
+                className="rounded-md px-3 py-1.5 text-[12.5px] text-ink-muted hover:bg-hover disabled:opacity-40"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={promptBusy}
+                onClick={() => void savePrompt()}
+                className="rounded-md bg-accent px-3.5 py-1.5 text-[12.5px] font-medium text-white hover:opacity-90 disabled:opacity-40"
+              >
+                {promptBusy ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }

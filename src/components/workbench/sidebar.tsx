@@ -1,7 +1,7 @@
 "use client";
 
-// 灵活工作台: 左侧菜单 = 固定区 (工作台/Web访问)
-// + 自媒体账号矩阵 + 主题区 + 实验室 + 系统
+// 灵活工作台: 左侧菜单 = 工作台首页 + 创作中心 + 自媒体账号矩阵
+// + 主题区 + 拓展 (Web 访问 / 本地 Agent) + 系统
 // 主题区来自 /api/topics; 矩阵平台来自 /api/matrix/platforms (可新建)
 
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
@@ -68,6 +68,22 @@ const ICONS = {
       <path d="M5 12h14" />
     </svg>
   ),
+  /** 作品创作: 笔 + 画板 */
+  createWorks: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  ),
+  /** 素材库: 图片叠层 */
+  createAssets: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-[17px] w-[17px]">
+      <rect x="3" y="5" width="14" height="14" rx="2" />
+      <path d="M7 3h12a2 2 0 0 1 2 2v12" />
+      <circle cx="9.5" cy="10.5" r="1.5" />
+      <path d="m17 19-4.5-4.5L8 19" />
+    </svg>
+  ),
 };
 
 /** 对话框内胶囊: 点击仅填充名称/地址, 不提交 */
@@ -99,8 +115,7 @@ function MatrixPresetCapsules({
 
 /** 固定区导航 (主题区动态渲染在下) */
 const NAV: NavLeaf[] = [
-  { href: "/", label: "工作台", icon: ICONS.home },
-  { href: "/browser", label: "Web 访问", icon: ICONS.globe },
+  { href: "/", label: "工作台首页", icon: ICONS.home },
 ];
 
 function itemClass(active: boolean): string {
@@ -413,6 +428,20 @@ export default function Sidebar() {
           );
         })}
 
+        <div className="mb-1 mt-4 px-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+            创作中心
+          </span>
+        </div>
+        <Link href="/create/works" className={itemClass(pathname === "/create/works")}>
+          {ICONS.createWorks}
+          <span className="min-w-0 flex-1 truncate">作品创作</span>
+        </Link>
+        <Link href="/create/assets" className={itemClass(pathname === "/create/assets")}>
+          {ICONS.createAssets}
+          <span className="min-w-0 flex-1 truncate">素材库</span>
+        </Link>
+
         <div className="mb-1 mt-4 flex items-center justify-between px-1">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
             自媒体账号矩阵
@@ -554,8 +583,12 @@ export default function Sidebar() {
         )}
 
         <div className="mb-1 mt-4 px-1">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">实验室</span>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-faint">拓展</span>
         </div>
+        <Link href="/browser" className={itemClass(pathname === "/browser" || pathname.startsWith("/browser/"))}>
+          {ICONS.globe}
+          <span className="min-w-0 flex-1 truncate">Web 访问</span>
+        </Link>
         <Link href="/lab/local-agent" className={itemClass(pathname.startsWith("/lab"))}>
           {ICONS.flask}
           <span className="min-w-0 flex-1 truncate">本地 Agent</span>
