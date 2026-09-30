@@ -1,9 +1,9 @@
 /** 监控阈值设置（localStorage），侧栏告警与监控页共用 */
 
 export type MonitorSettings = {
-  /** 单标签内存告警 (MB) */
+  /** 单标签内存高亮阈值 (MB)；仅监控页展示，不驱动侧栏告警 */
   tabAlertMb: number;
-  /** App 占总物理内存告警 (%) */
+  /** App 占总物理内存告警 (%)；侧栏「监控」仅此项超标时告警 */
   totalAlertPct: number;
   /** 闲置多久可批量关闭 (分钟) */
   idleMinutes: number;

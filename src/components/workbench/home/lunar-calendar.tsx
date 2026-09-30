@@ -7,6 +7,7 @@ import {
   todayChinaDay,
   type ChinaDayInfo,
 } from "@/lib/china-day";
+import { useChinaToday } from "@/lib/use-china-today";
 
 const WEEK_HEAD = ["日", "一", "二", "三", "四", "五", "六"] as const;
 
@@ -207,7 +208,7 @@ export default function LunarCalendar({
   /** 把「回到今日」交给外层，用于点主页空白 */
   onReadyGoToday?: (goToday: () => void) => void;
 }) {
-  const today = useMemo(() => todayChinaDay(), []);
+  const today = useChinaToday();
   const [cursor, setCursor] = useState({ y: today.y, m: today.m });
   const [selected, setSelected] = useState<ChinaDayInfo>(today);
   const [hovered, setHovered] = useState<ChinaDayInfo | null>(null);
@@ -362,11 +363,7 @@ export default function LunarCalendar({
 
 /** 时钟旁的今日一行摘要 */
 export function TodayRibbon() {
-  const [info, setInfo] = useState<ChinaDayInfo | null>(null);
-  useEffect(() => {
-    setInfo(todayChinaDay());
-  }, []);
-  if (!info) return <div className="h-4 w-48 animate-pulse rounded bg-hover" />;
+  const info = useChinaToday();
   const bits = [
     `${info.y}年${info.m}月${info.d}日`,
     `星期${info.weekdayLabel}`,

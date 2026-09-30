@@ -162,6 +162,46 @@ function hostnameLabel(url: string): string {
   }
 }
 
+/** 占位「…」或空标题 → 用主机名展示, 避免标签栏出现孤立省略号 */
+function tabDisplayTitle(tab: Pick<SiteTab, "url" | "title">): string {
+  const t = tab.title?.trim() ?? "";
+  if (t && t !== LOADING_DOT && t !== "...") return t;
+  return hostnameLabel(tab.url);
+}
+
+function isPlaceholderTitle(title: string | undefined): boolean {
+  const t = title?.trim() ?? "";
+  return !t || t === LOADING_DOT || t === "...";
+}
+
+/** 更新某站点组内标签 (含主页 ::home: 若不在列表则 upsert, 便于落库会话 URL/标题) */
+function patchSiteTab(
+  prev: Record<string, SiteTab[]>,
+  siteId: string,
+  tabId: string,
+  patch: Partial<Pick<SiteTab, "url" | "title" | "error">>,
+): { nextMap: Record<string, SiteTab[]>; nextTabs: SiteTab[] } {
+  const list = prev[siteId] ?? [];
+  const idx = list.findIndex((t) => t.id === tabId);
+  let nextTabs: SiteTab[];
+  if (idx >= 0) {
+    nextTabs = list.map((t, i) => (i === idx ? { ...t, ...patch } : t));
+  } else if (tabId.endsWith(HOME_SUFFIX)) {
+    nextTabs = [
+      ...list.filter((t) => !t.id.endsWith(HOME_SUFFIX)),
+      {
+        id: tabId,
+        url: typeof patch.url === "string" ? patch.url : "",
+        title: typeof patch.title === "string" ? patch.title : LOADING_DOT,
+        ...(patch.error !== undefined ? { error: patch.error } : {}),
+      },
+    ];
+  } else {
+    nextTabs = list;
+  }
+  return { nextMap: { ...prev, [siteId]: nextTabs }, nextTabs };
+}
+
 function isSameHomeUrl(current: string, homeUrl: string): boolean {
   if (!current || current === "about:blank") return false;
   if (current === homeUrl) return true;
@@ -247,6 +287,10 @@ export default function SiteBrowser({
   const activeTabIdRef = useRef<string | null>(null);
   /** 同 URL 短时幂等: 站点对一次点击可能触发多次 window.open (双 popup) → 只开一个标签 */
   const pendingOpenRef = useRef<Record<string, number>>({});
+  /** 标题/URL 变更防抖落盘 (对齐矩阵: 避免只靠卸载落库导致标题停在「…」) */
+  const persistTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const persistTabsRef = useRef<((siteId: string, tabs: SiteTab[]) => void) | null>(null);
+  const schedulePersistRef = useRef<(siteId: string, tabsSnapshot?: SiteTab[]) => void>(() => {});
   /** 始终指向最新 openTab: popup 监听 effect 依赖少, 闭包若直接捕获 openTab 会拿到陈旧 tabsBySite 快照, 导致新建标签覆盖已有标签 */
   const openTabRef = useRef<((siteId: string, url: string) => void) | null>(null);
   const addToTopicRef = useRef<HTMLDivElement | null>(null);
@@ -255,15 +299,29 @@ export default function SiteBrowser({
   parkedIdsRef.current = parkedIds;
   /** 各标签最近打开/激活时间 */
   const lastActiveAtRef = useRef<Record<string, number>>({});
+  const mountedTabsRef = useRef<Set<string>>(new Set());
 
   useClickOutside(addToTopicRef, addToTopicOpen, () => setAddToTopicOpen(false));
   useClickOutside(historyMenuRef, showHistory, () => setShowHistory(false));
 
-  /** 重进模块: 恢复被监控回收的主页 webview */
+  /** 重进模块: 只把当前激活标签重新挂上 (其它已回收/未点过的仍不加载) */
   useEffect(() => {
-    if (!active) return;
-    setParkedIds((prev) => (Object.keys(prev).length === 0 ? prev : {}));
-  }, [active]);
+    if (!active || !loaded) return;
+    const tabId = activeTabRef.current?.tabId;
+    if (!tabId) return;
+    setParkedIds((prev) => {
+      if (!prev[tabId]) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+    setMountedTabs((prev) => {
+      if (prev.has(tabId)) return prev;
+      const next = new Set(prev);
+      next.add(tabId);
+      return next;
+    });
+  }, [active, loaded]);
 
   useEffect(() => {
     if (!activeTab?.tabId) return;
@@ -301,6 +359,7 @@ export default function SiteBrowser({
           const tabs = tabsOfRef.current(site.id);
           for (const t of tabs) {
             if (parkedIdsRef.current[t.id]) continue;
+            if (!mountedTabsRef.current.has(t.id)) continue;
             if (!(t.id in lastActiveAtRef.current)) {
               lastActiveAtRef.current[t.id] = Date.now();
             }
@@ -311,7 +370,7 @@ export default function SiteBrowser({
               groupId: site.id,
               groupLabel: site.label || site.id,
               tabId: t.id,
-              title: t.title || t.url,
+              title: tabDisplayTitle(t),
               url: t.url,
               isHome: t.id.endsWith(HOME_SUFFIX),
               isActive: activeTabRef.current?.siteId === site.id && activeTabRef.current?.tabId === t.id,
@@ -329,14 +388,16 @@ export default function SiteBrowser({
   }, [moduleKey, addressMode, title]);
 
   // 卸载 (切走模块/关窗) 前把最新内存态 (含页面加载后的真实标题) 落库,
-  // 否则标签标题只在 openTab 时持久化 (当时为 "…"), 切回模块恢复的标签全是 "…"
+  // 否则标签标题只在 openTab 时持久化 (当时为占位), 切回模块恢复的标签全是「…」
   const tabsBySiteRef = useRef(tabsBySite);
   tabsBySiteRef.current = tabsBySite;
   useEffect(() => {
     return () => {
+      for (const t of Object.values(persistTimerRef.current)) clearTimeout(t);
+      persistTimerRef.current = {};
       for (const s of moduleSites) {
         const tabs = tabsBySiteRef.current[s.id];
-        if (tabs && tabs.length > 0) persistTabs(s.id, tabs);
+        if (tabs && tabs.length > 0) persistTabsRef.current?.(s.id, tabs);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,22 +412,37 @@ export default function SiteBrowser({
     setActiveSiteInner(moduleSites[0].id);
   }, [moduleSites, activeSiteInner, activeSiteProp, addressMode]);
 
-  // —— 站点级懒挂载 + 常驻: 访问过的站点组全量渲染 (切回不重建、不重载); 首个站点随组件初始化 ——
-  const [visitedSites, setVisitedSites] = useState<Set<string>>(() => new Set([groupId]));
+  // —— 站点级懒挂载: 等会话加载完成后再挂, 避免「先落到首站再恢复上次站点」误开多个 webview ——
+  const [visitedSites, setVisitedSites] = useState<Set<string>>(() => new Set());
   useEffect(() => {
+    if (!loaded) return;
     setVisitedSites((prev) => (prev.has(groupId) ? prev : new Set(prev).add(groupId)));
-  }, [groupId]);
-  // —— 主题内站点全量常驻: sites 来自 DB 动态配置, 新增站点自动挂载 (首次出现即渲染);
-  //   删除站点后 id 不再出现在 moduleSites, 容器渲染自然跳过 (下方 !siteDef 防御) ——
+  }, [groupId, loaded]);
+  /** 标签级懒加载: 用户点过的标签才挂 webview; 切回已挂载的不重建 */
+  const [mountedTabs, setMountedTabs] = useState<Set<string>>(() => new Set());
+  mountedTabsRef.current = mountedTabs;
   useEffect(() => {
-    setVisitedSites((prev) => {
-      const missing = moduleSites.filter((s) => !prev.has(s.id));
-      if (missing.length === 0) return prev;
+    if (!loaded) return;
+    const tabs = tabsOfRef.current(groupId);
+    if (tabs.length === 0) return;
+    const tabId =
+      activeTab && activeTab.siteId === groupId
+        ? (tabs.find((t) => t.id === activeTab.tabId)?.id ?? tabs[0].id)
+        : tabs[0].id;
+    lastActiveAtRef.current[tabId] = Date.now();
+    setMountedTabs((prev) => {
+      if (prev.has(tabId)) return prev;
       const next = new Set(prev);
-      for (const s of missing) next.add(s.id);
+      next.add(tabId);
       return next;
     });
-  }, [moduleSites]);
+    setParkedIds((prev) => {
+      if (!prev[tabId]) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+  }, [activeTab, groupId, tabsBySite, moduleSites, loaded]);
 
   // —— 站点级 + 模块级可见性: 直接作用于 webview 元素自身 (容器/中间 div 的 visibility
   //   会被内部标签 div 显式 visible 覆盖, 必须操作 webview 本体)。激活模块的激活站点组
@@ -415,22 +491,40 @@ export default function SiteBrowser({
           }
         }
         if (data.tabs) {
-          // 只去重同 URL 重复(保留标题完整者); 孤立的 "…" 标签保留 — URL 有效, 激活渲染后标题会自然更新
+          // 去重同 URL; 把落库的「…」占位改成主机名, 避免标签栏再冒孤立省略号
           const cleaned: Record<string, SiteTab[]> = {};
+          const healed: string[] = [];
           for (const [sid, tabs] of Object.entries(data.tabs as Record<string, SiteTab[]>)) {
             const byUrl = new Map<string, SiteTab>();
+            let changed = false;
             for (const t of tabs) {
               const k = t.url.split("#")[0];
+              const fixed = isPlaceholderTitle(t.title)
+                ? { ...t, title: hostnameLabel(t.url) }
+                : t;
+              if (fixed.title !== t.title) changed = true;
               const existing = byUrl.get(k);
               if (!existing) {
-                byUrl.set(k, t);
-              } else if (existing.title === LOADING_DOT && t.title !== LOADING_DOT) {
-                byUrl.set(k, t);
+                byUrl.set(k, fixed);
+              } else if (isPlaceholderTitle(existing.title) && !isPlaceholderTitle(fixed.title)) {
+                byUrl.set(k, fixed);
+                changed = true;
               }
             }
             cleaned[sid] = [...byUrl.values()];
+            if (changed) healed.push(sid);
           }
           setTabsBySite(cleaned);
+          for (const sid of healed) {
+            const tabs = cleaned[sid];
+            if (tabs?.length) {
+              void fetch("/api/site-tabs", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ module: moduleKey, action: "save", site: sid, tabs }),
+              }).catch(() => {});
+            }
+          }
         }
         if (data.history) setHistoryBySite(data.history);
       } catch {
@@ -555,9 +649,23 @@ export default function SiteBrowser({
     (siteId: string): SiteTab[] => {
       const site = moduleSites.find((s) => s.id === siteId);
       if (!site) return [];
-      // 主页由 site 派生, 不与 tabsBySite 里可能残留的 ::home 叠成两个标签
-      const rest = (tabsBySite[siteId] ?? []).filter((t) => !t.id.endsWith(HOME_SUFFIX));
-      return [homeTab(site), ...rest];
+      const all = tabsBySite[siteId] ?? [];
+      const storedHome = all.find((t) => t.id.endsWith(HOME_SUFFIX));
+      const rest = all.filter((t) => !t.id.endsWith(HOME_SUFFIX));
+      // 主页: 优先用落库的会话 url/title (站内跳转后下次打开不丢), 否则回落站点定义
+      const home = homeTab(site);
+      if (storedHome?.url) {
+        return [
+          {
+            ...home,
+            url: storedHome.url,
+            title: isPlaceholderTitle(storedHome.title) ? home.title : storedHome.title,
+            ...(storedHome.error ? { error: true } : {}),
+          },
+          ...rest,
+        ];
+      }
+      return [home, ...rest];
     },
     [moduleSites, tabsBySite],
   );
@@ -565,7 +673,14 @@ export default function SiteBrowser({
 
   const persistTabs = useCallback(
     (siteId: string, tabs: SiteTab[]) => {
-      const body = { module: moduleKey, action: "save", site: siteId, tabs };
+      // 合并主页会话行, 避免 openTab/closeTab 只传非主页列表时把已落库的 ::home 冲掉
+      const fromRef = tabsBySiteRef.current[siteId] ?? [];
+      const home =
+        tabs.find((t) => t.id.endsWith(HOME_SUFFIX)) ??
+        fromRef.find((t) => t.id.endsWith(HOME_SUFFIX));
+      const rest = tabs.filter((t) => !t.id.endsWith(HOME_SUFFIX));
+      const payload = home?.url ? [home, ...rest] : rest;
+      const body = { module: moduleKey, action: "save", site: siteId, tabs: payload };
       void fetch("/api/site-tabs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -574,6 +689,21 @@ export default function SiteBrowser({
     },
     [moduleKey],
   );
+  persistTabsRef.current = persistTabs;
+
+  /** 标题/URL 变更后防抖落盘, 避免只靠卸载落库 — 强杀或未切走时标题会停在「…」 */
+  const schedulePersist = useCallback(
+    (siteId: string, tabsSnapshot?: SiteTab[]) => {
+      const prev = persistTimerRef.current[siteId];
+      if (prev) clearTimeout(prev);
+      persistTimerRef.current[siteId] = setTimeout(() => {
+        const tabs = tabsSnapshot ?? tabsBySiteRef.current[siteId];
+        if (tabs?.length) persistTabs(siteId, tabs);
+      }, 400);
+    },
+    [persistTabs],
+  );
+  schedulePersistRef.current = schedulePersist;
 
   const appendHistory = useCallback(
     (siteId: string, entries: SiteHistoryEntry[]) => {
@@ -622,7 +752,11 @@ export default function SiteBrowser({
         const evictIdx = next.findIndex((t) => !(activeTab?.siteId === siteId && activeTab.tabId === t.id));
         evicted = next.splice(evictIdx >= 0 ? evictIdx : 0, 1)[0] ?? null;
       }
-      const tab: SiteTab = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, url, title: LOADING_DOT };
+      const tab: SiteTab = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        url,
+        title: hostnameLabel(url),
+      };
       next.push(tab);
       setTabsBySite((prev) => ({ ...prev, [siteId]: next }));
       if (evicted) {
@@ -657,9 +791,15 @@ export default function SiteBrowser({
 
   const closeTab = useCallback(
     (siteId: string, tabId: string) => {
-      // 主页: 监控回收 — 卸 webview, 标签仍在, 下次进入模块再挂载
+      // 主页: 监控回收 — 卸 webview, 标签仍在, 下次点进再挂载
       if (tabId.endsWith(HOME_SUFFIX)) {
         setParkedIds((prev) => ({ ...prev, [tabId]: true }));
+        setMountedTabs((prev) => {
+          if (!prev.has(tabId)) return prev;
+          const next = new Set(prev);
+          next.delete(tabId);
+          return next;
+        });
         delete webviewRefs.current[tabId];
         delete tabSiteRef.current[tabId];
         return;
@@ -672,6 +812,12 @@ export default function SiteBrowser({
       setTabsBySite((prev) => ({ ...prev, [siteId]: next }));
       appendHistory(siteId, [{ url: closed.url, title: closed.title, closedAt: Date.now() }]);
       persistTabs(siteId, next);
+      setMountedTabs((prev) => {
+        if (!prev.has(tabId)) return prev;
+        const n = new Set(prev);
+        n.delete(tabId);
+        return n;
+      });
       setLoadingByTab((prev) => {
         if (!(tabId in prev)) return prev;
         const n = { ...prev };
@@ -690,6 +836,8 @@ export default function SiteBrowser({
         delete n[tabId];
         return n;
       });
+      delete webviewRefs.current[tabId];
+      delete tabSiteRef.current[tabId];
       if (activeTab?.siteId === siteId && activeTab.tabId === tabId) {
         // 关闭激活标签 → 激活相邻 (右侧优先, 无右侧则左侧); 无剩余 → 主页
         const target = next[Math.min(idx, next.length - 1)] ?? homeTab(moduleSites.find((s) => s.id === siteId)!);
@@ -740,33 +888,48 @@ export default function SiteBrowser({
     }
     const updateTabUrl = (url: string) => {
       setCurrentUrl(url);
-      setTabsBySite((prev) => ({
-        ...prev,
-        [siteId]: (prev[siteId] ?? []).map((t) => (t.id === tabId ? { ...t, url } : t)),
-      }));
+      setTabsBySite((prev) => {
+        const site = moduleSitesRef.current.find((s) => s.id === siteId);
+        const fallbackTitle = tabId.endsWith(HOME_SUFFIX)
+          ? site?.label ?? hostnameLabel(url)
+          : hostnameLabel(url);
+        const existing = (prev[siteId] ?? []).find((t) => t.id === tabId);
+        const { nextMap, nextTabs } = patchSiteTab(prev, siteId, tabId, {
+          url,
+          // upsert 主页时带上现有/站点标题, 避免空 title
+          ...(existing ? {} : { title: fallbackTitle }),
+        });
+        schedulePersistRef.current(siteId, nextTabs);
+        return nextMap;
+      });
     };
-    // 整页导航: 回写标签 url (持久化/信息展示)
+    // 整页导航 + SPA 站内路由: 都回写标签 url 并落库。
+    // SiteWebview 用 initialSrc 固定挂载地址, 改 state.url 不会触发重载。
     const onNavigateFull = (e: Event) => {
       const url = (e as unknown as { url?: string }).url;
       if (url) updateTabUrl(url);
     };
-    // SPA 路由 (did-navigate-in-page): 只更新地址栏, 不回写标签 url —
-    // 否则标签 url 变化会经受控 src 触发 webview 重载, 造成无限刷新循环
     const onNavigateInPage = (e: Event) => {
       const url = (e as unknown as { url?: string }).url;
-      if (url) setCurrentUrl(url);
+      if (url) updateTabUrl(url);
     };
     const onTitle = (e: Event) => {
-      const t = (e as unknown as { title?: string }).title;
-      if (!t) return;
+      const t = (e as unknown as { title?: string }).title?.trim();
+      if (!t || isPlaceholderTitle(t)) return;
       // 地址栏模式主页标题由 site.label 派生, 需同步 browserHomeTitle
       if (tabId.endsWith(HOME_SUFFIX)) {
         setBrowserHomeTitle(t);
       }
-      setTabsBySite((prev) => ({
-        ...prev,
-        [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, title: t } : x)),
-      }));
+      setTabsBySite((prev) => {
+        const site = moduleSitesRef.current.find((s) => s.id === siteId);
+        const existing = (prev[siteId] ?? []).find((x) => x.id === tabId);
+        const { nextMap, nextTabs } = patchSiteTab(prev, siteId, tabId, {
+          title: t,
+          ...(existing ? {} : { url: site?.url ?? "" }),
+        });
+        schedulePersistRef.current(siteId, nextTabs);
+        return nextMap;
+      });
     };
     const onStart = () => {
       setLoadingByTab((prev) => ({ ...prev, [tabId]: true }));
@@ -776,12 +939,11 @@ export default function SiteBrowser({
         delete n[tabId];
         return n;
       });
-      setTabsBySite((prev) => ({
-        ...prev,
-        [siteId]: (prev[siteId] ?? []).map((x) =>
-          x.id === tabId && x.error ? { ...x, error: false } : x,
-        ),
-      }));
+      setTabsBySite((prev) => {
+        if (!(prev[siteId] ?? []).some((x) => x.id === tabId)) return prev;
+        const { nextMap } = patchSiteTab(prev, siteId, tabId, { error: false });
+        return nextMap;
+      });
     };
     const onStop = () => {
       setLoadingByTab((prev) => ({ ...prev, [tabId]: false }));
@@ -801,10 +963,19 @@ export default function SiteBrowser({
       const tip = detail.errorDescription || "页面加载失败";
       const msg = detail.validatedURL ? `${tip} · ${detail.validatedURL}` : tip;
       setErrorMsgByTab((prev) => ({ ...prev, [tabId]: msg }));
-      setTabsBySite((prev) => ({
-        ...prev,
-        [siteId]: (prev[siteId] ?? []).map((x) => (x.id === tabId ? { ...x, error: true } : x)),
-      }));
+      setTabsBySite((prev) => {
+        // 仅已有行时标错; 主页尚未 upsert 则跳过, 避免写入空 url
+        if (!(prev[siteId] ?? []).some((x) => x.id === tabId) && !tabId.endsWith(HOME_SUFFIX)) {
+          return prev;
+        }
+        const site = moduleSitesRef.current.find((s) => s.id === siteId);
+        const existing = (prev[siteId] ?? []).find((x) => x.id === tabId);
+        const { nextMap } = patchSiteTab(prev, siteId, tabId, {
+          error: true,
+          ...(existing ? {} : { url: site?.url ?? "", title: site?.label ?? "" }),
+        });
+        return nextMap;
+      });
     };
     if (!el.getAttribute("data-snuby-bound")) {
       el.setAttribute("data-snuby-bound", "1");
@@ -1242,7 +1413,7 @@ export default function SiteBrowser({
                   setHomeTabMenu(null);
                   const hint =
                     activeTabDef && !activeTabDef.id.endsWith(HOME_SUFFIX)
-                      ? activeTabDef.title
+                      ? tabDisplayTitle(activeTabDef)
                       : undefined;
                   void applyBrowserHome(currentUrl || browserHome, hint);
                 }}
@@ -1281,14 +1452,14 @@ export default function SiteBrowser({
                 ].join(" ")}
               >
                 {t.error || tabErrMsg ? <span className="text-red-500">⚠</span> : null}
-                <span className="max-w-[140px] truncate">{t.title}</span>
+                <span className="max-w-[140px] truncate">{tabDisplayTitle(t)}</span>
                 {tabLoading && active ? (
                   <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
                 ) : null}
                 {!isHome ? (
                   <button
                     type="button"
-                    aria-label={`关闭 ${t.title}`}
+                    aria-label={`关闭 ${tabDisplayTitle(t)}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       closeTab(groupId, t.id);
@@ -1388,13 +1559,8 @@ export default function SiteBrowser({
         </div>
       </div>
 
-      {/* 内容区: 站点级 + 标签级全量常驻渲染, 所有 webview 实例不销毁 —
-          可见性由上方 effect 直接作用于 webview 元素: 激活模块的激活站点组交还标签级
-          div 控制 (激活标签显示其余隐藏), 非激活站点/模块强制隐藏。
-          切选项卡/切标签/切模块都只是切可见性 → 无重载无白屏, 页面运行态全保留。
-          ★ 所有层统一 opacity + pointer-events (绝不用 visibility): visibility 会触发
-          Electron 分离 guest, 恢复后真实鼠标输入失效 (实测复现); opacity 保持 guest
-          常驻渲染, 输入通道永不中断。隐藏层 pointer-events:none 不拦截下层点击。 */}
+      {/* 内容区: 站点/标签均懒挂载 — 未切过的站点与标签不建 webview;
+          已挂载的切回只切 opacity, 不销毁。★ 不用 visibility (会分离 Electron guest)。 */}
       <div className="relative min-h-0 flex-1">
         {[...visitedSites].map((siteId) => {
           const siteDef = moduleSites.find((s) => s.id === siteId);
@@ -1412,7 +1578,9 @@ export default function SiteBrowser({
                 zIndex: isActiveSite ? 5 : 0,
               }}
             >
-              {tabs.map((t) => (
+              {tabs.map((t) => {
+                const shouldMount = mountedTabs.has(t.id) && !parkedIds[t.id];
+                return (
                 <div
                   key={t.id}
                   className="absolute inset-0 h-full w-full"
@@ -1422,7 +1590,7 @@ export default function SiteBrowser({
                     zIndex: isActiveSite && t.id === activeTabDef.id ? 10 : 0,
                   }}
                 >
-                  {parkedIds[t.id] ? null : t.url.startsWith("snuby://") ? (
+                  {!shouldMount ? null : t.url.startsWith("snuby://") ? (
                     // 内置站点 (实验室等): 渲染本地组件而非 webview
                     <LocalAgentPanel />
                   ) : (
@@ -1435,7 +1603,8 @@ export default function SiteBrowser({
                     />
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           );
         })}

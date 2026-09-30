@@ -32,6 +32,24 @@ function isElectronEnv(): boolean {
   return typeof navigator !== "undefined" && /Electron/i.test(navigator.userAgent);
 }
 
+function hostnameLabel(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "") || "页面";
+  } catch {
+    return "页面";
+  }
+}
+
+function isPlaceholderTitle(title: string | undefined): boolean {
+  const t = title?.trim() ?? "";
+  return !t || t === "…" || t === "...";
+}
+
+function tabDisplayTitle(tab: Pick<MatrixTab, "url" | "title">): string {
+  if (!isPlaceholderTitle(tab.title)) return tab.title.trim();
+  return hostnameLabel(tab.url);
+}
+
 export default function MatrixPlatformView({ platformId, active }: Props) {
   const [platform, setPlatform] = useState<MatrixPlatform | null>(null);
   const [accounts, setAccounts] = useState<MatrixAccount[]>([]);
@@ -48,8 +66,10 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   /** 标签是否已成功完成过至少一次加载 — 首屏白屏才盖全屏提示 */
   const [readyByTab, setReadyByTab] = useState<Record<string, boolean>>({});
   const [errorByTab, setErrorByTab] = useState<Record<string, string>>({});
-  /** 监控回收主页: 卸 webview, 平台再次激活时重建 */
+  /** 监控回收主页: 卸 webview, 再次点进再挂载 */
   const [parkedIds, setParkedIds] = useState<Record<string, true>>({});
+  /** 标签级懒加载: 点过的标签才挂 webview */
+  const [mountedTabs, setMountedTabs] = useState<Set<string>>(() => new Set());
 
   const webviewRefs = useRef<Record<string, HTMLElement | null>>({});
   const tabAccountRef = useRef<Record<string, string>>({});
@@ -61,6 +81,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   const persistTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const parkedIdsRef = useRef(parkedIds);
   parkedIdsRef.current = parkedIds;
+  const mountedTabsRef = useRef(mountedTabs);
+  mountedTabsRef.current = mountedTabs;
   const lastActiveAtRef = useRef<Record<string, number>>({});
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
@@ -84,12 +106,37 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
 
   useEffect(() => {
     if (!active) return;
-    setParkedIds((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+    const tabId = activeTabIdRef.current;
+    if (!tabId) return;
+    setParkedIds((prev) => {
+      if (!prev[tabId]) return prev;
+      const next = { ...prev };
+      delete next[tabId];
+      return next;
+    });
+    setMountedTabs((prev) => {
+      if (prev.has(tabId)) return prev;
+      const next = new Set(prev);
+      next.add(tabId);
+      return next;
+    });
   }, [active]);
 
   useEffect(() => {
     if (!activeTabId) return;
     lastActiveAtRef.current[activeTabId] = Date.now();
+    setMountedTabs((prev) => {
+      if (prev.has(activeTabId)) return prev;
+      const next = new Set(prev);
+      next.add(activeTabId);
+      return next;
+    });
+    setParkedIds((prev) => {
+      if (!prev[activeTabId]) return prev;
+      const next = { ...prev };
+      delete next[activeTabId];
+      return next;
+    });
   }, [activeTabId]);
 
   useEffect(() => {
@@ -109,6 +156,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
           const activeId = activeTabByAccountRef.current[acc.id] ?? tabs[0]?.id;
           for (const t of tabs) {
             if (parkedIdsRef.current[t.id]) continue;
+            if (!mountedTabsRef.current.has(t.id)) continue;
             if (!(t.id in lastActiveAtRef.current)) {
               lastActiveAtRef.current[t.id] = Date.now();
             }
@@ -161,7 +209,9 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
         { cache: "no-store" },
       );
       const j = (await r.json()) as { tabs?: MatrixTab[] };
-      const tabs = j.tabs ?? [];
+      const tabs = (j.tabs ?? []).map((t) =>
+        isPlaceholderTitle(t.title) ? { ...t, title: hostnameLabel(t.url) } : t,
+      );
       setTabsByAccount((prev) => ({ ...prev, [accountId]: tabs }));
       setActiveTabByAccount((prev) => ({
         ...prev,
@@ -204,11 +254,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
         const pr = await fetch("/api/matrix/platforms", { cache: "no-store" });
         const pj = (await pr.json()) as { platforms?: MatrixPlatform[] };
         setPlatform(pj.platforms?.find((p) => p.id === platformId) ?? null);
-        const { list, aid } = await refreshAccounts();
-        await Promise.all(list.map((a) => loadTabsFor(a.id)));
-        if (aid) {
-          // loadTabsFor already set
-        }
+        const { aid } = await refreshAccounts();
+        if (aid) await loadTabsFor(aid);
       } catch {
         setNotice("加载失败");
       }
@@ -270,8 +317,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
       tabAccountRef.current[tabId] = accountId;
       if (!el) return;
       const onTitle = (e: Event) => {
-        const t = (e as unknown as { title?: string }).title;
-        if (!t) return;
+        const t = (e as unknown as { title?: string }).title?.trim();
+        if (!t || isPlaceholderTitle(t)) return;
         setTabsByAccount((prev) => {
           const tabs = prev[accountId];
           if (!tabs) return prev;
@@ -282,7 +329,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
       };
       const onNav = () => {
         const url = (el as unknown as { getURL?: () => string }).getURL?.();
-        if (!url || isHomeTabId(tabId)) return;
+        if (!url) return;
+        // 主页/普通标签一律回写 url 并落库; AccountWebview 用 initialSrc, 不致重载
         setTabsByAccount((prev) => {
           const tabs = prev[accountId];
           if (!tabs) return prev;
@@ -444,7 +492,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
 
   const openTab = (accountId: string, url: string) => {
     const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const tab: MatrixTab = { id, url, title: "…" };
+    const tab: MatrixTab = { id, url, title: hostnameLabel(url) };
     setTabsByAccount((prev) => {
       const next = [...(prev[accountId] ?? []), tab];
       void persistTabs(accountId, next);
@@ -460,6 +508,12 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
   const closeTab = (accountId: string, tabId: string) => {
     if (isHomeTabId(tabId)) {
       setParkedIds((prev) => ({ ...prev, [tabId]: true }));
+      setMountedTabs((prev) => {
+        if (!prev.has(tabId)) return prev;
+        const next = new Set(prev);
+        next.delete(tabId);
+        return next;
+      });
       delete webviewRefs.current[tabId];
       delete tabAccountRef.current[tabId];
       return;
@@ -477,6 +531,12 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
       delete webviewRefs.current[tabId];
       delete tabAccountRef.current[tabId];
       return { ...prev, [accountId]: next };
+    });
+    setMountedTabs((prev) => {
+      if (!prev.has(tabId)) return prev;
+      const n = new Set(prev);
+      n.delete(tabId);
+      return n;
     });
     setLoadingByTab((prev) => {
       if (!(tabId in prev)) return prev;
@@ -746,7 +806,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                       >
                         {tabError ? <span className="text-red-500">⚠</span> : null}
                         <span className="max-w-[140px] truncate">
-                          {home ? platform.homeTitle : t.title || "…"}
+                          {home ? platform.homeTitle : tabDisplayTitle(t)}
                         </span>
                         {tabLoading && isActive ? (
                           <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
@@ -788,8 +848,10 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
               <div className="relative min-h-0 flex-1 bg-surface">
                 {accounts.map((acc) => {
                   const tabs = tabsByAccount[acc.id] ?? [];
-                  return tabs.map((t) =>
-                    parkedIds[t.id] ? null : (
+                  return tabs.map((t) => {
+                    const shouldMount = mountedTabs.has(t.id) && !parkedIds[t.id];
+                    if (!shouldMount) return null;
+                    return (
                     <div
                       key={`${acc.id}:${t.id}`}
                       className="absolute inset-0"
@@ -810,8 +872,8 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
                         onRef={registerGuest}
                       />
                     </div>
-                    ),
-                  );
+                    );
+                  });
                 })}
                 {showFirstLoadOverlay ? (
                   <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-surface">

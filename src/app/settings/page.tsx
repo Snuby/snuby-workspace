@@ -1,207 +1,309 @@
 "use client";
 
-// Spec: 017-site-tabs — 设置页: 站点标签页按模块独立配置 (maxTabs 2-50 / maxHistory 10-2000)
-// + 本地 Agent 不活跃超时 (agent-preference.json)
+// 设置：本地 Agent 不活跃超时 + 全局标签/历史上限 + 关于（单页）
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Topbar from "@/components/workbench/topbar";
-
-const MODULES: Array<{ key: string; label: string }> = [
-  { key: "it-news", label: "IT 资讯" },
-  { key: "leaderboard", label: "AI 模型榜单" },
-  { key: "creators", label: "自媒体" },
-  { key: "browser", label: "Web 访问" },
-];
-
-type ModuleSettings = { maxTabs: number; maxHistory: number };
 
 const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
 
+type SaveState = "idle" | "saving" | "saved" | "error";
+
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border-b border-line/70 py-5 last:border-b-0">
+      <h2 className="text-[13.5px] font-semibold text-ink">{title}</h2>
+      {hint ? <p className="mt-1 text-[11.5px] leading-relaxed text-ink-faint">{hint}</p> : null}
+      <div className="mt-3 space-y-2.5">{children}</div>
+    </section>
+  );
+}
+
+function SettingRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-8 items-center justify-between gap-4">
+      <span className="shrink-0 text-[12.5px] text-ink-muted">{label}</span>
+      <div className="flex min-w-0 items-center justify-end gap-2">{children}</div>
+    </div>
+  );
+}
+
+function NumberField({
+  value,
+  min,
+  max,
+  suffix,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  suffix?: string;
+  onCommit: (n: number) => void;
+}) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    setText(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const n = Number(text);
+    if (!Number.isFinite(n)) {
+      setText(String(value));
+      return;
+    }
+    const next = clamp(Math.round(n), min, max);
+    setText(String(next));
+    if (next !== value) onCommit(next);
+  };
+
+  return (
+    <>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.currentTarget.blur();
+          }
+        }}
+        className="h-7 w-[72px] rounded-md border border-line bg-white px-2 text-center text-[12.5px] tabular-nums outline-none focus:border-accent"
+      />
+      {suffix ? <span className="text-[11px] text-ink-faint">{suffix}</span> : null}
+    </>
+  );
+}
+
 export default function SettingsPage() {
-  const [values, setValues] = useState<Record<string, ModuleSettings>>({});
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [savedTip, setSavedTip] = useState(false);
-  /** 本地 Agent: 不活跃超时 (分钟); 0 = 禁用 */
   const [inactivityMin, setInactivityMin] = useState(10);
-  const [agentDirty, setAgentDirty] = useState(false);
+  const [maxTabs, setMaxTabs] = useState(10);
+  const [maxHistory, setMaxHistory] = useState(100);
+  const [version, setVersion] = useState("0.1.0");
+  const [userDataPath, setUserDataPath] = useState("");
+  const [userDataDisplay, setUserDataDisplay] = useState("~/snuby-workspace-data");
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveTip, setSaveTip] = useState("");
+  const [openingFolder, setOpeningFolder] = useState(false);
+  const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flash = useCallback((state: SaveState, tip: string) => {
+    setSaveState(state);
+    setSaveTip(tip);
+    if (tipTimer.current) clearTimeout(tipTimer.current);
+    if (state === "saved" || state === "error") {
+      tipTimer.current = setTimeout(() => {
+        setSaveState("idle");
+        setSaveTip("");
+      }, 1800);
+    }
+  }, []);
 
   useEffect(() => {
     (async () => {
-      const next: Record<string, ModuleSettings> = {};
-      for (const m of MODULES) {
-        try {
-          const res = await fetch(`/api/site-tabs?module=${encodeURIComponent(m.key)}`);
-          if (!res.ok) continue;
-          const data = await res.json();
-          next[m.key] = data.settings ?? { maxTabs: 10, maxHistory: 100 };
-        } catch {
-          next[m.key] = { maxTabs: 10, maxHistory: 100 };
-        }
-      }
-      setValues(next);
       try {
-        const r = await fetch("/api/agent/preference", { cache: "no-store" });
-        if (r.ok) {
-          const j = (await r.json()) as { inactivityTimeoutMs?: number };
+        const [agentRes, limitsRes, infoRes] = await Promise.all([
+          fetch("/api/agent/preference", { cache: "no-store" }),
+          fetch("/api/site-tabs?limits=1", { cache: "no-store" }),
+          fetch("/api/app-info", { cache: "no-store" }),
+        ]);
+        if (agentRes.ok) {
+          const j = (await agentRes.json()) as { inactivityTimeoutMs?: number };
           const ms = j.inactivityTimeoutMs ?? 600_000;
           setInactivityMin(ms <= 0 ? 0 : Math.round(ms / 60_000));
         }
+        if (limitsRes.ok) {
+          const j = (await limitsRes.json()) as { maxTabs?: number; maxHistory?: number };
+          if (typeof j.maxTabs === "number") setMaxTabs(j.maxTabs);
+          if (typeof j.maxHistory === "number") setMaxHistory(j.maxHistory);
+        }
+        if (infoRes.ok) {
+          const j = (await infoRes.json()) as {
+            version?: string;
+            userDataPath?: string;
+            userDataPathDisplay?: string;
+          };
+          if (j.version) setVersion(j.version);
+          if (j.userDataPath) setUserDataPath(j.userDataPath);
+          if (j.userDataPathDisplay) setUserDataDisplay(j.userDataPathDisplay);
+        }
       } catch {
-        // 用默认 10
+        // 用默认值
       }
       setLoaded(true);
     })();
+    return () => {
+      if (tipTimer.current) clearTimeout(tipTimer.current);
+    };
   }, []);
 
-  function update(key: string, patch: Partial<ModuleSettings>) {
-    setValues((prev) => ({ ...prev, [key]: { ...(prev[key] ?? { maxTabs: 10, maxHistory: 100 }), ...patch } }));
-    setDirty(true);
-    setSavedTip(false);
-  }
-
-  async function saveAll() {
-    setSaving(true);
-    for (const m of MODULES) {
-      const v = values[m.key] ?? { maxTabs: 10, maxHistory: 100 };
-      const body = {
-        module: m.key,
-        action: "settings",
-        maxTabs: clamp(Math.round(v.maxTabs) || 10, 2, 50),
-        maxHistory: clamp(Math.round(v.maxHistory) || 100, 10, 2000),
-      };
-      try {
-        await fetch("/api/site-tabs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-      } catch {
-        // 单个模块失败不中断其余
-      }
+  const saveAgentTimeout = async (mins: number) => {
+    const next = mins <= 0 ? 0 : clamp(Math.round(mins), 1, 60);
+    setInactivityMin(next);
+    flash("saving", "保存中…");
+    const ms = next <= 0 ? 0 : next * 60_000;
+    try {
+      const r = await fetch("/api/agent/preference", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inactivityTimeoutMs: ms }),
+      });
+      if (!r.ok) throw new Error("save failed");
+      flash("saved", "已保存");
+    } catch {
+      flash("error", "保存失败");
     }
-    if (agentDirty) {
-      const ms = inactivityMin <= 0 ? 0 : clamp(Math.round(inactivityMin), 1, 60) * 60_000;
-      try {
-        await fetch("/api/agent/preference", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ inactivityTimeoutMs: ms }),
-        });
-        setAgentDirty(false);
-      } catch {
-        // 忽略
-      }
-    }
-    setSaving(false);
-    setDirty(false);
-    setSavedTip(true);
-  }
+  };
 
-  const canSave = loaded && (dirty || agentDirty) && !saving;
+  const saveTabLimits = async (patch: { maxTabs?: number; maxHistory?: number }) => {
+    const nextTabs = patch.maxTabs ?? maxTabs;
+    const nextHistory = patch.maxHistory ?? maxHistory;
+    if (patch.maxTabs !== undefined) setMaxTabs(nextTabs);
+    if (patch.maxHistory !== undefined) setMaxHistory(nextHistory);
+    flash("saving", "保存中…");
+    try {
+      const r = await fetch("/api/site-tabs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "global-limits",
+          maxTabs: nextTabs,
+          maxHistory: nextHistory,
+        }),
+      });
+      if (!r.ok) throw new Error("save failed");
+      const j = (await r.json()) as { maxTabs?: number; maxHistory?: number };
+      if (typeof j.maxTabs === "number") setMaxTabs(j.maxTabs);
+      if (typeof j.maxHistory === "number") setMaxHistory(j.maxHistory);
+      flash("saved", "已保存");
+    } catch {
+      flash("error", "保存失败");
+    }
+  };
+
+  const openUserData = async () => {
+    if (!userDataPath || openingFolder) return;
+    setOpeningFolder(true);
+    try {
+      const r = await fetch("/api/agent/open-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: userDataPath }),
+      });
+      if (!r.ok) {
+        const j = (await r.json().catch(() => ({}))) as { error?: string };
+        flash("error", j.error || "打开失败");
+      }
+    } catch {
+      flash("error", "打开失败");
+    } finally {
+      setOpeningFolder(false);
+    }
+  };
 
   return (
     <>
       <Topbar title="设置" />
       <div className="flex-1 overflow-auto">
         <div className="mx-auto max-w-2xl px-6 py-6">
-          <div className="mb-4 flex items-center justify-between">
-            <h1 className="text-[16px] font-semibold">设置</h1>
-            <button
-              type="button"
-              onClick={saveAll}
-              disabled={!canSave}
-              className="rounded-md bg-accent px-4 py-1.5 text-[12.5px] font-medium text-white hover:opacity-90 disabled:opacity-40"
-            >
-              {saving ? "保存中…" : "保存设置"}
-            </button>
+          <div className="mb-1 flex items-baseline justify-between gap-3">
+            <h1 className="text-[16px] font-semibold text-ink">设置</h1>
+            {saveTip ? (
+              <span
+                className={[
+                  "text-[11.5px]",
+                  saveState === "error" ? "text-up" : "text-ink-faint",
+                ].join(" ")}
+              >
+                {saveTip}
+              </span>
+            ) : null}
           </div>
-
-          {savedTip ? (
-            <div className="mb-3 rounded-[10px] border border-green-200 bg-green-50 px-4 py-2.5 text-[12.5px] text-green-700">
-              已保存
-            </div>
-          ) : null}
 
           {!loaded ? (
-            <div className="py-8 text-center text-[13px] text-ink-faint">加载中…</div>
+            <div className="py-10 text-center text-[13px] text-ink-faint">加载中…</div>
           ) : (
-            <div className="space-y-3">
-              <div className="rounded-[10px] border border-line bg-surface px-4 py-3">
-                <div className="mb-1 text-[13px] font-medium text-ink">本地 Agent</div>
-                <p className="mb-2.5 text-[11.5px] leading-relaxed text-ink-faint">
-                  任务总时长不限制，仅在「距上一次网关响应」超过下方时长时视为不活跃超时。工具调用、正文片段等任意响应都会重置计时。
-                </p>
-                <label className="flex items-center gap-2 text-[12.5px] text-ink-muted">
-                  不活跃超时
-                  <input
-                    type="number"
+            <div>
+              <Section
+                title="本地 Agent"
+                hint="任务总时长不限制；仅在距上一次网关响应超过下方时长时视为不活跃。任意响应都会重置计时。"
+              >
+                <SettingRow label="不活跃超时">
+                  <NumberField
+                    value={inactivityMin}
                     min={0}
                     max={60}
-                    value={inactivityMin}
-                    onChange={(e) => {
-                      setInactivityMin(Number(e.target.value));
-                      setAgentDirty(true);
-                      setSavedTip(false);
-                    }}
-                    className="h-7 w-[72px] rounded-md border border-line bg-white px-2 text-center text-[12.5px] outline-none focus:border-accent"
+                    suffix="分钟（0 = 禁用）"
+                    onCommit={(n) => void saveAgentTimeout(n)}
                   />
-                  <span className="text-[11px] text-ink-faint">分钟（0 = 禁用，默认 10，最长 60）</span>
-                </label>
-              </div>
+                </SettingRow>
+              </Section>
 
-              {MODULES.map((m) => {
-                const v = values[m.key] ?? { maxTabs: 10, maxHistory: 100 };
-                return (
-                  <div key={m.key} className="rounded-[10px] border border-line bg-surface px-4 py-3">
-                    <div className="mb-2.5 text-[13px] font-medium text-ink">{m.label}</div>
-                    <div className="flex items-center gap-6">
-                      <label className="flex items-center gap-2 text-[12.5px] text-ink-muted">
-                        标签上限
-                        <input
-                          type="number"
-                          min={2}
-                          max={50}
-                          value={v.maxTabs}
-                          onChange={(e) => update(m.key, { maxTabs: Number(e.target.value) })}
-                          className="h-7 w-[72px] rounded-md border border-line bg-white px-2 text-center text-[12.5px] outline-none focus:border-accent"
-                        />
-                        <span className="text-[11px] text-ink-faint">2–50</span>
-                      </label>
-                      <label className="flex items-center gap-2 text-[12.5px] text-ink-muted">
-                        历史上限
-                        <input
-                          type="number"
-                          min={10}
-                          max={2000}
-                          value={v.maxHistory}
-                          onChange={(e) => update(m.key, { maxHistory: Number(e.target.value) })}
-                          className="h-7 w-[80px] rounded-md border border-line bg-white px-2 text-center text-[12.5px] outline-none focus:border-accent"
-                        />
-                        <span className="text-[11px] text-ink-faint">10–2000</span>
-                      </label>
-                    </div>
-                  </div>
-                );
-              })}
+              <Section
+                title="标签与浏览"
+                hint="全局一套上限，作用于全部主题与 Web 访问模块。超出后自动裁掉最旧项。"
+              >
+                <SettingRow label="标签上限">
+                  <NumberField
+                    value={maxTabs}
+                    min={2}
+                    max={50}
+                    suffix="2–50"
+                    onCommit={(n) => void saveTabLimits({ maxTabs: n })}
+                  />
+                </SettingRow>
+                <SettingRow label="历史上限">
+                  <NumberField
+                    value={maxHistory}
+                    min={10}
+                    max={2000}
+                    suffix="10–2000"
+                    onCommit={(n) => void saveTabLimits({ maxHistory: n })}
+                  />
+                </SettingRow>
+              </Section>
+
+              <Section title="关于">
+                <SettingRow label="版本">
+                  <span className="text-[12.5px] tabular-nums text-ink-faint">v{version}</span>
+                </SettingRow>
+                <SettingRow label="用户数据目录">
+                  <span
+                    className="max-w-[280px] truncate text-right text-[12.5px] text-ink-faint"
+                    title={userDataPath || userDataDisplay}
+                  >
+                    {userDataDisplay}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!userDataPath || openingFolder}
+                    onClick={() => void openUserData()}
+                    className="shrink-0 rounded-md border border-line bg-surface px-2.5 py-1 text-[11.5px] text-ink-muted transition-colors hover:bg-hover hover:text-ink disabled:opacity-40"
+                  >
+                    {openingFolder ? "打开中…" : "在访达中打开"}
+                  </button>
+                </SettingRow>
+              </Section>
             </div>
           )}
-
-          <div className="mt-6 space-y-2">
-            {[
-              ["用户数据", "~/snuby-workspace-data（主题库与 Agent 会话）"],
-              ["版本", "v0.5"],
-            ].map(([k, v]) => (
-              <div
-                key={k}
-                className="flex items-center justify-between rounded-[10px] border border-line bg-surface px-4 py-3 text-[13px]"
-              >
-                <span className="shrink-0 text-ink">{k}</span>
-                <span className="text-right text-ink-faint">{v}</span>
-              </div>
-            ))}
-          </div>
         </div>
       </div>
     </>

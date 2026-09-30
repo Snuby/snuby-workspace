@@ -5,7 +5,7 @@
 // - /browser Web 访问
 // - /lab/local-agent 本地 Agent
 // - /matrix/{platformId} 自媒体账号矩阵平台页
-// 可见性一律 opacity + pointer-events, 切回不重载 webview。
+// 可见性一律 opacity + pointer-events; 模块级常驻壳 + 标签级懒挂 webview（点过才加载）。
 
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";

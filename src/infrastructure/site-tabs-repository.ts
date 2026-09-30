@@ -27,6 +27,51 @@ const DEFAULT_SETTINGS: SiteSettings = {
   webviewRetentionHours: 3,
 };
 
+/** 全局标签/历史上限的虚拟 module 行；各业务模块读写上限时统一看这里 */
+const GLOBAL_LIMITS_MODULE = "__global__";
+
+function clampTabLimits(maxTabs: number, maxHistory: number): { maxTabs: number; maxHistory: number } {
+  return {
+    maxTabs: Math.min(50, Math.max(2, Math.round(maxTabs) || DEFAULT_SETTINGS.maxTabs)),
+    maxHistory: Math.min(2000, Math.max(10, Math.round(maxHistory) || DEFAULT_SETTINGS.maxHistory)),
+  };
+}
+
+/** 全局标签上限 / 历史上限（设置页配置；所有模块共用） */
+export function getGlobalTabLimits(): { maxTabs: number; maxHistory: number } {
+  const d = getDb();
+  const global = d
+    .prepare("SELECT max_tabs, max_history FROM site_settings WHERE module = ?")
+    .get(GLOBAL_LIMITS_MODULE) as { max_tabs: number; max_history: number } | undefined;
+  if (global) {
+    return clampTabLimits(global.max_tabs, global.max_history);
+  }
+  const any = d
+    .prepare("SELECT max_tabs, max_history FROM site_settings WHERE module != ? LIMIT 1")
+    .get(GLOBAL_LIMITS_MODULE) as { max_tabs: number; max_history: number } | undefined;
+  const limits = clampTabLimits(
+    any?.max_tabs ?? DEFAULT_SETTINGS.maxTabs,
+    any?.max_history ?? DEFAULT_SETTINGS.maxHistory,
+  );
+  setGlobalTabLimits(limits.maxTabs, limits.maxHistory);
+  return limits;
+}
+
+/** 写入全局上限，并同步到所有已有 module 行 */
+export function setGlobalTabLimits(maxTabs: number, maxHistory: number): { maxTabs: number; maxHistory: number } {
+  const limits = clampTabLimits(maxTabs, maxHistory);
+  const d = getDb();
+  d.prepare(
+    `INSERT INTO site_settings (module, max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours, home_url)
+     VALUES (?, ?, ?, NULL, 5, 3, NULL)
+     ON CONFLICT(module) DO UPDATE SET
+       max_tabs = excluded.max_tabs,
+       max_history = excluded.max_history`,
+  ).run(GLOBAL_LIMITS_MODULE, limits.maxTabs, limits.maxHistory);
+  d.prepare("UPDATE site_settings SET max_tabs = ?, max_history = ?").run(limits.maxTabs, limits.maxHistory);
+  return limits;
+}
+
 let db: DatabaseSync | null = null;
 
 function getDb(): DatabaseSync {
@@ -144,8 +189,9 @@ function ensureMatrixSchema(d: DatabaseSync): void {
   seed.run("xiaohongshu", "小红书", "https://creator.xiaohongshu.com/", "小红书创作主页", 2);
 }
 
-/** 读取模块设置, 无记录则落默认值并返回 */
+/** 读取模块设置, 无记录则落默认值并返回；标签/历史上限始终取全局值 */
 export function getSettings(module: string): SiteSettings {
+  const limits = getGlobalTabLimits();
   const row = getDb()
     .prepare(
       "SELECT max_tabs, max_history, active_site, webview_min_keep, webview_retention_hours, home_url FROM site_settings WHERE module = ?",
@@ -161,12 +207,12 @@ export function getSettings(module: string): SiteSettings {
       }
     | undefined;
   if (!row) {
-    setSettings(module, DEFAULT_SETTINGS);
-    return { ...DEFAULT_SETTINGS };
+    setSettings(module, { ...DEFAULT_SETTINGS, ...limits });
+    return { ...DEFAULT_SETTINGS, ...limits };
   }
   return {
-    maxTabs: row.max_tabs,
-    maxHistory: row.max_history,
+    maxTabs: limits.maxTabs,
+    maxHistory: limits.maxHistory,
     activeSite: row.active_site,
     webviewMinKeep: row.webview_min_keep,
     webviewRetentionHours: row.webview_retention_hours,
@@ -175,6 +221,8 @@ export function getSettings(module: string): SiteSettings {
 }
 
 export function setSettings(module: string, s: SiteSettings): void {
+  // 标签/历史上限由 setGlobalTabLimits 统一管理；此处写入时对齐全局，避免分模块漂移
+  const limits = getGlobalTabLimits();
   // webview 保留策略是全局配置 (module=webview 行): 其他模块保存设置时未显式传入,
   // 必须保留库内已有值, 不得被默认值覆盖
   const existing = getDb()
@@ -200,7 +248,7 @@ export function setSettings(module: string, s: SiteSettings): void {
          webview_retention_hours = excluded.webview_retention_hours,
          home_url = excluded.home_url`,
     )
-    .run(module, s.maxTabs, s.maxHistory, s.activeSite ?? null, minKeep, retention, homeUrl);
+    .run(module, limits.maxTabs, limits.maxHistory, s.activeSite ?? null, minKeep, retention, homeUrl);
 }
 
 /** 读取某模块全部站点组的标签与历史 */

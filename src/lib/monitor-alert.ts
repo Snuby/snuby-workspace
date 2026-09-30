@@ -1,7 +1,10 @@
-/** 监控告警阈值与侧栏广播（总内存占比 / 单标签超标） */
+/** 监控告警阈值与侧栏广播（仅 App 合计占本机内存比例超阈值） */
 
 import { listMonitorTabs } from "@/lib/monitor-registry";
 import { getMonitorSettings } from "@/lib/monitor-settings";
+
+/** 临时演示开关: 为 true 时侧栏「监控」常显告警胶囊，并注入超阈值假数据 */
+export const MONITOR_UI_MOCK = false;
 
 type Listener = () => void;
 
@@ -29,15 +32,20 @@ export function subscribeMonitorAlerting(listener: Listener): () => void {
   };
 }
 
-/** 采样一次并写回告警态；供布局常驻轮询与监控页共用 */
+/** 采样一次并写回告警态；供布局常驻轮询与监控页共用。侧栏仅在总体占比超阈值时告警。 */
 export async function refreshMonitorAlert(): Promise<boolean> {
+  if (MONITOR_UI_MOCK) {
+    setMonitorAlerting(true);
+    return true;
+  }
+
   const api = typeof window !== "undefined" ? window.snubyDesktop : undefined;
   if (!api?.getPerfSnapshot) {
     setMonitorAlerting(false);
     return false;
   }
 
-  const { tabAlertMb, totalAlertPct } = getMonitorSettings();
+  const { totalAlertPct } = getMonitorSettings();
   const tabs = listMonitorTabs();
   const ids = tabs.map((t) => t.webContentsId).filter((id): id is number => id != null);
 
@@ -47,19 +55,7 @@ export async function refreshMonitorAlert(): Promise<boolean> {
     const processTotalMb = processTotalKb / 1024;
     const totalMemMb = snap.totalMemBytes / (1024 * 1024);
     const pct = totalMemMb > 0 ? (processTotalMb / totalMemMb) * 100 : 0;
-    const totalHit = pct >= totalAlertPct;
-
-    let tabHit = false;
-    for (const t of tabs) {
-      if (t.webContentsId == null) continue;
-      const info = snap.tabs[String(t.webContentsId)];
-      if (info?.rssKb != null && info.rssKb / 1024 >= tabAlertMb) {
-        tabHit = true;
-        break;
-      }
-    }
-
-    const next = totalHit || tabHit;
+    const next = pct >= totalAlertPct;
     setMonitorAlerting(next);
     return next;
   } catch {
