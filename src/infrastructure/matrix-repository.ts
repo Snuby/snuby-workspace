@@ -10,42 +10,72 @@ import {
   type MatrixPlatform,
   type MatrixTab,
 } from "@/lib/matrix-types";
+import {
+  MATRIX_FACTORY_SEED_VERSION,
+  MATRIX_PLATFORM_PRESETS,
+} from "@/lib/matrix-presets";
 
 export type { MatrixAccount, MatrixPlatform, MatrixTab };
 export { homeTabIdOf, isHomeTabId, MATRIX_HOME_SUFFIX, partitionKeyOf } from "@/lib/matrix-types";
 
-const PLATFORM_SEED: MatrixPlatform[] = [
-  {
-    id: "weixin",
-    name: "微信公众号",
-    homeUrl: "https://mp.weixin.qq.com/",
-    homeTitle: "公众号主页",
-    sort: 0,
-  },
-  {
-    id: "toutiao",
-    name: "今日头条",
-    homeUrl: "https://mp.toutiao.com/profile_v4/index",
-    homeTitle: "头条创作主页",
-    sort: 1,
-  },
-  {
-    id: "xiaohongshu",
-    name: "小红书",
-    homeUrl: "https://creator.xiaohongshu.com/",
-    homeTitle: "小红书创作主页",
-    sort: 2,
-  },
-];
+const PLATFORM_SEED = MATRIX_PLATFORM_PRESETS.filter((p) => p.factory);
 
-/** 幂等写入出厂平台 (可被 getDb 启动路径调用) */
+function ensureAppMeta(d: DatabaseSync): void {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS matrix_app_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+}
+
+function getFactorySeedVersion(d: DatabaseSync): number {
+  const row = d.prepare("SELECT value FROM matrix_app_meta WHERE key = 'factory_seed_version'").get() as
+    | { value: string }
+    | undefined;
+  if (!row) return 0;
+  const n = Number(row.value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function setFactorySeedVersion(d: DatabaseSync, version: number): void {
+  d.prepare(
+    `INSERT INTO matrix_app_meta (key, value) VALUES ('factory_seed_version', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(String(version));
+}
+
+/** 幂等写入出厂平台; 空表全量播种, 升版时增量补新出厂项 (不恢复用户已删的旧项) */
 export function ensureMatrixPlatformsSeeded(dbArg?: DatabaseSync): void {
   const d = dbArg ?? getSiteTabsDb();
+  ensureAppMeta(d);
   const insert = d.prepare(
     "INSERT OR IGNORE INTO matrix_platforms (id, name, home_url, home_title, sort) VALUES (?, ?, ?, ?, ?)",
   );
-  for (const p of PLATFORM_SEED) {
-    insert.run(p.id, p.name, p.homeUrl, p.homeTitle, p.sort);
+  const count = d.prepare("SELECT COUNT(*) AS n FROM matrix_platforms").get() as { n: number };
+  let ver = getFactorySeedVersion(d);
+
+  if (count.n === 0) {
+    for (const p of PLATFORM_SEED) {
+      insert.run(p.id, p.name, p.homeUrl, p.homeTitle, p.sort);
+    }
+    setFactorySeedVersion(d, MATRIX_FACTORY_SEED_VERSION);
+    return;
+  }
+
+  // 已有数据但无版本标记 → 视为 v1 (微信/头条/小红书)
+  if (ver === 0) {
+    ver = 1;
+    setFactorySeedVersion(d, 1);
+  }
+
+  if (ver < MATRIX_FACTORY_SEED_VERSION) {
+    // v2: 补抖音; 之后升版在此按版本追加 INSERT OR IGNORE
+    if (ver < 2) {
+      const douyin = PLATFORM_SEED.find((p) => p.id === "douyin");
+      if (douyin) insert.run(douyin.id, douyin.name, douyin.homeUrl, douyin.homeTitle, douyin.sort);
+    }
+    setFactorySeedVersion(d, MATRIX_FACTORY_SEED_VERSION);
   }
 }
 
@@ -82,6 +112,139 @@ export function getMatrixPlatform(id: string): MatrixPlatform | null {
     homeTitle: r.home_title,
     sort: r.sort,
   };
+}
+
+function normalizeHomeUrl(raw: string): string | null {
+  const t = raw.trim();
+  if (!t) return null;
+  const withProto = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(t) ? t : `https://${t}`;
+  try {
+    const u = new URL(withProto);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function derivePlatformId(homeUrl: string): string {
+  try {
+    const host = new URL(homeUrl).hostname.replace(/^www\./, "").toLowerCase();
+    const base = host.split(".")[0]?.replace(/[^a-z0-9-]/g, "") ?? "";
+    if (base.length >= 2) return base;
+  } catch {
+    // fall through
+  }
+  return `m-${Date.now().toString(36)}`;
+}
+
+/** 新增自媒体矩阵平台 (如知乎); id 由主页域名推导, 冲突则加后缀 */
+export function createMatrixPlatform(input: {
+  name: string;
+  homeUrl: string;
+  homeTitle?: string;
+}): MatrixPlatform {
+  ensureMatrixPlatformsSeeded();
+  const name = input.name.trim().slice(0, 64);
+  if (!name) throw new Error("名称不能为空");
+  const homeUrl = normalizeHomeUrl(input.homeUrl);
+  if (!homeUrl) throw new Error("主页地址无效");
+  const homeTitle = (input.homeTitle?.trim() || name).slice(0, 64);
+
+  let id = derivePlatformId(homeUrl);
+  if (getMatrixPlatform(id)) {
+    id = `${id}-${Date.now().toString(36).slice(-4)}`;
+  }
+
+  const d = db();
+  const maxSort = d.prepare("SELECT COALESCE(MAX(sort), -1) AS m FROM matrix_platforms").get() as {
+    m: number;
+  };
+  d.prepare(
+    "INSERT INTO matrix_platforms (id, name, home_url, home_title, sort) VALUES (?, ?, ?, ?, ?)",
+  ).run(id, name, homeUrl, homeTitle, maxSort.m + 1);
+
+  const created = getMatrixPlatform(id);
+  if (!created) throw new Error("创建平台失败");
+  return created;
+}
+
+/** 更新矩阵平台名称 / 主页地址；同步各账号主标签 url */
+export function updateMatrixPlatform(
+  id: string,
+  patch: { name?: string; homeUrl?: string; homeTitle?: string },
+): MatrixPlatform {
+  const existing = getMatrixPlatform(id);
+  if (!existing) throw new Error("平台不存在");
+
+  const name =
+    patch.name !== undefined ? patch.name.trim().slice(0, 64) : existing.name;
+  if (!name) throw new Error("名称不能为空");
+
+  let homeUrl = existing.homeUrl;
+  if (patch.homeUrl !== undefined) {
+    const nextUrl = normalizeHomeUrl(patch.homeUrl);
+    if (!nextUrl) throw new Error("主页地址无效");
+    homeUrl = nextUrl;
+  }
+
+  const homeTitle =
+    patch.homeTitle !== undefined
+      ? (patch.homeTitle.trim().slice(0, 64) || name)
+      : patch.name !== undefined && existing.homeTitle === existing.name
+        ? name
+        : existing.homeTitle;
+
+  const d = db();
+  d.prepare(
+    "UPDATE matrix_platforms SET name = ?, home_url = ?, home_title = ? WHERE id = ?",
+  ).run(name, homeUrl, homeTitle, id);
+
+  // 各账号主页标签跟平台主页对齐
+  const accounts = listMatrixAccounts(id);
+  const upd = d.prepare(
+    "UPDATE matrix_account_tabs SET url = ?, title = ? WHERE platform = ? AND account = ? AND tab_id = ?",
+  );
+  for (const acc of accounts) {
+    upd.run(homeUrl, homeTitle, id, acc.id, homeTabIdOf(acc.id));
+  }
+
+  const next = getMatrixPlatform(id);
+  if (!next) throw new Error("更新平台失败");
+  return next;
+}
+
+/** @deprecated 使用 updateMatrixPlatform */
+export function renameMatrixPlatform(id: string, name: string): MatrixPlatform | null {
+  try {
+    return updateMatrixPlatform(id, { name });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 删除平台及下属全部账号/标签/状态。
+ * 返回各账号 partitionKey, 由桌面端 clearPartition 清登录态。
+ */
+export function deleteMatrixPlatform(id: string): { partitionKeys: string[] } | null {
+  const existing = getMatrixPlatform(id);
+  if (!existing) return null;
+  const accounts = listMatrixAccounts(id);
+  const partitionKeys = accounts.map((a) => a.partitionKey);
+  const d = db();
+  d.exec("BEGIN");
+  try {
+    d.prepare("DELETE FROM matrix_account_tabs WHERE platform = ?").run(id);
+    d.prepare("DELETE FROM matrix_accounts WHERE platform_id = ?").run(id);
+    d.prepare("DELETE FROM matrix_platform_state WHERE platform_id = ?").run(id);
+    d.prepare("DELETE FROM matrix_platforms WHERE id = ?").run(id);
+    d.exec("COMMIT");
+  } catch (e) {
+    d.exec("ROLLBACK");
+    throw e;
+  }
+  return { partitionKeys };
 }
 
 export function listMatrixAccounts(platformId: string): MatrixAccount[] {

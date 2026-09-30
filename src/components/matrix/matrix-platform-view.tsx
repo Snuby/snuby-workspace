@@ -12,10 +12,8 @@ import {
   type MatrixPlatform,
   type MatrixTab,
 } from "@/lib/matrix-types";
-import {
-  IconUser,
-  tabIconFor,
-} from "@/components/ui/site-favicon";
+import { IconUser } from "@/components/ui/site-favicon";
+import { MatrixBrandIcon } from "@/components/ui/matrix-brand-icon";
 import { ContextMenuItem, ContextMenuLayer } from "@/components/ui/context-menu-layer";
 import {
   readWebContentsId,
@@ -247,8 +245,9 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
     [persistTabs],
   );
 
-  // 首屏: 平台元数据 + 账号
+  // 首屏: 平台元数据 + 账号; 再次激活时刷新 (侧栏可能已改名称/地址)
   useEffect(() => {
+    if (!active) return;
     void (async () => {
       try {
         const pr = await fetch("/api/matrix/platforms", { cache: "no-store" });
@@ -260,7 +259,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
         setNotice("加载失败");
       }
     })();
-  }, [platformId, refreshAccounts, loadTabsFor]);
+  }, [active, platformId, refreshAccounts, loadTabsFor]);
 
   // 卸载前落盘当前所有账号标签
   useEffect(() => {
@@ -623,7 +622,7 @@ export default function MatrixPlatformView({ platformId, active }: Props) {
       {/* 顶栏: 与主题站点选项卡同构 (底线激活 + lucide 图标 + 悬停删除 / 右键重命名) */}
       <div className="flex h-[42px] shrink-0 items-stretch gap-1 overflow-x-auto overflow-y-hidden border-b border-line bg-surface px-4">
         <span className="mr-2 flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[14px] font-bold text-ink">
-          {tabIconFor(`${platform.id} ${platform.homeUrl} ${platform.name}`, "h-3.5 w-3.5")}
+          <MatrixBrandIcon platformId={platform.id} size={14} />
           {platform.name}
         </span>
         {accounts.length === 0 ? (

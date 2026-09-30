@@ -181,12 +181,18 @@ function ensureMatrixSchema(d: DatabaseSync): void {
       active_account_id TEXT
     );
   `);
-  const seed = d.prepare(
-    "INSERT OR IGNORE INTO matrix_platforms (id, name, home_url, home_title, sort) VALUES (?, ?, ?, ?, ?)",
-  );
-  seed.run("weixin", "微信公众号", "https://mp.weixin.qq.com/", "公众号主页", 0);
-  seed.run("toutiao", "今日头条", "https://mp.toutiao.com/profile_v4/index", "头条创作主页", 1);
-  seed.run("xiaohongshu", "小红书", "https://creator.xiaohongshu.com/", "小红书创作主页", 2);
+  const seedCount = d.prepare("SELECT COUNT(*) AS n FROM matrix_platforms").get() as { n: number };
+  if (seedCount.n === 0) {
+    // 与 matrix-repository.ensureMatrixPlatformsSeeded 对齐; 完整播种走那边 (含版本元数据)
+    // 此处仅兜底空表, 避免 getDb 路径早于 ensure 时无平台
+    const seed = d.prepare(
+      "INSERT OR IGNORE INTO matrix_platforms (id, name, home_url, home_title, sort) VALUES (?, ?, ?, ?, ?)",
+    );
+    seed.run("weixin", "微信公众号", "https://mp.weixin.qq.com/", "公众号主页", 0);
+    seed.run("toutiao", "今日头条", "https://mp.toutiao.com/profile_v4/index", "头条创作主页", 1);
+    seed.run("xiaohongshu", "小红书", "https://creator.xiaohongshu.com/", "小红书创作主页", 2);
+    seed.run("douyin", "抖音创作者中心", "https://creator.douyin.com/creator-micro/home", "抖音创作主页", 3);
+  }
 }
 
 /** 读取模块设置, 无记录则落默认值并返回；标签/历史上限始终取全局值 */
