@@ -153,10 +153,20 @@ capability=${opts.capability ?? "general"}`;
   if (opts.scope === "resource" && opts.scopeRef.scope === "resource") {
     const item = getResource(workId, opts.scopeRef.resourceId);
     if (item) {
+      const rid = item.id;
+      const capHint =
+        opts.capability === "analyze-url" || opts.capability === "resource-note"
+          ? `\n【解读落盘硬性约定】
+目标：回答「关于这个资源需要提前告诉 AI 什么」。
+1. 短 note（≤480 字）写入 artifacts/note-patch-${rid}.md：一句话定位 + 3～5 要点（宿主合并进 resources.json）
+2. 内容一多就必须另写详报 artifacts/resource-brief-${rid}.md；超长分析写 artifacts/url-analyze-${rid}.md
+3. 禁止写入思考过程 / 工具旁白；对话只确认路径
+4. 没有 note-patch 则不会更新资源 note`
+          : `分析资源时：短结论写 artifacts/note-patch-${rid}.md；详报写 artifacts/resource-brief-${rid}.md。`;
       push(
         "capability_addon",
         "L2",
-        `目标资源：${JSON.stringify(item, null, 2)}\n分析 url 时：note 写短结论；长文写 artifacts/url-analyze-${item.id}.md 并在 note 中挂路径。`,
+        `目标资源：${JSON.stringify(item, null, 2)}\n${capHint}`,
       );
     }
   }

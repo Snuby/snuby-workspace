@@ -56,6 +56,8 @@ type WebviewEl = HTMLElement & {
   goBack?: () => void;
   goForward?: () => void;
   getURL?: () => string;
+  loadURL?: (url: string) => void;
+  getWebContentsId?: () => number;
 };
 
 /** 弹窗内嵌 Electron webview（支持页内前进/后退） */
@@ -83,6 +85,8 @@ export function PreviewWebview({
     const wv = document.createElement("webview") as unknown as WebviewEl;
     wv.setAttribute("src", src);
     wv.setAttribute("partition", partition);
+    wv.setAttribute("allowpopups", "true");
+    // 与站点浏览器 / 历史可用版本一致，勿钉像素高度
     wv.style.cssText = "width:100%;height:100%;border:none;display:flex;";
 
     let alive = true;
@@ -122,16 +126,37 @@ export function PreviewWebview({
       }
     };
 
+    // 主进程拒绝 webview 弹窗后发 snuby-webview-popup；预览里改为本窗导航（否则链接点了无反应）
+    const onPopup = (e: Event) => {
+      const detail = (e as CustomEvent<{ url?: string; guestId?: number }>).detail;
+      if (!alive || !detail?.url || typeof detail.guestId !== "number") return;
+      let id: number | null = null;
+      try {
+        id = typeof wv.getWebContentsId === "function" ? wv.getWebContentsId() : null;
+      } catch {
+        return;
+      }
+      if (id !== detail.guestId) return;
+      try {
+        if (typeof wv.loadURL === "function") wv.loadURL(detail.url);
+        else wv.setAttribute("src", detail.url);
+      } catch {
+        /* guest gone */
+      }
+    };
+
     wv.addEventListener("did-navigate", sync);
     wv.addEventListener("did-navigate-in-page", sync);
     wv.addEventListener("did-finish-load", sync);
     wv.addEventListener("dom-ready", sync);
+    window.addEventListener("snuby-webview-popup", onPopup);
 
     host.appendChild(wv);
     // 不在挂载瞬间 sync：guest 未就绪会抛
 
     return () => {
       alive = false;
+      window.removeEventListener("snuby-webview-popup", onPopup);
       wv.removeEventListener("did-navigate", sync);
       wv.removeEventListener("did-navigate-in-page", sync);
       wv.removeEventListener("did-finish-load", sync);
@@ -147,7 +172,7 @@ export function PreviewWebview({
     };
   }, [src, partition]);
 
-  return <div ref={hostRef} className="h-full w-full overflow-hidden bg-white" />;
+  return <div ref={hostRef} className="h-full min-h-0 w-full flex-1 overflow-hidden bg-white" />;
 }
 
 /**
@@ -163,7 +188,7 @@ export default function PreviewModal({
   trailing,
   size = "lg",
   panelClassName,
-  bodyClassName = "min-h-0 flex-1 bg-white",
+  bodyClassName = "relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white",
   overlayClassName = "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6",
   onEscape,
   onContextMenu,

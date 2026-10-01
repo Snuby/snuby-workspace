@@ -258,6 +258,7 @@ export function LinkPreviewModal({
   onToast,
   renderMarkdown,
   webviewPartition = "default",
+  embedded = false,
 }: {
   view: LinkView;
   stack: LinkView[];
@@ -285,6 +286,8 @@ export function LinkPreviewModal({
   ) => ReactNode;
   /** Electron webview partition */
   webviewPartition?: string;
+  /** 嵌入侧栏等容器：铺满父级，不盖全屏遮罩 */
+  embedded?: boolean;
 }) {
   const [text, setText] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -481,6 +484,18 @@ export function LinkPreviewModal({
       }}
       onContextMenu={onCtxMenu}
       size="lg"
+      showClose={!embedded}
+      overlayClassName={
+        embedded
+          ? // 必须参与文档流：absolute 会让侧栏 flex 子项高度塌缩，webview guest 视口算崩
+            "flex h-full min-h-0 w-full flex-col bg-transparent p-0"
+          : undefined
+      }
+      panelClassName={
+        embedded
+          ? "flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden rounded-none border-0 bg-white shadow-none"
+          : undefined
+      }
       leading={
         <div className="flex items-center gap-0.5">
           <NavHistoryHover
@@ -660,12 +675,14 @@ export function UrlLinkPreview({
   onClose,
   webviewPartition,
   onToast,
+  embedded = false,
 }: {
   url: string;
   title: string;
   onClose: () => void;
   webviewPartition?: string;
   onToast?: (msg: string) => void;
+  embedded?: boolean;
 }) {
   const [nav, setNav] = useState<{ stack: LinkView[]; index: number }>(() => ({
     stack: [{ kind: "url", url, title }],
@@ -711,6 +728,86 @@ export function UrlLinkPreview({
       }}
       webviewPartition={webviewPartition}
       onToast={onToast}
+      embedded={embedded}
     />
   );
 }
+
+/**
+ * 本地文件预览（与 Agent LinkPreviewModal 同一套分流）。
+ * embedded 时铺满父容器，供作品资源侧栏使用。
+ */
+export function FileLinkPreview({
+  path,
+  title,
+  onClose,
+  webviewPartition,
+  onToast,
+  embedded = false,
+  renderMarkdown,
+}: {
+  path: string;
+  title: string;
+  onClose: () => void;
+  webviewPartition?: string;
+  onToast?: (msg: string) => void;
+  embedded?: boolean;
+  renderMarkdown?: LinkPreviewModalProps["renderMarkdown"];
+}) {
+  const [nav, setNav] = useState<{ stack: LinkView[]; index: number }>(() => ({
+    stack: [{ kind: "file", path, title }],
+    index: 0,
+  }));
+
+  useEffect(() => {
+    setNav({ stack: [{ kind: "file", path, title }], index: 0 });
+  }, [path, title]);
+
+  const view = nav.stack[nav.index] ?? { kind: "file" as const, path, title };
+  const canGoBack = nav.index > 0;
+  const canGoForward = nav.index < nav.stack.length - 1;
+
+  return (
+    <LinkPreviewModal
+      view={view}
+      stack={nav.stack}
+      stackIndex={nav.index}
+      canGoBack={canGoBack}
+      canGoForward={canGoForward}
+      onBack={() => setNav((p) => ({ ...p, index: Math.max(0, p.index - 1) }))}
+      onForward={() =>
+        setNav((p) => ({ ...p, index: Math.min(p.stack.length - 1, p.index + 1) }))
+      }
+      onJump={(i) =>
+        setNav((p) => ({
+          ...p,
+          index: Math.max(0, Math.min(i, p.stack.length - 1)),
+        }))
+      }
+      onClose={onClose}
+      onOpenDoc={(p, t) => {
+        const next: LinkView = { kind: "file", path: p, title: t };
+        setNav((prev) => {
+          const stack = [...prev.stack.slice(0, prev.index + 1), next];
+          return { stack, index: stack.length - 1 };
+        });
+      }}
+      docHints={[]}
+      onOpenLink={(raw) => {
+        const href = raw.trim();
+        if (!/^https?:\/\//i.test(href)) return;
+        const next: LinkView = { kind: "url", url: href, title: href };
+        setNav((prev) => {
+          const stack = [...prev.stack.slice(0, prev.index + 1), next];
+          return { stack, index: stack.length - 1 };
+        });
+      }}
+      webviewPartition={webviewPartition}
+      onToast={onToast}
+      embedded={embedded}
+      renderMarkdown={renderMarkdown}
+    />
+  );
+}
+
+type LinkPreviewModalProps = Parameters<typeof LinkPreviewModal>[0];

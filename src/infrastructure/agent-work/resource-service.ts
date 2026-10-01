@@ -234,6 +234,97 @@ export function updateResourceNote(
   return { ok: true, file, item };
 }
 
+/**
+ * 清洗解读落盘内容：去掉思考/过程/工具旁白，只保留可给人看的结论要点。
+ */
+export function sanitizeResourceNotePatch(raw: string): string {
+  let t = raw.replace(/\r\n/g, "\n").trim();
+  if (!t) return "";
+
+  // 常见思考块
+  t = t.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "");
+  t = t.replace(/```(?:thinking|thought|reasoning)[\s\S]*?```/gi, "");
+
+  // 若含明确「最终/结论」分段，取其后
+  const finalMarkers =
+    /(?:^|\n)#{1,3}\s*(?:最终|结论|要点|Note|NOTE|解读结果|精炼结果|短 note)[^\n]*\n([\s\S]*)$/i;
+  const fm = t.match(finalMarkers);
+  if (fm?.[1]?.trim()) t = fm[1].trim();
+
+  // 去掉过程性前缀段
+  const processHead =
+    /^(?:好的|嗯|让我|我将|我来|首先|接下来|分析过程|思考过程|工具调用|正在|先看一下)[^\n]*\n+/;
+  while (processHead.test(t)) t = t.replace(processHead, "");
+
+  // 去掉「我调用了 XX」类旁白行
+  t = t
+    .split("\n")
+    .filter((line) => {
+      const s = line.trim();
+      if (!s) return true;
+      if (/^(?:工具|tool|function_call|Thought|Thinking)\b/i.test(s)) return false;
+      if (/^(?:我(?:将|会|已|正在)|让我|首先|接下来).{0,40}(?:调用|读取|打开|浏览)/.test(s))
+        return false;
+      return true;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return t;
+}
+
+/** resources.json 内联 note 软上限：更长的说明落到 artifacts */
+export const RESOURCE_NOTE_SOFT_MAX = 480;
+
+function summarizeNoteHead(text: string, max: number): string {
+  const lines = text.split("\n");
+  const keep: string[] = [];
+  for (const line of lines) {
+    const candidate = keep.length ? `${keep.join("\n")}\n${line}` : line;
+    if (candidate.length > max) break;
+    keep.push(line);
+    const bullets = keep.filter((l) => /^\s*[-*•\d]+[.)、\s]/.test(l)).length;
+    if (keep.join("\n").length >= Math.floor(max * 0.65) && bullets >= 3) break;
+  }
+  let out = keep.join("\n").trim();
+  if (!out) out = text.slice(0, max).trim();
+  if (out.length > max) out = `${out.slice(0, max - 1).trimEnd()}…`;
+  return out;
+}
+
+/**
+ * 把解读结果落成：短 note（进 resources.json）+ 可选详报文件（artifacts/resource-brief-<rid>.md）。
+ * 规格：note 短结论；长内容用文件表示。
+ */
+export function materializeResourceNoteFromPatch(
+  workDir: string,
+  resourceId: string,
+  patchRaw: string,
+): string {
+  const cleaned = sanitizeResourceNotePatch(patchRaw);
+  if (!cleaned) return "";
+
+  const briefRel = `artifacts/resource-brief-${resourceId}.md`;
+  const briefAbs = path.join(workDir, briefRel);
+  const longRel = `artifacts/url-analyze-${resourceId}.md`;
+  const hasLong = existsSync(path.join(workDir, longRel));
+
+  const footerBits: string[] = [];
+  if (cleaned.length > RESOURCE_NOTE_SOFT_MAX) {
+    const artDir = path.join(workDir, "artifacts");
+    if (!existsSync(artDir)) mkdirSync(artDir, { recursive: true });
+    writeFileSync(briefAbs, cleaned, "utf8");
+    footerBits.push(`详报: ${briefRel}`);
+    if (hasLong) footerBits.push(`长文: ${longRel}`);
+    const budget = Math.max(120, RESOURCE_NOTE_SOFT_MAX - footerBits.join("\n").length - 4);
+    return `${summarizeNoteHead(cleaned, budget)}\n\n${footerBits.join("\n")}`;
+  }
+
+  if (hasLong) footerBits.push(`长文: ${longRel}`);
+  return footerBits.length ? `${cleaned}\n${footerBits.join("\n")}` : cleaned;
+}
+
 export function renameResource(
   workId: string,
   resourceId: string,

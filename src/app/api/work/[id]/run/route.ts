@@ -11,7 +11,7 @@ import {
 } from "@/infrastructure/agent-work/collab-messages";
 import { buildWorkPreload } from "@/infrastructure/agent-work/work-preload";
 import { auditWorkViolations } from "@/infrastructure/agent-work/work-audit";
-import { getResource, updateResourceNote } from "@/infrastructure/agent-work/resource-service";
+import { updateResourceNote, materializeResourceNoteFromPatch } from "@/infrastructure/agent-work/resource-service";
 import {
   getCurrentDraft,
   checkpointDiskIfChanged,
@@ -214,7 +214,7 @@ export async function POST(req: Request, ctx: Ctx) {
             });
           }
 
-          // analyze-url 结束钩子：合并 note-patch
+          // analyze-url / resource-note：note-patch → 短 note（resources.json）+ 过长则详报文件
           if (
             (capability === "analyze-url" || capability === "resource-note") &&
             ref.scope === "resource"
@@ -223,21 +223,15 @@ export async function POST(req: Request, ctx: Ctx) {
             const patchPath = path.join(workDir, "artifacts", `note-patch-${rid}.md`);
             if (existsSync(patchPath)) {
               try {
-                const note = readFileSync(patchPath, "utf8").trim();
-                if (note) {
-                  const longPath = path.join(workDir, "artifacts", `url-analyze-${rid}.md`);
-                  const finalNote = existsSync(longPath)
-                    ? `${note}\n长文: artifacts/url-analyze-${rid}.md`
-                    : note;
-                  updateResourceNote(workId, rid, finalNote);
-                }
+                const finalNote = materializeResourceNoteFromPatch(
+                  workDir,
+                  rid,
+                  readFileSync(patchPath, "utf8"),
+                );
+                if (finalNote) updateResourceNote(workId, rid, finalNote);
               } catch {
                 /* ignore */
               }
-            } else if (assistant.trim() && getResource(workId, rid)) {
-              // 无 patch 文件时，用回复前 500 字作短结论（尽力）
-              const short = assistant.trim().slice(0, 500);
-              updateResourceNote(workId, rid, short);
             }
           }
 

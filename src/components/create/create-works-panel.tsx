@@ -10,7 +10,17 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
+import {
+  FileText,
+  Image as ImageIcon,
+  Link2,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import WorkMarkdownEditor from "@/components/create/work-markdown-editor";
+import WorkMdPreview from "@/components/create/work-md-preview";
+import ResourceSidebar from "@/components/create/resource-sidebar";
 
 type WorkMeta = {
   id: string;
@@ -38,6 +48,7 @@ type ResourceItem = {
   kind: string;
   url?: string | null;
   relativePath?: string | null;
+  absolutePath?: string | null;
   note?: string;
 };
 
@@ -54,6 +65,9 @@ type CollabMsg = {
   error?: boolean;
   ts: number;
   streaming?: boolean;
+  queued?: boolean;
+  thinking?: boolean;
+  tools?: { tool: string; state?: string; detail?: string; toolCallId?: string; ts?: number }[];
 };
 
 type ViewMode = "draft" | "publish";
@@ -78,6 +92,11 @@ function fmtDateTime(ts: number) {
   }
 }
 
+/** 正文有效字数（去空白） */
+function countChars(text: string) {
+  return text.replace(/\s+/g, "").length;
+}
+
 function shortTitleFrom(text: string, fallback = "未命名") {
   const line = text
     .split("\n")
@@ -85,6 +104,22 @@ function shortTitleFrom(text: string, fallback = "未命名") {
     .find(Boolean);
   const t = (line || fallback).slice(0, 24);
   return t.length < (line || fallback).length ? `${t}…` : t;
+}
+
+/** 作品在库中的文件夹路径（不含标题） */
+function workFolderPath(library: WorkLibrary, workId: string): string {
+  const folder = library.folders.find((f) => f.workIds.includes(workId));
+  if (!folder) return "未分类";
+  const parts: string[] = [folder.name];
+  let parentId = folder.parentId;
+  const byId = new Map(library.folders.map((f) => [f.id, f]));
+  while (parentId) {
+    const p = byId.get(parentId);
+    if (!p) break;
+    parts.unshift(p.name);
+    parentId = p.parentId;
+  }
+  return parts.join(" / ");
 }
 
 function draftTriggerLabel(nodes: BranchNode[], draftId: string, content: string) {
@@ -119,35 +154,49 @@ function buildBranchTree(nodes: BranchNode[]) {
   return byParent;
 }
 
+const DROP_SHADOW = "shadow-[0_16px_48px_rgba(28,31,36,0.22)]";
+const DRAWER_SHADOW = "shadow-[-12px_0_40px_rgba(28,31,36,0.18),0_8px_32px_rgba(28,31,36,0.1)]";
+
 function BranchTreeView(props: {
   nodes: BranchNode[];
   currentId: string;
+  selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
   const byParent = useMemo(() => buildBranchTree(props.nodes), [props.nodes]);
   const roots = byParent.get(null) ?? [];
 
+  useEffect(() => {
+    const id = props.selectedId || props.currentId;
+    if (!id) return;
+    const el = document.querySelector(`[data-branch-id="${CSS.escape(id)}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [props.selectedId, props.currentId, props.nodes]);
+
   const render = (n: BranchNode, depth: number): ReactNode => {
     const kids = byParent.get(n.id) ?? [];
-    const active = n.id === props.currentId;
+    const current = n.id === props.currentId;
+    const selected = n.id === props.selectedId;
+    const label = shortTitleFrom(n.label || "", n.id.slice(0, 8));
     return (
       <div key={n.id}>
         <button
           type="button"
+          data-branch-id={n.id}
           onClick={() => props.onSelect(n.id)}
           className={`flex w-full items-center gap-1.5 rounded-[6px] px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-hover ${
-            active ? "bg-accent-soft text-accent-deep" : "text-ink"
+            selected ? "bg-accent-soft text-accent-deep" : "text-ink"
           }`}
           style={{ paddingLeft: 8 + depth * 12 }}
         >
           <span className="shrink-0 text-ink-faint">{kids.length ? "▾" : "·"}</span>
-          <span className="min-w-0 flex-1 truncate font-medium">
-            {n.label || shortTitleFrom("", n.id.slice(0, 8))}
-          </span>
+          <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+          {current && (
+            <span className="shrink-0 rounded bg-ink/8 px-1 text-[10px] text-ink-faint">当前</span>
+          )}
           <span className="shrink-0 tabular-nums text-[11px] text-ink-faint">
             {fmtDateTime(n.createdAt)}
           </span>
-          {active && <span className="shrink-0 text-[10px] text-accent-deep">当前</span>}
         </button>
         {kids.map((c) => render(c, depth + 1))}
       </div>
@@ -184,6 +233,8 @@ const COL_LEFT_MIN = 140;
 const COL_LEFT_MAX = 360;
 const COL_RIGHT_MIN = 280;
 const COL_RIGHT_MAX = 560;
+/** 资源侧栏最窄宽度（单栏：工具栏 + 预览 + 信息） */
+const DRAWER_MIN = 360;
 
 
 export default function CreateWorksPanel() {
@@ -214,11 +265,15 @@ export default function CreateWorksPanel() {
   const [dirty, setDirty] = useState(false);
   const [branches, setBranches] = useState<BranchNode[]>([]);
   const [draftMenuOpen, setDraftMenuOpen] = useState(false);
+  const [previewDraftId, setPreviewDraftId] = useState<string | null>(null);
+  const [previewDraftContent, setPreviewDraftContent] = useState("");
   const [editorMode, setEditorMode] = useState<"preview" | "source">("preview");
 
   const [resources, setResources] = useState<ResourceItem[]>([]);
   const [resRevision, setResRevision] = useState(0);
   const [selectedRes, setSelectedRes] = useState<string | null>(null);
+  const [resSidebarOpen, setResSidebarOpen] = useState(false);
+  const [resSidebarMode, setResSidebarMode] = useState<"add" | "preview">("preview");
   const [resNote, setResNote] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -232,10 +287,62 @@ export default function CreateWorksPanel() {
   const [agentBusy, setAgentBusy] = useState(false);
   const [leftW, setLeftW] = useState(200);
   const [rightW, setRightW] = useState(360);
+  const [drawerPaneW, setDrawerPaneW] = useState<number | null>(null);
+  const [shellEl, setShellEl] = useState<HTMLElement | null>(null);
+  const [shellH, setShellH] = useState(0);
+  const [colDragging, setColDragging] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const draftMenuRef = useRef<HTMLDivElement>(null);
-  const colDragRef = useRef<null | { which: "left" | "right"; startX: number; startW: number }>(null);
+  const drawerColRef = useRef<HTMLDivElement>(null);
+  const drawerWRef = useRef(720);
+  const colDragRef = useRef<null | {
+    which: "left" | "right" | "drawer";
+    startX: number;
+    startW: number;
+  }>(null);
+
+  // 挂到 layout 的 <main>：比作品面板再外一层，覆盖 Topbar + 整块内容壳
+  useEffect(() => {
+    const el = document.querySelector("main");
+    setShellEl(el);
+    if (!el) return;
+    const sync = () => setShellH(el.clientHeight);
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // 默认侧栏宽度：避开常见移动断点，且可拖
+  useEffect(() => {
+    if (!resSidebarOpen || !shellEl) return;
+    const mainW = shellEl.clientWidth;
+    const w = Math.min(
+      Math.round(mainW * 0.72),
+      Math.max(DRAWER_MIN, Math.min(mainW - 48, 960)),
+    );
+    setDrawerPaneW(w);
+    drawerWRef.current = w;
+  }, [resSidebarOpen, shellEl, shellH]);
+
+  const closeResSidebar = useCallback(() => {
+    setResSidebarOpen(false);
+    setSelectedRes(null);
+    setResSidebarMode("preview");
+  }, []);
+
+  const openResAdd = useCallback(() => {
+    setSelectedRes(null);
+    setResSidebarMode("add");
+    setResSidebarOpen(true);
+  }, []);
+
+  const openResPreview = useCallback((id: string) => {
+    setSelectedRes(id);
+    setResSidebarMode("preview");
+    setResSidebarOpen(true);
+  }, []);
 
   const current = useMemo(
     () => works.find((w) => w.id === currentId) ?? null,
@@ -290,6 +397,53 @@ export default function CreateWorksPanel() {
     }
   }, [currentId, loadDraft, loadScopeMessages]);
 
+  useEffect(() => {
+    if (!draftMenuOpen || !currentId || !previewDraftId) {
+      if (!previewDraftId) setPreviewDraftContent("");
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      const d = await fetch(
+        `/api/work/${currentId}/draft?draftId=${encodeURIComponent(previewDraftId)}`,
+      ).then((x) => x.json());
+      if (alive) setPreviewDraftContent(d.content || "");
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [draftMenuOpen, currentId, previewDraftId]);
+
+  useEffect(() => {
+    if (draftMenuOpen && draftId) {
+      setPreviewDraftId(draftId);
+    } else if (!draftMenuOpen) {
+      setPreviewDraftId(null);
+      setPreviewDraftContent("");
+    }
+  }, [draftMenuOpen, draftId]);
+
+  // 文章下拉打开时默认预览当前作品，并滚到可见
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const fallback =
+      currentId ||
+      library.rootWorkIds[0] ||
+      library.folders.find((f) => f.workIds.length)?.workIds[0] ||
+      null;
+    if (fallback) void previewWork(fallback);
+  }, [pickerOpen]); // eslint-disable-line react-hooks/exhaustive-deps -- 仅在打开时定位
+
+  useEffect(() => {
+    if (!pickerOpen || !previewId) return;
+    const t = window.setTimeout(() => {
+      document
+        .querySelector(`[data-work-id="${CSS.escape(previewId)}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [pickerOpen, previewId]);
+
   // 点击空白关闭下拉
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -304,14 +458,12 @@ export default function CreateWorksPanel() {
   }, [pickerOpen, draftMenuOpen]);
 
   useEffect(() => {
-    if (!currentId) return;
-    if (selectedRes) {
-      setResNote(resources.find((r) => r.id === selectedRes)?.note || "");
-      void loadScopeMessages("resource", { resourceId: selectedRes });
-    } else {
-      void loadScopeMessages("draft");
+    if (!selectedRes) {
+      setResNote("");
+      return;
     }
-  }, [selectedRes, currentId, loadScopeMessages, resources]);
+    setResNote(resources.find((r) => r.id === selectedRes)?.note || "");
+  }, [selectedRes, resources]);
 
   // 与本地 Agent 共用连接态
   const refreshAgentStatus = useCallback(async () => {
@@ -338,14 +490,24 @@ export default function CreateWorksPanel() {
       const delta = e.clientX - d.startX;
       if (d.which === "left") {
         setLeftW(Math.min(COL_LEFT_MAX, Math.max(COL_LEFT_MIN, d.startW + delta)));
-      } else {
+      } else if (d.which === "right") {
         setRightW(Math.min(COL_RIGHT_MAX, Math.max(COL_RIGHT_MIN, d.startW - delta)));
+      } else {
+        // 侧栏整体宽度：左缘拖动；直接改 DOM，避免每帧 setState
+        const mainW = drawerColRef.current?.parentElement?.clientWidth ?? 1200;
+        const max = Math.max(DRAWER_MIN, mainW - 48);
+        const w = Math.min(max, Math.max(DRAWER_MIN, d.startW - delta));
+        drawerWRef.current = w;
+        if (drawerColRef.current) drawerColRef.current.style.width = `${w}px`;
       }
     };
     const onUp = () => {
+      const d = colDragRef.current;
       colDragRef.current = null;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      setColDragging(false);
+      if (d?.which === "drawer") setDrawerPaneW(drawerWRef.current);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -390,7 +552,7 @@ export default function CreateWorksPanel() {
     if (dirty && !window.confirm("当前稿件未保存，切换将丢弃未保存修改。继续？")) return;
     setCurrentId(id);
     setPickerOpen(false);
-    setSelectedRes(null);
+    closeResSidebar();
   };
 
   const createWork = async () => {
@@ -453,15 +615,17 @@ export default function CreateWorksPanel() {
     await loadDraft(currentId);
   };
 
-  const submitUrl = async () => {
-    if (!currentId || !urlValue.trim()) return;
+  const submitUrl = async (urlArg?: string, nameArg?: string) => {
+    const url = (urlArg ?? urlValue).trim();
+    const name = (nameArg ?? urlName).trim();
+    if (!currentId || !url) return;
     const res = await fetch(`/api/work/${currentId}/resources`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         kind: "url",
-        url: urlValue.trim(),
-        name: urlName.trim() || urlValue.trim(),
+        url,
+        name: name || url,
         baseRevision: resRevision,
       }),
     });
@@ -470,16 +634,22 @@ export default function CreateWorksPanel() {
       setStatus(j.error || "添加失败");
       return;
     }
-    setResources(j.file.items);
+    const items = (j.file.items ?? []) as ResourceItem[];
+    setResources(items);
     setResRevision(j.file.revision);
     setUrlOpen(false);
     setUrlValue("");
     setUrlName("");
     setStatus("已添加链接");
+    const added =
+      items.find((x) => x.url === url) ||
+      [...items].reverse().find((x) => x.kind === "url");
+    if (added) openResPreview(added.id);
   };
 
   const onDropFiles = async (files: FileList | null) => {
     if (!currentId || !files?.length) return;
+    let lastId: string | null = null;
     for (const file of Array.from(files)) {
       const fd = new FormData();
       fd.append("file", file);
@@ -490,9 +660,15 @@ export default function CreateWorksPanel() {
         setStatus(j.error || `${file.name} 上传失败`);
         continue;
       }
-      setResources(j.file.items);
+      const items = (j.file.items ?? []) as ResourceItem[];
+      setResources(items);
       setResRevision(j.file.revision);
+      const hit =
+        items.find((x) => x.name === file.name) ||
+        [...items].reverse().find((x) => x.kind !== "url");
+      if (hit) lastId = hit.id;
     }
+    if (lastId && resSidebarOpen) openResPreview(lastId);
   };
 
   const saveResNote = async () => {
@@ -525,23 +701,48 @@ export default function CreateWorksPanel() {
     }
     setResources(j.file.items);
     setResRevision(j.file.revision);
-    if (selectedRes === rid) setSelectedRes(null);
+    if (selectedRes === rid) closeResSidebar();
   };
 
   const sendAgent = async () => {
     if (!currentId || !input.trim() || running) return;
-    const scope = selectedRes ? "resource" : "draft";
-    const cap = selectedRes
-      ? resources.find((r) => r.id === selectedRes)?.kind === "url"
-        ? "analyze-url"
-        : "resource-note"
-      : capability;
+    if (agentPhase !== "connected") {
+      setStatus("请先连接 ACP");
+      return;
+    }
+    const scope = "draft";
+    const cap = capability;
 
     setRunning(true);
-    setStatus("");
+    setStatus("发送中…");
     const userText = input.trim();
     setInput("");
-    setMsgs((prev) => [...prev, { role: "user", text: userText, ts: Date.now() }]);
+    const startedAt = Date.now();
+    setMsgs((prev) => [
+      ...prev,
+      { role: "user", text: userText, ts: startedAt },
+      {
+        role: "assistant",
+        text: "",
+        ts: startedAt + 1,
+        streaming: true,
+        queued: true,
+        tools: [],
+      },
+    ]);
+
+    const patchAssistant = (fn: (m: CollabMsg) => CollabMsg) => {
+      setMsgs((prev) => {
+        const copy = [...prev];
+        for (let i = copy.length - 1; i >= 0; i--) {
+          if (copy[i].role === "assistant" && copy[i].streaming) {
+            copy[i] = fn(copy[i]);
+            break;
+          }
+        }
+        return copy;
+      });
+    };
 
     const ac = new AbortController();
     abortRef.current = ac;
@@ -554,18 +755,32 @@ export default function CreateWorksPanel() {
           text: userText,
           capability: cap,
           scope,
-          resourceId: selectedRes || undefined,
           draftDirty: dirty,
         }),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        setStatus(j.error || `发送失败 ${res.status}`);
+        const err = j.error || `发送失败 ${res.status}`;
+        setStatus(err);
+        patchAssistant((m) => ({
+          ...m,
+          text: err,
+          error: true,
+          streaming: false,
+          queued: false,
+        }));
         setRunning(false);
         return;
       }
       const reader = res.body?.getReader();
       if (!reader) {
+        patchAssistant((m) => ({
+          ...m,
+          text: "无法读取响应流",
+          error: true,
+          streaming: false,
+          queued: false,
+        }));
         setRunning(false);
         return;
       }
@@ -586,49 +801,192 @@ export default function CreateWorksPanel() {
               text?: string;
               error?: string;
               aheadTitle?: string;
+              tool?: string;
+              state?: string;
+              detail?: string;
+              toolCallId?: string;
             };
-            if (ev.type === "queued") setStatus(`排队中（前序：${ev.aheadTitle || "…"}）`);
-            if (ev.type === "running") setStatus("运行中…");
+            if (ev.type === "queued") {
+              setStatus(`排队中（前序：${ev.aheadTitle || "…"}）`);
+              patchAssistant((m) => ({ ...m, queued: true, streaming: true }));
+            }
+            if (ev.type === "running") {
+              setStatus("运行中…");
+              patchAssistant((m) => ({ ...m, queued: false, streaming: true }));
+            }
+            if (ev.type === "thought") {
+              patchAssistant((m) => ({ ...m, thinking: true, queued: false, streaming: true }));
+            }
+            if (ev.type === "tool" && ev.tool) {
+              const toolEv = {
+                tool: ev.tool,
+                state: ev.state,
+                detail: ev.detail,
+                toolCallId: ev.toolCallId,
+                ts: Date.now(),
+              };
+              patchAssistant((m) => ({
+                ...m,
+                queued: false,
+                thinking: false,
+                streaming: true,
+                tools: [...(m.tools ?? []), toolEv],
+              }));
+              setStatus(`工具：${ev.tool}${ev.state ? ` · ${ev.state}` : ""}`);
+            }
             if (ev.type === "chunk" && ev.text) {
               assistant += ev.text;
-              setMsgs((prev) => {
-                const copy = [...prev];
-                const last = copy[copy.length - 1];
-                if (last?.role === "assistant" && !last.error) {
-                  copy[copy.length - 1] = { ...last, text: assistant, streaming: true };
-                } else {
-                  copy.push({
-                    role: "assistant",
-                    text: assistant,
-                    ts: Date.now(),
-                    streaming: true,
-                  });
-                }
-                return copy;
-              });
+              const textNow = assistant;
+              patchAssistant((m) => ({
+                ...m,
+                text: textNow,
+                thinking: false,
+                queued: false,
+                streaming: true,
+              }));
             }
             if (ev.type === "draft_checkpoint") {
               setStatus("AI 已写入正文并生成新版本");
             }
-            if (ev.type === "error") setStatus(ev.error || "错误");
-            if (ev.type === "done") setStatus("完成");
+            if (ev.type === "error") {
+              const err = ev.error || "错误";
+              setStatus(err);
+              patchAssistant((m) => ({
+                ...m,
+                text: m.text?.trim() ? m.text : err,
+                error: true,
+                streaming: false,
+                queued: false,
+              }));
+            }
+            if (ev.type === "done") {
+              setStatus("完成");
+              patchAssistant((m) => ({
+                ...m,
+                streaming: false,
+                queued: false,
+                thinking: false,
+                text:
+                  m.text?.trim() ||
+                  (m.tools?.length
+                    ? `本轮已完成（调用了 ${[...new Set(m.tools.map((t) => t.tool))].join("、")}）`
+                    : "本轮已完成"),
+              }));
+            }
           } catch {
             /* skip */
           }
         }
       }
-      setMsgs((prev) =>
-        prev.map((m, i) => (i === prev.length - 1 && m.role === "assistant" ? { ...m, streaming: false } : m)),
+      patchAssistant((m) =>
+        m.streaming
+          ? {
+              ...m,
+              streaming: false,
+              queued: false,
+              thinking: false,
+              text:
+                m.text?.trim() ||
+                (m.tools?.length
+                  ? `本轮已完成（调用了 ${[...new Set(m.tools.map((t) => t.tool))].join("、")}）`
+                  : m.text),
+            }
+          : m,
       );
       await loadDraft(currentId);
-      if (selectedRes) {
-        const r = await fetch(`/api/work/${currentId}/resources`).then((x) => x.json());
-        setResources(r.items ?? []);
-        setResRevision(r.revision ?? 0);
-        setResNote(r.items?.find((x: ResourceItem) => x.id === selectedRes)?.note || "");
-      }
     } catch (e) {
-      if ((e as Error).name !== "AbortError") setStatus((e as Error).message);
+      if ((e as Error).name !== "AbortError") {
+        const msg = (e as Error).message;
+        setStatus(msg);
+        patchAssistant((m) => ({
+          ...m,
+          text: msg || "请求中断",
+          error: true,
+          streaming: false,
+          queued: false,
+        }));
+      }
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  };
+
+  /** 资源侧栏「一键解读」：不污染稿件 Agent 对话，只刷新 note */
+  const runInterpret = async (prompt: string) => {
+    if (!currentId || !selectedRes || !prompt.trim() || running) return;
+    if (agentPhase !== "connected") {
+      setStatus("请先连接 ACP");
+      return;
+    }
+    const cap =
+      resources.find((r) => r.id === selectedRes)?.kind === "url"
+        ? "analyze-url"
+        : "resource-note";
+
+    setRunning(true);
+    setStatus("解读中…");
+    const ac = new AbortController();
+    abortRef.current = ac;
+    try {
+      const res = await fetch(`/api/work/${currentId}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: ac.signal,
+        body: JSON.stringify({
+          text: prompt.trim(),
+          capability: cap,
+          scope: "resource",
+          resourceId: selectedRes,
+          draftDirty: dirty,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setStatus(j.error || `解读失败 ${res.status}`);
+        return;
+      }
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setStatus("无法读取响应流");
+        return;
+      }
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim() || line.startsWith(" ")) continue;
+          try {
+            const ev = JSON.parse(line) as {
+              type: string;
+              error?: string;
+              aheadTitle?: string;
+              tool?: string;
+              state?: string;
+            };
+            if (ev.type === "queued") setStatus(`排队中（前序：${ev.aheadTitle || "…"}）`);
+            if (ev.type === "running") setStatus("解读中…");
+            if (ev.type === "tool" && ev.tool) {
+              setStatus(`工具：${ev.tool}${ev.state ? ` · ${ev.state}` : ""}`);
+            }
+            if (ev.type === "error") setStatus(ev.error || "解读出错");
+            if (ev.type === "done") setStatus("解读完成，已尝试写入 note");
+          } catch {
+            /* skip */
+          }
+        }
+      }
+      const r = await fetch(`/api/work/${currentId}/resources`).then((x) => x.json());
+      setResources(r.items ?? []);
+      setResRevision(r.revision ?? 0);
+      setResNote(r.items?.find((x: ResourceItem) => x.id === selectedRes)?.note || "");
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") setStatus((e as Error).message || "解读中断");
     } finally {
       setRunning(false);
       abortRef.current = null;
@@ -694,23 +1052,106 @@ export default function CreateWorksPanel() {
 
   const selectedResource = resources.find((r) => r.id === selectedRes) ?? null;
   const draftLabel = draftTriggerLabel(branches, draftId, content);
+  const dropdownH = shellH > 0 ? Math.round(shellH * 0.7) : undefined;
+
+  const draftPicker = (
+    <div className="relative min-w-0 max-w-[min(320px,42vw)]" ref={draftMenuRef}>
+      <button
+        type="button"
+        className="flex max-w-full items-center gap-1 truncate rounded-[6px] border border-line bg-page px-2.5 py-1 text-left text-[12.5px] hover:bg-hover"
+        title={draftLabel}
+        onClick={() => setDraftMenuOpen((v) => !v)}
+      >
+        <span className="min-w-0 flex-1 truncate">当前稿件 · {draftLabel}</span>
+        <span className="shrink-0 text-ink-faint">▾</span>
+      </button>
+      {draftMenuOpen && (
+        <div
+          className={`absolute left-0 top-full z-30 mt-1 flex w-[min(720px,94vw)] overflow-hidden rounded-[12px] border border-line bg-white ${DROP_SHADOW}`}
+          style={dropdownH ? { height: dropdownH } : { maxHeight: "70vh" }}
+        >
+          <div className="w-60 shrink-0 overflow-y-auto overflow-x-hidden border-r border-line bg-white p-2">
+            <div className="px-1.5 py-1 text-[11px] font-medium text-ink-faint">版本树</div>
+            <BranchTreeView
+              nodes={branches}
+              currentId={draftId}
+              selectedId={previewDraftId}
+              onSelect={(id) => setPreviewDraftId(id)}
+            />
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
+            {previewDraftId ? (
+              <>
+                <div className="flex min-w-0 shrink-0 items-baseline gap-2 border-b border-line bg-white px-3 py-2">
+                  <span className="min-w-0 truncate text-[13px] font-semibold text-ink">
+                    {shortTitleFrom(
+                      branches.find((b) => b.id === previewDraftId)?.label || previewDraftContent,
+                      previewDraftId.slice(0, 8),
+                    )}
+                  </span>
+                  <span className="min-w-0 truncate text-[11px] tabular-nums text-ink-faint">
+                    {fmtDateTime(branches.find((b) => b.id === previewDraftId)?.createdAt || 0)}
+                    <span className="mx-1 text-ink-faint/50">·</span>
+                    {countChars(previewDraftContent).toLocaleString("zh-CN")} 字
+                    {previewDraftId === draftId && (
+                      <>
+                        <span className="mx-1 text-ink-faint/50">·</span>
+                        <span className="text-accent-deep">当前</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-white px-4 py-3">
+                  <WorkMdPreview content={previewDraftContent} empty="加载预览…" />
+                </div>
+                <div className="flex justify-end border-t border-line bg-white p-2">
+                  <button
+                    type="button"
+                    disabled={previewDraftId === draftId}
+                    className="rounded-[6px] bg-accent px-3 py-1.5 text-[13px] text-white disabled:opacity-40 hover:bg-accent-deep"
+                    onClick={() => void checkout(previewDraftId)}
+                  >
+                    {previewDraftId === draftId ? "已是当前稿件" : "切换到此版本"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center p-4 text-[12.5px] text-ink-faint">
+                点选左侧版本查看预览
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-page text-ink">
-      {/* 作品条 */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line bg-surface px-3">
-        <div className="relative" ref={pickerRef}>
+      {/* 顶栏：作品创作 + 当前作品下拉 + 右侧新建 */}
+      <div className="flex h-[42px] shrink-0 items-center gap-3 border-b border-line bg-surface px-4">
+        <div className="flex shrink-0 items-center">
+          <span className="text-[14.5px] font-semibold">作品创作</span>
+          <span className="ml-2.5 text-[12.5px] text-ink-faint">创作中心</span>
+        </div>
+
+        <div className="relative min-w-0 w-[min(440px,48vw)]" ref={pickerRef}>
           <button
             type="button"
-            className="rounded-[6px] border border-line bg-page px-3 py-1.5 text-[13px] hover:bg-hover"
+            className="flex w-full items-center gap-2 rounded-[6px] border border-line bg-page px-3 py-1.5 text-[13px] hover:bg-hover"
             onClick={() => setPickerOpen((v) => !v)}
           >
-            {current ? current.title : "选择或新建作品"}
-            <span className="ml-1 text-ink-faint">▾</span>
+            <span className="min-w-0 flex-1 truncate text-left">
+              {current ? current.title : "选择或新建作品"}
+            </span>
+            <span className="shrink-0 text-ink-faint">▾</span>
           </button>
           {pickerOpen && (
-            <div className="absolute left-0 top-full z-40 mt-1 flex max-h-[min(70vh,520px)] w-[min(720px,94vw)] overflow-hidden rounded-[12px] border border-line bg-surface shadow-[0_8px_30px_rgba(28,31,36,0.12)]">
-              <div className="w-60 shrink-0 overflow-y-auto overflow-x-hidden border-r border-line p-2">
+            <div
+              className={`absolute left-0 top-full z-40 mt-1 flex w-[min(720px,94vw)] overflow-hidden rounded-[12px] border border-line bg-white ${DROP_SHADOW}`}
+              style={dropdownH ? { height: dropdownH } : { maxHeight: "70vh" }}
+            >
+              <div className="w-60 shrink-0 overflow-y-auto overflow-x-hidden border-r border-line bg-white p-2">
                 <button
                   type="button"
                   className="mb-2 w-full rounded-[6px] border border-dashed border-line px-2 py-1.5 text-[12px] text-ink-muted hover:bg-hover"
@@ -754,6 +1195,7 @@ export default function CreateWorksPanel() {
                         <div key={wid} className="group flex items-center gap-0.5">
                           <button
                             type="button"
+                            data-work-id={wid}
                             className={`min-w-0 flex-1 truncate rounded-[6px] px-2 py-1.5 text-left text-[13px] hover:bg-hover ${previewId === wid ? "bg-accent-soft text-accent-deep" : ""}`}
                             onClick={() => void previewWork(wid)}
                             onDoubleClick={() => void switchWork(wid)}
@@ -787,6 +1229,7 @@ export default function CreateWorksPanel() {
                     <div key={wid} className="group flex items-center gap-0.5">
                       <button
                         type="button"
+                        data-work-id={wid}
                         className={`min-w-0 flex-1 truncate rounded-[6px] px-2 py-1.5 text-left text-[13px] hover:bg-hover ${previewId === wid ? "bg-accent-soft text-accent-deep" : ""}`}
                         onClick={() => void previewWork(wid)}
                         onDoubleClick={() => void switchWork(wid)}
@@ -811,35 +1254,62 @@ export default function CreateWorksPanel() {
                   );
                 })}
               </div>
-              <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 text-[12.5px] whitespace-pre-wrap break-words text-ink-muted">
-                  {previewId ? previewContent || "（空稿）" : "点选左侧作品预览当前稿"}
-                </div>
-                <div className="flex justify-end border-t border-line p-2">
-                  <button
-                    type="button"
-                    disabled={!previewId}
-                    className="rounded-[6px] bg-accent px-3 py-1.5 text-[13px] text-white disabled:opacity-40 hover:bg-accent-deep"
-                    onClick={() => previewId && void switchWork(previewId)}
-                  >
-                    切换到此作品
-                  </button>
-                </div>
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
+                {previewId ? (
+                  <>
+                    <div className="flex min-w-0 shrink-0 items-baseline gap-2 border-b border-line bg-white px-3 py-2">
+                      <span className="min-w-0 truncate text-[13px] font-semibold text-ink">
+                        {works.find((w) => w.id === previewId)?.title || "作品"}
+                      </span>
+                      <span className="min-w-0 truncate text-[11px] tabular-nums text-ink-faint">
+                        {workFolderPath(library, previewId)}
+                        <span className="mx-1 text-ink-faint/50">·</span>
+                        {fmtDateTime(works.find((w) => w.id === previewId)?.updatedAt || 0)}
+                        <span className="mx-1 text-ink-faint/50">·</span>
+                        {countChars(previewContent).toLocaleString("zh-CN")} 字
+                      </span>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-white px-4 py-3">
+                      <WorkMdPreview content={previewContent} />
+                    </div>
+                    <div className="flex justify-end border-t border-line bg-white p-2">
+                      <button
+                        type="button"
+                        className="rounded-[6px] bg-accent px-3 py-1.5 text-[13px] text-white hover:bg-accent-deep"
+                        onClick={() => void switchWork(previewId)}
+                      >
+                        切换到此作品
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-1 items-center justify-center p-4 text-[12.5px] text-ink-faint">
+                    点选左侧作品预览当前稿
+                  </div>
+                )}
               </div>
             </div>
           )}
         </div>
-        <button
-          type="button"
-          className="rounded-[6px] border border-line px-3 py-1.5 text-[13px] hover:bg-hover"
-          onClick={() => setNewOpen(true)}
-        >
-          新建作品
-        </button>
-        <div className="ml-auto truncate text-[12px] text-ink-faint">{status}</div>
+
+        <div className="ml-auto flex min-w-0 items-center gap-2">
+          {status ? (
+            <span className="max-w-[min(280px,28vw)] truncate text-[12px] text-ink-faint" title={status}>
+              {status}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-[6px] bg-accent px-3 py-1.5 text-[13px] text-white hover:bg-accent-deep"
+            onClick={() => setNewOpen(true)}
+          >
+            <Plus className="h-3.5 w-3.5" strokeWidth={2.25} />
+            新建作品
+          </button>
+        </div>
       </div>
 
-      {/* 工具区：视图 + 稿件（发布视图也保留） */}
+      {/* 工具区：视图 + 稿件 */}
       {current && (
         <div className="flex h-10 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
           <div className="flex overflow-hidden rounded-[7px] border border-line">
@@ -852,10 +1322,10 @@ export default function CreateWorksPanel() {
               <button
                 key={k}
                 type="button"
-                className={`px-3 py-1 text-[12.5px] ${view === k ? "bg-page font-medium text-ink" : "bg-surface-2/50 text-ink-muted"}`}
+                className={`px-3 py-1 text-[12.5px] ${view === k ? "bg-white font-medium text-ink" : "bg-transparent text-ink-muted hover:text-ink"}`}
                 onClick={() => {
                   setView(k);
-                  if (k === "publish") setSelectedRes(null);
+                  if (k === "publish") closeResSidebar();
                 }}
               >
                 {label}
@@ -863,27 +1333,7 @@ export default function CreateWorksPanel() {
             ))}
           </div>
 
-          <div className="relative min-w-0 max-w-[min(420px,46vw)]" ref={draftMenuRef}>
-            <button
-              type="button"
-              className="max-w-full truncate rounded-[6px] border border-line bg-page px-2.5 py-1 text-left text-[12.5px] hover:bg-hover"
-              title={draftLabel}
-              onClick={() => setDraftMenuOpen((v) => !v)}
-            >
-              当前稿件 · {draftLabel}
-              <span className="ml-1 text-ink-faint">▾</span>
-            </button>
-            {draftMenuOpen && (
-              <div className="absolute left-0 top-full z-30 mt-1 max-h-80 w-[min(440px,90vw)] overflow-y-auto overflow-x-hidden rounded-[12px] border border-line bg-surface p-1 shadow-[0_8px_24px_rgba(28,31,36,0.1)]">
-                <div className="px-2 py-1.5 text-[11px] font-medium text-ink-faint">版本树</div>
-                <BranchTreeView
-                  nodes={branches}
-                  currentId={draftId}
-                  onSelect={(id) => void checkout(id)}
-                />
-              </div>
-            )}
-          </div>
+          {draftPicker}
 
           {dirty && <span className="text-[12px] text-up">未保存</span>}
           {running && <span className="text-[12px] text-accent-deep">作品内任务进行中</span>}
@@ -897,9 +1347,10 @@ export default function CreateWorksPanel() {
         <div className="flex flex-1 items-center justify-center">
           <button
             type="button"
-            className="rounded-[6px] bg-accent px-4 py-2 text-[13px] text-white hover:bg-accent-deep"
+            className="inline-flex items-center gap-1.5 rounded-[6px] bg-accent px-4 py-2 text-[13px] text-white hover:bg-accent-deep"
             onClick={() => setNewOpen(true)}
           >
+            <Plus className="h-3.5 w-3.5" strokeWidth={2.25} />
             新建作品
           </button>
         </div>
@@ -923,66 +1374,76 @@ export default function CreateWorksPanel() {
               void onDropFiles(e.dataTransfer.files);
             }}
           >
-            <div className="flex items-center gap-1 border-b border-line px-2 py-1.5">
-              <span className="text-[12px] font-medium text-ink-muted">资源</span>
-              <div className="ml-auto flex gap-0.5">
-                <button
-                  type="button"
-                  className="rounded-[6px] px-1.5 py-0.5 text-[11.5px] text-accent-deep hover:bg-accent-soft"
-                  onClick={() => {
-                    setUrlValue("");
-                    setUrlName("");
-                    setUrlOpen(true);
-                  }}
-                >
-                  + 链接
-                </button>
-                <button
-                  type="button"
-                  className="rounded-[6px] px-1.5 py-0.5 text-[11.5px] text-accent-deep hover:bg-accent-soft"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  + 文件
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  accept=".md,.txt,.markdown,.png,.jpg,.jpeg,.gif,.webp"
-                  multiple
-                  onChange={(e) => {
-                    void onDropFiles(e.target.files);
-                    e.target.value = "";
-                  }}
-                />
-              </div>
+            <div className="flex items-center justify-between gap-1 border-b border-line px-2 py-1.5">
+              <span className="text-[11.5px] font-semibold uppercase tracking-wider text-ink-faint">
+                资源
+              </span>
+              <button
+                type="button"
+                title="添加 / 管理资源"
+                aria-label="打开资源侧栏"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-ink-faint transition-colors hover:bg-black/5 hover:text-ink"
+                onClick={openResAdd}
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                accept=".md,.txt,.markdown,.png,.jpg,.jpeg,.gif,.webp"
+                multiple
+                onChange={(e) => {
+                  void onDropFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
             </div>
-            <div className="min-h-0 flex-1 overflow-auto p-1">
-              {resources.map((r) => (
-                <div
-                  key={r.id}
-                  className={`group flex items-center gap-1 rounded-[6px] px-1.5 py-1.5 hover:bg-hover ${selectedRes === r.id ? "bg-accent-soft" : ""}`}
-                >
-                  <button
-                    type="button"
-                    className="min-w-0 flex-1 truncate text-left text-[12.5px]"
-                    onClick={() => setSelectedRes(r.id)}
-                  >
-                    <span className="mr-1 text-[10px] uppercase text-ink-faint">{r.kind}</span>
-                    {r.name}
-                  </button>
-                  <button
-                    type="button"
-                    className="hidden text-[11px] text-up group-hover:inline"
-                    onClick={() => void deleteRes(r.id)}
-                  >
-                    删
-                  </button>
-                </div>
-              ))}
+            <div className="min-h-0 flex-1 overflow-auto px-2 py-2">
+              <div className="flex flex-col gap-0.5">
+                {resources.map((r) => {
+                  const Icon =
+                    r.kind === "url" ? Link2 : r.kind === "media" ? ImageIcon : FileText;
+                  const active = resSidebarOpen && selectedRes === r.id;
+                  return (
+                    <div
+                      key={r.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => openResPreview(r.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") openResPreview(r.id);
+                      }}
+                      className={`group relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] ${
+                        active
+                          ? "bg-accent-soft font-medium text-accent-deep"
+                          : "text-ink hover:bg-black/5"
+                      }`}
+                      title={r.name}
+                    >
+                      <Icon
+                        className={`h-3.5 w-3.5 shrink-0 ${active ? "text-accent" : "text-ink-faint"}`}
+                      />
+                      <span className="min-w-0 flex-1 truncate">{r.name}</span>
+                      <button
+                        type="button"
+                        title="删除资源"
+                        aria-label={`删除 ${r.name}`}
+                        className="hidden h-5 w-5 shrink-0 items-center justify-center rounded text-ink-faint transition-colors group-hover:flex hover:bg-black/10 hover:text-up"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void deleteRes(r.id);
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
               {!resources.length && (
-                <div className="p-2 text-[12px] leading-relaxed text-ink-faint">
-                  点击「+ 链接 / + 文件」添加，或拖入图片、md、txt
+                <div className="px-1 py-2 text-[11.5px] leading-relaxed text-ink-faint">
+                  点 + 打开侧栏添加，也可拖入图片、md、txt
                 </div>
               )}
             </div>
@@ -1039,10 +1500,10 @@ export default function CreateWorksPanel() {
             }}
           />
 
-          {/* 右：Agent（对齐本地 Agent） */}
+          {/* 右：稿件 Agent */}
           <div className="flex shrink-0 flex-col overflow-hidden" style={{ width: rightW }}>
             <AgentPane
-              title={selectedRes ? "资源协作" : "稿件 Agent"}
+              title="稿件 Agent"
               msgs={msgs}
               input={input}
               setInput={setInput}
@@ -1053,102 +1514,76 @@ export default function CreateWorksPanel() {
               onConnect={() => void connectAgent()}
               onSend={() => void sendAgent()}
               toolbar={
-                !selectedRes ? (
-                  <select
-                    className="rounded-[6px] border border-line bg-page px-1.5 py-0.5 text-[11.5px] text-ink-muted"
-                    value={capability}
-                    onChange={(e) => setCapability(e.target.value as "general" | "edit-draft")}
-                    disabled={running || agentPhase !== "connected"}
-                  >
-                    <option value="general">general</option>
-                    <option value="edit-draft">edit-draft</option>
-                  </select>
-                ) : (
-                  <span className="text-[11px] text-ink-faint">优化 note / 分析链接</span>
-                )
+                <select
+                  className="rounded-[6px] border border-line bg-page px-1.5 py-0.5 text-[11.5px] text-ink-muted"
+                  value={capability}
+                  onChange={(e) => setCapability(e.target.value as "general" | "edit-draft")}
+                  disabled={running || agentPhase !== "connected"}
+                >
+                  <option value="general">general</option>
+                  <option value="edit-draft">edit-draft</option>
+                </select>
               }
             />
           </div>
-          {/* 资源 Agent 协作预览浮层壳 */}
-          {selectedResource && (
-            <div
-              className="absolute inset-0 z-20 flex bg-ink/20 backdrop-blur-[1px]"
-              onMouseDown={(e) => {
-                if (e.target === e.currentTarget) setSelectedRes(null);
-              }}
-            >
-              <div
-                className="m-3 mr-[20px] flex min-h-0 flex-1 overflow-hidden rounded-[12px] border border-line bg-surface shadow-[0_12px_40px_rgba(28,31,36,0.18)]"
-                style={{ marginLeft: leftW + 12 }}
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <div className="flex w-[42%] min-w-[280px] flex-col border-r border-line">
-                  <div className="flex items-center border-b border-line px-3 py-2">
-                    <span className="truncate text-[13px] font-medium">{selectedResource.name}</span>
-                    <button
-                      type="button"
-                      className="ml-auto rounded-[6px] px-2 py-0.5 text-[12px] text-ink-muted hover:bg-hover"
-                      onClick={() => setSelectedRes(null)}
-                    >
-                      关闭
-                    </button>
-                  </div>
-                  <div className="min-h-0 flex-1 overflow-auto p-4 text-[13px]">
-                    <div className="mb-2 text-[11px] uppercase tracking-wide text-ink-faint">
-                      {selectedResource.kind}
-                    </div>
-                    {selectedResource.url ? (
-                      <a
-                        className="break-all text-accent-deep underline"
-                        href={selectedResource.url}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {selectedResource.url}
-                      </a>
-                    ) : (
-                      <p className="font-mono text-[12px] text-ink-muted">
-                        resources/{selectedResource.relativePath}
-                      </p>
-                    )}
-                  </div>
-                  <div className="border-t border-line p-3">
-                    <div className="mb-1 text-[11px] font-medium text-ink-faint">note</div>
-                    <textarea
-                      className="h-28 w-full resize-none rounded-[8px] border border-line bg-page p-2.5 text-[12.5px] outline-none focus:border-accent/50"
-                      value={resNote}
-                      onChange={(e) => setResNote(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="mt-2 rounded-[6px] bg-ink px-2.5 py-1 text-[12px] text-white"
-                      onClick={() => void saveResNote()}
-                    >
-                      保存 note
-                    </button>
-                  </div>
-                </div>
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <AgentPane
-                    title="资源 Agent"
-                    msgs={msgs}
-                    input={input}
-                    setInput={setInput}
-                    running={running}
-                    agentPhase={agentPhase}
-                    agentError={agentError}
-                    agentBusy={agentBusy}
-                    onConnect={() => void connectAgent()}
-                    onSend={() => void sendAgent()}
-                    fill
-                    toolbar={<span className="text-[11px] text-ink-faint">本资源历史轨道</span>}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       )}
+
+      {/* 资源侧栏：添加 / 预览共用；Portal 到 <main> */}
+      {resSidebarOpen &&
+        shellEl &&
+        createPortal(
+          <div className="absolute inset-0 z-50">
+            <div className="absolute inset-0 bg-ink/15" onMouseDown={closeResSidebar} />
+            <div
+              ref={drawerColRef}
+              className={`absolute bottom-0 right-0 top-0 z-10 flex flex-col overflow-hidden rounded-l-[var(--radius-shell)] border border-r-0 border-line bg-white ${DRAWER_SHADOW}`}
+              style={{ width: drawerPaneW ?? "72%" }}
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                title="拖动调整侧栏宽度"
+                className="absolute bottom-0 left-0 top-0 z-30 w-1.5 cursor-col-resize hover:bg-accent/30 active:bg-accent/40"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  drawerWRef.current = drawerPaneW ?? drawerColRef.current?.clientWidth ?? 720;
+                  colDragRef.current = {
+                    which: "drawer",
+                    startX: e.clientX,
+                    startW: drawerWRef.current,
+                  };
+                  setColDragging(true);
+                  document.body.style.cursor = "col-resize";
+                  document.body.style.userSelect = "none";
+                }}
+              >
+                <span className="absolute inset-y-0 -left-1.5 -right-1.5" />
+              </div>
+              <div
+                className={`relative flex min-h-0 flex-1 flex-col overflow-hidden ${colDragging ? "pointer-events-none select-none" : ""}`}
+              >
+                <ResourceSidebar
+                  mode={resSidebarMode === "preview" && selectedResource ? "preview" : "add"}
+                  resource={selectedResource}
+                  resNote={resNote}
+                  setResNote={setResNote}
+                  running={running}
+                  agentPhase={agentPhase}
+                  onClose={closeResSidebar}
+                  onSaveNote={() => void saveResNote()}
+                  onInterpret={(p) => void runInterpret(p)}
+                  onAddUrl={(url, name) => void submitUrl(url, name)}
+                  onPickFiles={() => fileInputRef.current?.click()}
+                />
+              </div>
+              {colDragging && <div className="absolute inset-0 z-20 cursor-col-resize" />}
+            </div>
+          </div>,
+          shellEl,
+        )}
 
       {/* 新建作品 */}
       {newOpen && (
@@ -1356,6 +1791,35 @@ function Modal({
   );
 }
 
+function WorkToolStrip({ m }: { m: CollabMsg }) {
+  const tools = m.tools ?? [];
+  if (!tools.length && !m.streaming) return null;
+  const last = tools[tools.length - 1];
+  const unique = [...new Set(tools.map((t) => t.tool))].join("、") || "任务";
+  const label = m.queued
+    ? "等待前序任务…"
+    : m.streaming
+      ? last
+        ? `${last.tool}${last.state ? ` · ${last.state}` : ""}`
+        : m.thinking
+          ? "思考中…"
+          : "任务运行中…"
+      : unique;
+  return (
+    <div className="mb-1.5 flex min-h-[22px] w-full items-center gap-2 overflow-hidden rounded-md bg-black/[0.03] px-2.5 py-1 text-[11.5px] text-ink-muted">
+      <span
+        className={`shrink-0 rounded px-1.5 py-px font-medium ${
+          m.queued || m.streaming ? "bg-accent-soft text-accent-deep" : "bg-black/[0.04] text-ink-muted"
+        }`}
+      >
+        {m.queued ? "排队中" : m.streaming ? "正在执行" : "已处理"}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {tools.length > 0 && <span className="shrink-0 tabular-nums">{tools.length} 步</span>}
+    </div>
+  );
+}
+
 function AgentPane(props: {
   title: string;
   msgs: CollabMsg[];
@@ -1373,12 +1837,21 @@ function AgentPane(props: {
   const pm = PHASE_META[props.agentPhase];
   const connected = props.agentPhase === "connected";
   const canSend = connected && !props.running && !!props.input.trim();
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [props.msgs, props.running]);
 
   return (
     <div
-      className={`flex h-full min-h-0 flex-col overflow-hidden bg-surface ${props.fill ? "min-h-0 flex-1" : ""}`}
+      className={`flex h-full min-h-0 flex-col overflow-hidden ${props.fill ? "min-h-0 flex-1 bg-white" : "bg-surface"}`}
     >
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-surface px-3">
+      <div
+        className={`flex h-10 shrink-0 items-center gap-2 border-b border-line px-3 ${props.fill ? "bg-white" : "bg-surface"}`}
+      >
         <span className="text-[12.5px] font-medium text-ink-muted">{props.title}</span>
         <span
           className={`ml-auto inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] ${pm.color}`}
@@ -1388,15 +1861,19 @@ function AgentPane(props: {
           {pm.label}
         </span>
         {props.running && (
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+          <span className="inline-flex items-center gap-1 rounded-full border border-accent/25 bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent-deep">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+            </span>
+            运行中
           </span>
         )}
       </div>
       <div
+        ref={listRef}
         className={`min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden px-3 py-3 ${
-          props.running ? "bg-accent-soft/30" : "bg-surface"
+          props.running ? "bg-accent-soft/25" : props.fill ? "bg-white" : "bg-surface"
         }`}
       >
         {!props.msgs.length && (
@@ -1437,24 +1914,40 @@ function AgentPane(props: {
                 <div className="flex items-center gap-1.5 px-0.5">
                   <span className="text-[11px] font-medium text-ink-muted">作品 Agent</span>
                   <span className="text-[10px] tabular-nums text-ink-faint">{fmtClock(m.ts)}</span>
-                  {m.streaming && <span className="text-[11px] text-accent">正在生成…</span>}
+                  {m.streaming && (
+                    <span className="text-[11px] text-accent">
+                      {m.queued ? "排队中…" : m.thinking ? "思考中…" : "正在生成…"}
+                    </span>
+                  )}
                 </div>
+                <WorkToolStrip m={m} />
                 <div
                   className={`inline-block max-w-full rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed shadow-[0_1px_2px_rgba(28,31,36,0.04)] whitespace-pre-wrap break-words ${
                     m.error ? "border border-up/40 bg-up-soft text-up" : "bg-page text-ink"
                   }`}
                 >
-                  {m.text || (m.streaming ? "▍" : "…")}
-                  {m.streaming ? <span className="animate-pulse">▍</span> : null}
+                  {m.text ? (
+                    <>
+                      {m.text}
+                      {m.streaming && !m.queued ? <span className="animate-pulse">▍</span> : null}
+                    </>
+                  ) : m.streaming ? (
+                    <span className="text-ink-faint">
+                      {m.queued ? "排队等待中…" : m.tools?.length ? "工具执行中…" : "▍"}
+                      {!m.queued ? <span className="animate-pulse">▍</span> : null}
+                    </span>
+                  ) : (
+                    "…"
+                  )}
                 </div>
               </div>
             </div>
           ),
         )}
       </div>
-      <div className="border-t border-line bg-surface px-3 py-3">
+      <div className={`border-t border-line px-3 py-3 ${props.fill ? "bg-white" : "bg-surface"}`}>
         {!connected ? (
-          <div className="flex items-center gap-2 rounded-2xl border border-dashed border-line bg-page px-3 py-3">
+          <div className="flex items-center gap-2 rounded-2xl border border-dashed border-line bg-white px-3 py-3">
             <span className="min-w-0 flex-1 text-[12.5px] text-ink-muted">
               {props.agentError || "未连接网关，无法发送"}
             </span>

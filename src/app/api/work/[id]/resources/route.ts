@@ -1,16 +1,37 @@
-import { getWork } from "@/infrastructure/agent-work";
+import path from "path";
+import { getWork, workDirOf } from "@/infrastructure/agent-work";
 import {
   addFileBufferResource,
   addUrlResource,
   readResources,
+  type ResourceItem,
+  type ResourcesFile,
 } from "@/infrastructure/agent-work/resource-service";
 
 type Ctx = { params: Promise<{ id: string }> };
 
+type ResourceItemWithPath = ResourceItem & { absolutePath: string | null };
+
+function withAbsolutePaths(workId: string, file: ResourcesFile): {
+  version: 1;
+  revision: number;
+  items: ResourceItemWithPath[];
+} {
+  const resRoot = path.join(workDirOf(workId), "resources");
+  return {
+    version: 1,
+    revision: file.revision,
+    items: file.items.map((item) => ({
+      ...item,
+      absolutePath: item.relativePath ? path.join(resRoot, item.relativePath) : null,
+    })),
+  };
+}
+
 export async function GET(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getWork(id)) return Response.json({ error: "作品不存在" }, { status: 404 });
-  return Response.json(readResources(id));
+  return Response.json(withAbsolutePaths(id, readResources(id)));
 }
 
 export async function POST(req: Request, ctx: Ctx) {
@@ -46,7 +67,10 @@ export async function POST(req: Request, ctx: Ctx) {
             : 400;
       return Response.json({ error: result.message, code: result.code }, { status });
     }
-    return Response.json(result, { status: 201 });
+    return Response.json(
+      { ...result, file: withAbsolutePaths(id, result.file) },
+      { status: 201 },
+    );
   }
 
   const body = (await req.json()) as {
@@ -67,7 +91,10 @@ export async function POST(req: Request, ctx: Ctx) {
       const status = result.code === "resource_conflict" ? 409 : 400;
       return Response.json({ error: result.message, code: result.code }, { status });
     }
-    return Response.json(result, { status: 201 });
+    return Response.json(
+      { ...result, file: withAbsolutePaths(id, result.file) },
+      { status: 201 },
+    );
   }
   return Response.json({ error: "请提供 url 或 multipart file" }, { status: 400 });
 }
