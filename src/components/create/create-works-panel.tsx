@@ -154,17 +154,46 @@ function buildBranchTree(nodes: BranchNode[]) {
   return byParent;
 }
 
+/** git 风格布局：主链同轨；仅分叉占新轨，避免深度缩进把标签挤没 */
+function layoutBranchRail(nodes: BranchNode[]): {
+  node: BranchNode;
+  lane: number;
+  parentLane: number | null;
+}[] {
+  const byParent = buildBranchTree(nodes);
+  const rows: { node: BranchNode; lane: number; parentLane: number | null }[] = [];
+  let nextLane = 1;
+
+  const walk = (n: BranchNode, lane: number, parentLane: number | null) => {
+    rows.push({ node: n, lane, parentLane });
+    const kids = byParent.get(n.id) ?? [];
+    kids.forEach((kid, i) => {
+      const isLast = i === kids.length - 1;
+      const kidLane = isLast ? lane : nextLane++;
+      walk(kid, kidLane, lane);
+    });
+  };
+
+  for (const root of byParent.get(null) ?? []) {
+    walk(root, 0, null);
+  }
+  return rows;
+}
+
 const DROP_SHADOW = "shadow-[0_16px_48px_rgba(28,31,36,0.22)]";
 const DRAWER_SHADOW = "shadow-[-12px_0_40px_rgba(28,31,36,0.18),0_8px_32px_rgba(28,31,36,0.1)]";
+const RAIL_LANE_W = 14;
 
 function BranchTreeView(props: {
   nodes: BranchNode[];
   currentId: string;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onDelete?: (id: string) => void;
 }) {
-  const byParent = useMemo(() => buildBranchTree(props.nodes), [props.nodes]);
-  const roots = byParent.get(null) ?? [];
+  const rows = useMemo(() => layoutBranchRail(props.nodes), [props.nodes]);
+  const maxLane = useMemo(() => rows.reduce((m, r) => Math.max(m, r.lane), 0), [rows]);
+  const railW = 18 + maxLane * RAIL_LANE_W;
 
   useEffect(() => {
     const id = props.selectedId || props.currentId;
@@ -173,40 +202,112 @@ function BranchTreeView(props: {
     el?.scrollIntoView({ block: "nearest" });
   }, [props.selectedId, props.currentId, props.nodes]);
 
-  const render = (n: BranchNode, depth: number): ReactNode => {
-    const kids = byParent.get(n.id) ?? [];
-    const current = n.id === props.currentId;
-    const selected = n.id === props.selectedId;
-    const label = shortTitleFrom(n.label || "", n.id.slice(0, 8));
-    return (
-      <div key={n.id}>
-        <button
-          type="button"
-          data-branch-id={n.id}
-          onClick={() => props.onSelect(n.id)}
-          className={`flex w-full items-center gap-1.5 rounded-[6px] px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-hover ${
-            selected ? "bg-accent-soft text-accent-deep" : "text-ink"
-          }`}
-          style={{ paddingLeft: 8 + depth * 12 }}
-        >
-          <span className="shrink-0 text-ink-faint">{kids.length ? "▾" : "·"}</span>
-          <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
-          {current && (
-            <span className="shrink-0 rounded bg-ink/8 px-1 text-[10px] text-ink-faint">当前</span>
-          )}
-          <span className="shrink-0 tabular-nums text-[11px] text-ink-faint">
-            {fmtDateTime(n.createdAt)}
-          </span>
-        </button>
-        {kids.map((c) => render(c, depth + 1))}
-      </div>
-    );
-  };
-
   if (!props.nodes.length) {
     return <div className="px-2 py-3 text-[12px] text-ink-faint">暂无版本</div>;
   }
-  return <div className="overflow-x-hidden py-1">{roots.map((r) => render(r, 0))}</div>;
+
+  return (
+    <div className="py-1">
+      {rows.map((row, idx) => {
+        const { node: n, lane, parentLane } = row;
+        const current = n.id === props.currentId;
+        const selected = n.id === props.selectedId;
+        const label = shortTitleFrom(n.label || "", n.id.slice(0, 8));
+        const next = rows[idx + 1];
+        const continueLane = next && next.lane === lane;
+        const canDelete = props.nodes.length > 1 && !!props.onDelete;
+        const forkFrom = parentLane !== null && parentLane !== lane ? parentLane : null;
+
+        return (
+          <div
+            key={n.id}
+            data-branch-id={n.id}
+            className={`group relative flex w-full items-stretch rounded-[6px] transition-colors hover:bg-hover ${
+              selected ? "bg-accent-soft" : ""
+            }`}
+          >
+            <div className="relative shrink-0" style={{ width: railW }} aria-hidden>
+              {idx > 0 && (
+                <span
+                  className="absolute bg-line"
+                  style={{
+                    left: 7 + lane * RAIL_LANE_W,
+                    top: 0,
+                    width: 1.5,
+                    height: "50%",
+                  }}
+                />
+              )}
+              {continueLane && (
+                <span
+                  className="absolute bg-line"
+                  style={{
+                    left: 7 + lane * RAIL_LANE_W,
+                    top: "50%",
+                    width: 1.5,
+                    height: "50%",
+                  }}
+                />
+              )}
+              {forkFrom !== null && (
+                <span
+                  className="absolute bg-line"
+                  style={{
+                    left: 7 + Math.min(forkFrom, lane) * RAIL_LANE_W,
+                    top: "50%",
+                    width: Math.abs(lane - forkFrom) * RAIL_LANE_W,
+                    height: 1.5,
+                    transform: "translateY(-50%)",
+                  }}
+                />
+              )}
+              <span
+                className={`absolute top-1/2 z-[1] h-2.5 w-2.5 -translate-y-1/2 rounded-full border-2 ${
+                  current
+                    ? "border-accent bg-accent"
+                    : selected
+                      ? "border-accent bg-white"
+                      : "border-ink-faint bg-white"
+                }`}
+                style={{ left: 3 + lane * RAIL_LANE_W }}
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={() => props.onSelect(n.id)}
+              className={`flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pr-1 text-left text-[12.5px] ${
+                selected ? "text-accent-deep" : "text-ink"
+              }`}
+            >
+              <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+              {current && (
+                <span className="shrink-0 rounded bg-ink/8 px-1 text-[10px] text-ink-faint">当前</span>
+              )}
+              <span className="shrink-0 tabular-nums text-[11px] text-ink-faint">
+                {fmtDateTime(n.createdAt)}
+              </span>
+            </button>
+
+            {canDelete && (
+              <button
+                type="button"
+                title="删除此版本"
+                aria-label={`删除 ${label}`}
+                className="mr-1 hidden h-7 w-7 shrink-0 items-center self-center justify-center rounded text-ink-faint hover:bg-black/10 hover:text-up group-hover:flex"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onDelete?.(n.id);
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 const PHASE_META: Record<AgentPhase, { label: string; color: string; dot: string }> = {
@@ -612,6 +713,40 @@ export default function CreateWorksPanel() {
       return;
     }
     setDraftMenuOpen(false);
+    await loadDraft(currentId);
+  };
+
+  const deleteDraftVersion = async (id: string) => {
+    if (!currentId) return;
+    if (branches.length <= 1) {
+      setStatus("至少保留一个稿件版本");
+      return;
+    }
+    const label = shortTitleFrom(
+      branches.find((b) => b.id === id)?.label || "",
+      id.slice(0, 8),
+    );
+    const isCurrent = id === draftId;
+    const msg = isCurrent
+      ? `删除当前版本「${label}」？子版本会接到上一节点，并自动切到父版本。`
+      : `删除版本「${label}」？其子版本会自动接到上一节点。`;
+    if (!window.confirm(msg)) return;
+    if (isCurrent && dirty && !window.confirm("编辑器有未保存修改，删除当前版本将丢弃。继续？")) {
+      return;
+    }
+    const res = await fetch(
+      `/api/work/${currentId}/draft?draftId=${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setStatus(j.error || "删除失败");
+      return;
+    }
+    setStatus("已删除版本");
+    if (previewDraftId === id) {
+      setPreviewDraftId(j.currentId ?? null);
+    }
     await loadDraft(currentId);
   };
 
@@ -1071,12 +1206,13 @@ export default function CreateWorksPanel() {
           style={dropdownH ? { height: dropdownH } : { maxHeight: "70vh" }}
         >
           <div className="w-60 shrink-0 overflow-y-auto overflow-x-hidden border-r border-line bg-white p-2">
-            <div className="px-1.5 py-1 text-[11px] font-medium text-ink-faint">版本树</div>
+            <div className="px-1.5 py-1 text-[11px] font-medium text-ink-faint">版本演进</div>
             <BranchTreeView
               nodes={branches}
               currentId={draftId}
               selectedId={previewDraftId}
               onSelect={(id) => setPreviewDraftId(id)}
+              onDelete={(id) => void deleteDraftVersion(id)}
             />
           </div>
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
@@ -1104,7 +1240,16 @@ export default function CreateWorksPanel() {
                 <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-white px-4 py-3">
                   <WorkMdPreview content={previewDraftContent} empty="加载预览…" />
                 </div>
-                <div className="flex justify-end border-t border-line bg-white p-2">
+                <div className="flex justify-end gap-2 border-t border-line bg-white p-2">
+                  {previewDraftId && branches.length > 1 && (
+                    <button
+                      type="button"
+                      className="rounded-[6px] border border-line px-3 py-1.5 text-[13px] text-up hover:bg-up-soft"
+                      onClick={() => void deleteDraftVersion(previewDraftId)}
+                    >
+                      删除此版本
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={previewDraftId === draftId}

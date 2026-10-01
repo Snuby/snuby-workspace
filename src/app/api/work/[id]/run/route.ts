@@ -24,6 +24,7 @@ import {
   type WorkCapability,
 } from "@/infrastructure/agent-runtime";
 import {
+  alignLocalSession,
   globalQueueSnapshot,
   isLocalSessionBusy,
   markLogicalSessionAligned,
@@ -136,12 +137,24 @@ export async function POST(req: Request, ctx: Ctx) {
             prevLogical !== null &&
             prevLogical !== taskKey &&
             prevLogical !== workId;
-          const bindingMissing = !work.acpSessionId;
-          const scopeChanged = lastScopeByWork.get(workId) !== scopeKey(ref);
+          const workDir = workDirOf(workId);
+          const prevAcpSid = work.acpSessionId;
 
+          // 作品级 ACP：对齐网关会话并回写 meta，同作品连续对话复用（对齐本地 Agent）
+          const acpSid = await alignLocalSession(taskKey, prevAcpSid, workDir);
+          if (acpSid !== prevAcpSid) {
+            const bound = getWork(workId);
+            if (bound) {
+              bound.acpSessionId = acpSid;
+              writeWorkMeta(bound);
+            }
+            snubyLog("work", `acp bind work=${workId} sid=${acpSid}`);
+          }
+
+          const scopeChanged = lastScopeByWork.get(workId) !== scopeKey(ref);
           const reason: AlignReason = resolveAlignReason({
-            bindingMissing,
-            gatewayRecreated: false, // align 内若重建由后续指纹处理；此处简化
+            bindingMissing: !prevAcpSid,
+            gatewayRecreated: !!prevAcpSid && prevAcpSid !== acpSid,
             switchedTask,
             conventionChanged: false,
             preloadFailed: !!work.preloadFailed,
@@ -161,7 +174,7 @@ export async function POST(req: Request, ctx: Ctx) {
 
           snubyLog(
             "work",
-            `run work=${workId} reason=${reason} scope=${scopeKey(ref)} cap=${capability} setupLen=${bundle.text.length}`,
+            `run work=${workId} reason=${reason} scope=${scopeKey(ref)} cap=${capability} acp=${acpSid.slice(0, 8)} setupLen=${bundle.text.length}`,
           );
 
           const promptText = `${bundle.text}\n\n——\n用户请求：\n${text}`;
@@ -175,7 +188,6 @@ export async function POST(req: Request, ctx: Ctx) {
           });
 
           let assistant = "";
-          const workDir = workDirOf(workId);
 
           await prompt(
             promptText,
@@ -194,7 +206,7 @@ export async function POST(req: Request, ctx: Ctx) {
             },
             {
               localSessionId: taskKey,
-              acpSessionId: work.acpSessionId,
+              acpSessionId: acpSid,
               cwd: workDir,
               inactivityTimeoutMs,
               bypassGlobalQueue: true,
@@ -239,6 +251,7 @@ export async function POST(req: Request, ctx: Ctx) {
           if (fresh) {
             fresh.preloadFailed = false;
             fresh.conventionFp = bundle.conventionFp;
+            fresh.acpSessionId = acpSid;
             writeWorkMeta(fresh);
           }
 

@@ -10,6 +10,7 @@ import {
 import {
   saveDraft,
   checkoutDraft,
+  deleteDraft,
   getCurrentDraft,
   readBranches,
   sha1Of,
@@ -69,6 +70,44 @@ test("draft save / unchanged / branch / checkout", () => {
     assert.equal(fork.parentId, cur.draftId);
   }
   void after;
+});
+
+test("draft delete reparents children and moves current", () => {
+  const w = createWork({ title: "删版" });
+  const root = getCurrentDraft(w.id)!;
+  const a = saveDraft(w.id, "# a\n", {
+    draftId: root.draftId,
+    contentSha1: root.contentSha1,
+  });
+  assert.ok(a.ok && !a.unchanged);
+  const midId = a.ok && !a.unchanged ? a.draftId : "";
+  const b = saveDraft(w.id, "# b\n", {
+    draftId: midId,
+    contentSha1: sha1Of("# a\n"),
+  });
+  assert.ok(b.ok && !b.unchanged);
+  const tipId = b.ok && !b.unchanged ? b.draftId : "";
+  assert.equal(readBranches(w.id)?.nodes.length, 3);
+
+  const del = deleteDraft(w.id, midId);
+  assert.ok(del.ok);
+  if (!del.ok) return;
+  assert.equal(del.reparented.includes(tipId), true);
+  const nodes = del.branches.nodes;
+  assert.equal(nodes.length, 2);
+  const tip = nodes.find((n) => n.id === tipId);
+  assert.equal(tip?.parentId, root.draftId);
+  assert.equal(getCurrentDraft(w.id)?.draftId, tipId);
+
+  const delCur = deleteDraft(w.id, tipId);
+  assert.ok(delCur.ok);
+  if (!delCur.ok) return;
+  assert.equal(delCur.currentId, root.draftId);
+  assert.equal(readBranches(w.id)?.nodes.length, 1);
+
+  const last = deleteDraft(w.id, root.draftId);
+  assert.equal(last.ok, false);
+  if (!last.ok) assert.equal(last.code, "last_draft");
 });
 
 test("resources whitelist + revision", () => {

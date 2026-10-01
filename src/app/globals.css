@@ -157,3 +157,103 @@ body {
 .prose-work h3:first-child {
   margin-top: 0;
 }
+
+/* 作品创作 · MDXEditor 嵌入样式 */
+.work-mdx-editor .mdxeditor {
+  --basePageBg: var(--color-surface, #fff);
+  --baseBg: var(--color-surface, #fff);
+  --baseBgSubtle: var(--color-page, #f7f7f8);
+  --baseBorder: var(--color-line);
+  --baseText: var(--color-ink);
+  --baseTextContrast: var(--color-ink);
+  --accentText: var(--color-accent-deep, #1d4ed8);
+  --accentSolid: var(--color-accent, #3b82f6);
+  font-family: inherit;
+  border: none;
+  border-radius: 0;
+}
+.work-mdx-editor .mdxeditor-toolbar {
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-surface);
+  border-radius: 0;
+  padding: 4px 8px;
+  gap: 2px;
+  min-height: 36px;
+  align-items: center;
+}
+.work-mdx-editor .mdxeditor-root-contenteditable {
+  padding: 0;
+}
+
+/* Lucide 工具栏 / 弹层图标统一尺寸 */
+.mdx-lucide-icon,
+.mdxeditor-popup-container .mdx-lucide-icon,
+.work-mdx-editor .mdx-lucide-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+  flex-shrink: 0;
+}
+
+/* 链接编辑弹层（挂在 body 的 popup container） */
+.mdxeditor-popup-container [class*="linkDialogPopoverContent"],
+.mdxeditor-popup-container [class*="largeDialogContent"],
+.mdxeditor-popup-container [class*="dialogContent"] {
+  border: 1px solid var(--color-line, #e5e7eb) !important;
+  background: #fff !important;
+  border-radius: 10px !important;
+  box-shadow: 0 12px 40px rgba(28, 31, 36, 0.16) !important;
+  filter: none !important;
+  padding: 10px 12px !important;
+  gap: 8px !important;
+  font-size: 13px !important;
+}
+.mdxeditor-popup-container form[class*="multiFieldForm"],
+.mdxeditor-popup-container form[class*="linkDialogEditForm"] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 280px;
+}
+.mdxeditor-popup-container [class*="formField"] label {
+  font-size: 12px;
+  color: var(--color-ink-muted, #6b7280);
+  margin-bottom: 4px;
+}
+.mdxeditor-popup-container input[class*="textInput"],
+.mdxeditor-popup-container [class*="textInput"] {
+  border: 1px solid var(--color-line, #e5e7eb) !important;
+  border-radius: 6px !important;
+  padding: 6px 10px !important;
+  font-size: 13px !important;
+  background: #fff !important;
+  outline: none;
+}
+.mdxeditor-popup-container input[class*="textInput"]:focus,
+.mdxeditor-popup-container [class*="textInput"]:focus {
+  border-color: color-mix(in srgb, var(--color-accent, #3b82f6) 50%, transparent) !important;
+}
+.mdxeditor-popup-container button[class*="primaryButton"] {
+  border-radius: 6px !important;
+  background: var(--color-ink, #1c1f24) !important;
+  color: #fff !important;
+  padding: 6px 12px !important;
+  font-size: 12.5px !important;
+  border: none !important;
+}
+.mdxeditor-popup-container button[class*="secondaryButton"] {
+  border-radius: 6px !important;
+  background: transparent !important;
+  color: var(--color-ink-muted, #6b7280) !important;
+  padding: 6px 12px !important;
+  font-size: 12.5px !important;
+  border: 1px solid var(--color-line, #e5e7eb) !important;
+}
+
+/*
+ * MDXEditor 下拉/链接/表头弹层挂到 body，默认 z-index:2。
+ * TopicHost 常驻壳把页面内容抬到 z-index:10，会盖住弹层，表现为「点了没反应」。
+ */
+.mdxeditor-popup-container {
+  z-index: 200 !important;
+}

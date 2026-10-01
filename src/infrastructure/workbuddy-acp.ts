@@ -15,7 +15,6 @@ import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  clearAllGatewayBindings,
   getAgentPreference,
   getInactivityTimeoutMs,
   getSession,
@@ -23,6 +22,8 @@ import {
   updateSessionGateway,
   workDirOf,
 } from "./agent-session-store";
+import { getWork, writeWorkMeta } from "./agent-work/work-repository";
+import { workIdOf } from "./agent-runtime/keys";
 import { snubyLog } from "./snuby-log";
 
 // —— 类型 ——
@@ -623,12 +624,10 @@ export function resetAgentConnections(): string[] {
   globalQueueActiveKey = null;
   lastError = null;
   resetLogicalSessionMarker();
-  // 网关会话不随 HTTP 连接迁移; 丢掉绑定, 下次发送 session/new + 全量注入
-  try {
-    clearAllGatewayBindings();
-  } catch (e) {
-    acpLog(`clearAllGatewayBindings failed: ${(e as Error).message}`);
-  }
+  // 注意: 不 clearAllGatewayBindings。
+  // HTTP 连接重建后仍应带着磁盘上的 acpSessionId 去 session/load 复用网关会话;
+  // load 失败时 ensureSessionForOn 会 session/new 并回写新绑定。
+  // 若此处清绑定, 每次「连接 ACP」/桌面重启都会迫使所有本地会话与作品重新 session/new。
   return interrupted.filter((k) => k !== "default" && k !== GATEWAY_KEY);
 }
 
@@ -1846,7 +1845,16 @@ function clearPoisonedAcpBinding(key: string, cs: ConnState, sid: string): void 
   if (cs.activeSessionId === sid) cs.activeSessionId = null;
   cs.cancelledSids.delete(sid);
   if (key !== "default") {
-    updateSessionGateway(key, { clearAcpSession: true });
+    const wid = workIdOf(key);
+    if (wid) {
+      const meta = getWork(wid);
+      if (meta?.acpSessionId === sid) {
+        meta.acpSessionId = undefined;
+        writeWorkMeta(meta);
+      }
+    } else {
+      updateSessionGateway(key, { clearAcpSession: true });
+    }
   }
   acpLog(`cleared poisoned acp binding local=${key} acp=${sid}`);
 }

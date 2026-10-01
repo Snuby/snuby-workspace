@@ -1,7 +1,7 @@
 // DraftService：保存 / checkout / 分支图（spec 018）
 
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import path from "path";
 import {
   getWork,
@@ -279,4 +279,84 @@ export function checkpointDiskIfChanged(
   writeWorkMeta(work);
 
   return { ok: true, unchanged: false, draftId, parentId, contentSha1: diskSha1 };
+}
+
+export type DeleteDraftResult =
+  | {
+      ok: true;
+      deletedId: string;
+      currentId: string;
+      reparented: string[];
+      branches: DraftBranches;
+    }
+  | {
+      ok: false;
+      code: "not_found" | "draft_missing" | "last_draft";
+      message: string;
+    };
+
+/**
+ * 删除版本节点：子节点 parentId 接到被删节点的父；若删的是当前指针，则切到父（无父则切到任一子/剩余节点）。
+ */
+export function deleteDraft(workId: string, draftId: string): DeleteDraftResult {
+  const work = getWork(workId);
+  if (!work) return { ok: false, code: "not_found", message: "作品不存在" };
+
+  const branches = readBranches(workId);
+  if (!branches || !branches.nodes.some((n) => n.id === draftId)) {
+    return { ok: false, code: "draft_missing", message: "版本图中无此节点" };
+  }
+  if (branches.nodes.length <= 1) {
+    return { ok: false, code: "last_draft", message: "至少保留一个稿件版本" };
+  }
+
+  const target = branches.nodes.find((n) => n.id === draftId)!;
+  const newParentId = target.parentId;
+  const children = branches.nodes.filter((n) => n.parentId === draftId);
+  const reparented: string[] = [];
+
+  for (const child of children) {
+    child.parentId = newParentId;
+    reparented.push(child.id);
+    const meta = readDraftMeta(workId, child.id);
+    if (meta) {
+      meta.parentId = newParentId;
+      atomicWriteJson(path.join(workDirOf(workId), "drafts", child.id, "draft_meta.json"), meta);
+    }
+  }
+
+  branches.nodes = branches.nodes.filter((n) => n.id !== draftId);
+
+  let nextCurrent = branches.currentId;
+  if (draftId === work.currentDraftId || draftId === branches.currentId) {
+    if (newParentId && branches.nodes.some((n) => n.id === newParentId)) {
+      nextCurrent = newParentId;
+    } else if (reparented[0] && branches.nodes.some((n) => n.id === reparented[0])) {
+      nextCurrent = reparented[0];
+    } else {
+      nextCurrent = branches.nodes[0]!.id;
+    }
+  }
+  branches.currentId = nextCurrent;
+  atomicWriteJson(branchesPath(workId), branches);
+
+  if (work.currentDraftId !== nextCurrent) {
+    work.currentDraftId = nextCurrent;
+    writeWorkMeta(work);
+  }
+
+  const dir = path.join(workDirOf(workId), "drafts", draftId);
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* 图已更新，目录清理失败不回滚 */
+  }
+
+  return {
+    ok: true,
+    deletedId: draftId,
+    currentId: nextCurrent,
+    reparented,
+    branches,
+  };
 }

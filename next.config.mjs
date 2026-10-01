@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const nextConfig = {
   // 固定 workspace 根, 避免上层目录 lockfile 干扰推断
   outputFileTracingRoot: path.resolve(__dirname),
+  transpilePackages: ["@mdxeditor/editor"],
 };
 
 export default nextConfig;

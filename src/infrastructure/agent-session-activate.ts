@@ -5,7 +5,8 @@
 // 2. 同会话连续发送 → 跳过全量; 仍附带短工作区提醒 (防模型迷信进程 cwd)
 // 3. A→B→A 切换后再发送 → 即使 session/load 成功且 fp 未变, 也全量重注入
 //    (实测: load 后 inject skip → Agent 落到 WorkBuddy 临时目录, 找不到产物)
-// 4. 重连 / clearAllGatewayBindings → 绑定清空 → session/new → 全量注入
+// 4. 重连后磁盘仍保留 acpSessionId → session/load 复用; load 失败才 session/new + 全量注入
+//    （进程冷启动 / logical marker 清空时也会全量重注入一次）
 // 5. load 失败重建 → recreated → 全量注入
 // 6. 工作约定变更 → sysPromptFp 变化 → 全量注入
 // 7. 上次注入失败 → sysPromptFailed → 全量重试
@@ -94,13 +95,17 @@ export async function activateLocalSessionUnlocked(
   const prevLogical = peekLogicalSessionMarker();
   // 切换逻辑会话: 即使 load 成功且约定指纹未变, 也必须重注入
   const switchedLogical = prevLogical !== null && prevLogical !== id;
+  // 重连/进程重启后 marker 为空: load 虽可能成功, 仍全量注入一次锚定工作区
+  const afterReconnect = prevLogical === null && !!prevSid && !sessionRecreated;
   const fpMismatch = meta.sysPromptFp !== fp;
   const prevFailed = !!meta.sysPromptFailed;
-  const needInject = sessionRecreated || fpMismatch || prevFailed || switchedLogical;
+  const needInject =
+    sessionRecreated || fpMismatch || prevFailed || switchedLogical || afterReconnect;
   // 排障: 一眼看出为何注入/跳过 (对应设计场景 1–10)
   const reasons = [
     sessionRecreated ? "recreated" : null,
     switchedLogical ? "switched" : null,
+    afterReconnect ? "afterReconnect" : null,
     fpMismatch ? "fpMismatch" : null,
     prevFailed ? "prevFailed" : null,
   ]
