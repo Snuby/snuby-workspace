@@ -7,7 +7,7 @@
     "dev": "next dev --turbopack -p 3310",
     "build": "next build",
     "start": "next start -H 127.0.0.1 -p 3310",
-    "test": "node --import tsx --test src/domain/*.test.ts src/infrastructure/*.test.ts",
+    "test": "node --import tsx --test src/domain/*.test.ts src/infrastructure/*.test.ts src/infrastructure/agent-runtime/*.test.ts src/infrastructure/agent-work/*.test.ts",
     "lint": "next lint",
     "desktop": "npm run build && electron .",
     "dist": "npm run build && electron-builder --mac"
@@ -16,7 +16,9 @@
     "lunar-javascript": "^1.7.7",
     "next": "^15.1.6",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.0.0",

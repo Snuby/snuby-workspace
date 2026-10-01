@@ -203,6 +203,7 @@ function applyDesktopEnv(dataDir) {
   process.env.SNUBY_USER_DATA = dataDir;
   process.env.SITE_TABS_DB_PATH = path.join(dataDir, "site_tabs.db");
   process.env.AGENT_SESSIONS_PATH = path.join(dataDir, "agent-sessions");
+  process.env.AGENT_WORKS_PATH = path.join(dataDir, "agent-works");
   process.chdir(bundledRoot());
 }
 

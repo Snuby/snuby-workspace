@@ -1,8 +1,8 @@
 import { existsSync, statSync } from "fs";
 import { spawn } from "child_process";
 import path from "path";
-import { SESSIONS_ROOT } from "@/infrastructure/agent-session-store";
-import { USER_DATA_ROOT } from "@/infrastructure/user-data-paths";
+import { getSessionsRoot } from "@/infrastructure/agent-session-store";
+import { getUserDataRoot } from "@/infrastructure/user-data-paths";
 
 /**
  * 在系统文件管理器中打开目录, 或定位到文件。
@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "非法路径" }, { status: 400 });
   }
   const resolved = path.resolve(raw);
-  const allowedRoots = [path.resolve(USER_DATA_ROOT), path.resolve(SESSIONS_ROOT)];
+  const allowedRoots = [path.resolve(getUserDataRoot()), path.resolve(getSessionsRoot())];
   if (!allowedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep))) {
     return Response.json({ error: "路径不在允许范围" }, { status: 403 });
   }

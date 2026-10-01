@@ -66,9 +66,38 @@ export type AgentSessionMeta = {
   abortPurged?: boolean;
 };
 
-const ROOT = process.env.AGENT_SESSIONS_PATH ?? userDataPath("agent-sessions");
-export const SESSIONS_ROOT = ROOT;
-const SYSTEM_PROMPT_PATH = path.join(ROOT, "system-prompt.txt");
+function sessionsRoot(): string {
+  return process.env.AGENT_SESSIONS_PATH?.trim() || userDataPath("agent-sessions");
+}
+
+export function getSessionsRoot(): string {
+  return sessionsRoot();
+}
+
+/** @deprecated 请用 getSessionsRoot() */
+export const SESSIONS_ROOT = {
+  toString() {
+    return sessionsRoot();
+  },
+  valueOf() {
+    return sessionsRoot();
+  },
+  [Symbol.toPrimitive]() {
+    return sessionsRoot();
+  },
+} as unknown as string;
+
+function systemPromptPath(): string {
+  return path.join(sessionsRoot(), "system-prompt.txt");
+}
+
+function modelPrefPath(): string {
+  return path.join(sessionsRoot(), "model-preference.json");
+}
+
+function agentPrefPath(): string {
+  return path.join(sessionsRoot(), "agent-preference.json");
+}
 
 /** 默认工作约定 (可编辑; 以普通「工作约定」语气注入, 不自称系统级约束以免被拒) */
 export const DEFAULT_SYSTEM_PROMPT = `我们之间的工作约定（请在每次回复时遵守）：
@@ -81,8 +110,8 @@ export const DEFAULT_SYSTEM_PROMPT = `我们之间的工作约定（请在每次
 
 export function getSystemPrompt(): string {
   try {
-    if (existsSync(SYSTEM_PROMPT_PATH)) {
-      const t = readFileSync(SYSTEM_PROMPT_PATH, "utf8").trim();
+    if (existsSync(systemPromptPath())) {
+      const t = readFileSync(systemPromptPath(), "utf8").trim();
       if (t) return t;
     }
   } catch {
@@ -90,9 +119,6 @@ export function getSystemPrompt(): string {
   }
   return DEFAULT_SYSTEM_PROMPT;
 }
-
-const MODEL_PREF_PATH = path.join(ROOT, "model-preference.json");
-const AGENT_PREF_PATH = path.join(ROOT, "agent-preference.json");
 
 export interface ModelPreference {
   modelId: string;
@@ -138,16 +164,16 @@ export function getInactivityTimeoutMs(): number {
 /** 读取全局 Agent 偏好 (兼容旧 model-preference.json) */
 export function getAgentPreference(): AgentPreference | null {
   try {
-    if (existsSync(AGENT_PREF_PATH)) {
-      const d = JSON.parse(readFileSync(AGENT_PREF_PATH, "utf8")) as AgentPreference;
+    if (existsSync(agentPrefPath())) {
+      const d = JSON.parse(readFileSync(agentPrefPath(), "utf8")) as AgentPreference;
       if (d && typeof d === "object") return d;
     }
   } catch {
     // fall through
   }
   try {
-    if (!existsSync(MODEL_PREF_PATH)) return null;
-    const d = JSON.parse(readFileSync(MODEL_PREF_PATH, "utf8")) as ModelPreference;
+    if (!existsSync(modelPrefPath())) return null;
+    const d = JSON.parse(readFileSync(modelPrefPath(), "utf8")) as ModelPreference;
     if (!d?.modelId) return null;
     return { modelId: d.modelId, modelName: d.name, updatedAt: d.updatedAt };
   } catch {
@@ -162,7 +188,7 @@ export function patchAgentPreference(patch: {
   config?: Partial<Record<"mode" | "thought_level" | "sandbox", string>>;
   inactivityTimeoutMs?: number;
 }): AgentPreference {
-  mkdirSync(ROOT, { recursive: true });
+  mkdirSync(sessionsRoot(), { recursive: true });
   const prev = getAgentPreference() ?? { updatedAt: 0 };
   const next: AgentPreference = {
     modelId: patch.modelId ?? prev.modelId,
@@ -175,11 +201,11 @@ export function patchAgentPreference(patch: {
     updatedAt: Date.now(),
   };
   if (next.config && Object.keys(next.config).length === 0) delete next.config;
-  writeFileSync(AGENT_PREF_PATH, JSON.stringify(next, null, 2), "utf8");
+  writeFileSync(agentPrefPath(), JSON.stringify(next, null, 2), "utf8");
   // 同步旧文件, 避免其他读路径落空
   if (next.modelId) {
     writeFileSync(
-      MODEL_PREF_PATH,
+      modelPrefPath(),
       JSON.stringify({ modelId: next.modelId, name: next.modelName, updatedAt: next.updatedAt }, null, 2),
       "utf8",
     );
@@ -200,16 +226,16 @@ export function setPreferredModel(modelId: string, name?: string): void {
 }
 
 export function setSystemPrompt(text: string): void {
-  mkdirSync(ROOT, { recursive: true });
-  writeFileSync(SYSTEM_PROMPT_PATH, text.trim(), "utf8");
+  mkdirSync(sessionsRoot(), { recursive: true });
+  writeFileSync(systemPromptPath(), text.trim(), "utf8");
 }
 
 function ensureRoot(): string {
-  mkdirSync(ROOT, { recursive: true });
-  return ROOT;
+  mkdirSync(sessionsRoot(), { recursive: true });
+  return sessionsRoot();
 }
 function dirOf(id: string): string {
-  return path.join(ROOT, id);
+  return path.join(sessionsRoot(), id);
 }
 /** 会话工作目录 (= sessions/<id>; 网关 cwd / artifacts 父目录) */
 export function workDirOf(id: string): string {
@@ -238,9 +264,9 @@ function writeMeta(meta: AgentSessionMeta): void {
 export function listSessions(): AgentSessionMeta[] {
   ensureRoot();
   const out: AgentSessionMeta[] = [];
-  for (const name of readdirSync(ROOT)) {
+  for (const name of readdirSync(sessionsRoot())) {
     if (name.startsWith(".")) continue;
-    if (!existsSync(path.join(ROOT, name, "meta.json"))) continue;
+    if (!existsSync(path.join(sessionsRoot(), name, "meta.json"))) continue;
     const meta = readMeta(name);
     if (meta) out.push(meta);
   }
@@ -413,7 +439,7 @@ export function updateSessionGateway(
 export function clearAllGatewayBindings(): number {
   ensureRoot();
   let n = 0;
-  for (const name of readdirSync(ROOT)) {
+  for (const name of readdirSync(sessionsRoot())) {
     if (!existsSync(metaOf(name))) continue;
     const meta = readMeta(name);
     if (!meta) continue;
@@ -499,10 +525,10 @@ export function auditWorkspaceViolations(
       }
     }
   };
-  if (!existsSync(ROOT)) return out;
-  for (const name of readdirSync(ROOT)) {
+  if (!existsSync(sessionsRoot())) return out;
+  for (const name of readdirSync(sessionsRoot())) {
     if (name.startsWith(".") || isBookkeeping(name)) continue;
-    const p = path.join(ROOT, name);
+    const p = path.join(sessionsRoot(), name);
     try {
       if (!statSync(p).isDirectory()) continue;
       if (p === ownWork) continue;
